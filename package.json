@@ -1,0 +1,13 @@
+{
+  "name": "tender-intelligence-demo-v1",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tender monitoring and response drafting demo with Pi Agent orchestration.",
+  "scripts": {
+    "start": "node server.js",
+    "test:agent": "node test-pi-agent.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.4"
+  }
+}

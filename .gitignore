@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Runtime data and generated artifacts
+runtime/
+
+# Local secrets and machine-specific configuration
+agent-config.json
+.env
+.env.*
+!.env.example
+
+# Logs and operating-system files
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,84 @@
+{
+  "company": "濮阳人才服务有限公司",
+  "profile_version": "演示版 V1",
+  "service_regions": ["河南省", "濮阳市", "周边地市协同服务"],
+  "qualifications": [
+    "营业执照",
+    "人力资源服务许可证",
+    "劳务派遣经营许可证",
+    "ISO9001质量管理体系认证",
+    "ISO45001职业健康安全管理体系认证"
+  ],
+  "performances": [
+    {
+      "name": "濮阳市某学校劳务派遣服务项目",
+      "industry": "教育",
+      "type": "劳务派遣",
+      "region": "濮阳市",
+      "countable": true
+    },
+    {
+      "name": "某市人民医院劳务派遣服务项目",
+      "industry": "医院",
+      "type": "劳务派遣",
+      "region": "河南省",
+      "countable": true
+    },
+    {
+      "name": "某国有平台公司驻场服务项目",
+      "industry": "国企",
+      "type": "人力资源服务",
+      "region": "河南省",
+      "countable": true
+    },
+    {
+      "name": "综合医院后勤与保安辅助服务项目",
+      "industry": "医院",
+      "type": "保安服务",
+      "region": "河南省",
+      "countable": true
+    }
+  ],
+  "personnel": [
+    {
+      "role": "项目经理",
+      "count": 2,
+      "experience_years": 6
+    },
+    {
+      "role": "招聘专员",
+      "count": 6,
+      "experience_years": 3
+    },
+    {
+      "role": "现场管理人员",
+      "count": 4,
+      "experience_years": 4
+    },
+    {
+      "role": "薪酬社保专员",
+      "count": 2,
+      "experience_years": 3
+    }
+  ],
+  "capabilities": [
+    "招聘与入职管理",
+    "考勤管理",
+    "薪酬核算",
+    "社保服务",
+    "驻场服务",
+    "投诉处理",
+    "应急响应",
+    "安保服务支持",
+    "校园辅助服务",
+    "医院后勤支持",
+    "国企驻场服务",
+    "投标资料编制"
+  ],
+  "compliance": [
+    "近三年无重大违法违规记录",
+    "近三年无严重失信记录",
+    "支持材料原文、版本号和哈希值留存",
+    "支持电子化招投标底稿导出"
+  ]
+}
