@@ -1,8 +1,17 @@
 # Dependencies
 node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+backend/.venv/
+backend/.deps/
+backend/.mypy_cache/
 
 # Runtime data and generated artifacts
 runtime/
+backend/__pycache__/
+backend/.pytest_cache/
+*.pyc
 
 # Local secrets and machine-specific configuration
 agent-config.json
