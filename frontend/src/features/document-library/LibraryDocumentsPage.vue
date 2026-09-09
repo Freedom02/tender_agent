@@ -115,7 +115,11 @@ function deleteDocument(name: string) {
           <template #default="{ row }">{{ row.savedAt || "2026-09-04" }}</template>
         </el-table-column>
         <el-table-column label="状态" width="100">
-          <template #default><el-tag type="success" size="small">已入库</el-tag></template>
+          <template #default="{ row }">
+            <el-tag :type="row.indexedOnly ? 'warning' : 'success'" size="small">
+              {{ row.indexedOnly ? "已登记待上传" : row.status || "已入库" }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="145" fixed="right">
           <template #default="{ row }">

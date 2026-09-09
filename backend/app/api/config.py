@@ -24,4 +24,15 @@ def create_router(store: Store) -> APIRouter:
     def save_config(payload: ConfigPayload) -> dict[str, Any]:
         return {"config": update_configuration(store, payload.config)}
 
+    @router.post("/ai/test")
+    def test_ai(payload: ConfigPayload) -> dict[str, Any]:
+        configured = dict(store.config.get("ai", {}))
+        incoming = payload.config.get("ai", payload.config)
+        if isinstance(incoming, dict):
+            configured.update(incoming)
+        api_key = str(configured.get("apiKey") or "").strip()
+        if api_key in {"***", "已配置"}:
+            configured["apiKey"] = store.config.get("ai", {}).get("apiKey", "")
+        return store.test_ai_connection(configured)
+
     return router

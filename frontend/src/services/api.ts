@@ -1,4 +1,11 @@
-import type { BootstrapResponse, CatalogItem, MonitoringStatus, Workspace } from "../shared/types";
+import type {
+  BootstrapResponse,
+  CatalogItem,
+  KnowledgeObjectDetail,
+  KnowledgeObjectCollection,
+  MonitoringStatus,
+  Workspace
+} from "../shared/types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -14,6 +21,14 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   bootstrap: () => request<BootstrapResponse>("/api/bootstrap"),
+  knowledgeObjects: (objectType = "", query = "") =>
+    request<{ companyId: string; companyName: string; query: string; collections: KnowledgeObjectCollection[] }>(
+      `/api/company/knowledge/objects?object_type=${encodeURIComponent(objectType)}&q=${encodeURIComponent(query)}`
+    ),
+  knowledgeObjectDetail: (objectType: string, objectId: string) =>
+    request<KnowledgeObjectDetail>(
+      `/api/company/knowledge/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`
+    ),
   search: (payload: Record<string, unknown>) =>
     request<{ items: CatalogItem[]; search: Record<string, unknown> }>("/api/search/realtime", {
       method: "POST",
@@ -59,6 +74,11 @@ export const api = {
     request<{ config: Record<string, unknown> }>("/api/config", {
       method: "POST",
       body: JSON.stringify({ config })
+    }),
+  testAiConnection: (ai: Record<string, unknown>) =>
+    request<{ success: boolean; model?: string; detail: string }>("/api/config/ai/test", {
+      method: "POST",
+      body: JSON.stringify({ config: { ai } })
     }),
   monitoringStatus: () => request<MonitoringStatus>("/api/monitoring/status"),
   runMonitoring: (siteId = "") =>

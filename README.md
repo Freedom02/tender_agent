@@ -26,23 +26,91 @@
 
 ## 启动方式
 
-### 1. 后端
+### 日常启动（当前 Windows 环境已验证）
+
+前后端需要分别使用两个 PowerShell 窗口。依赖安装完成后，每次启动只执行下面两组命令，不要每次重复执行 `npm install` 或 `pip install`。
+
+#### 1. 启动后端
+
+在第一个 PowerShell 窗口执行：
+
+```powershell
+cd "C:\Users\乔远\Desktop\tender_agent\backend"
+& "D:\Anaconda3\python.exe" run.py
+```
+
+看到下面的地址后，再继续启动前端：
+
+```text
+Uvicorn running on http://127.0.0.1:8793
+```
+
+#### 2. 启动前端
+
+另开第二个 PowerShell 窗口执行：
+
+```powershell
+cd "C:\Users\乔远\Desktop\tender_agent\frontend"
+npm run dev
+```
+
+看到 `http://127.0.0.1:5173/` 后，在浏览器打开：
+
+```text
+http://127.0.0.1:5173/
+```
+
+#### 3. 启动检查
+
+如果页面一直加载，可在任意 PowerShell 执行：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8793/api/health
+```
+
+正常结果应为：
+
+```text
+status service
+------ -------
+ok     tender-agent-api
+```
+
+注意：不要把后端命令中的 `D:\Anaconda3\python.exe` 改成单独的 `python`。当前电脑的 `python` 可能指向另一套 Anaconda 环境，导致后端依赖找不到。两个终端窗口在使用期间都要保持打开；停止服务时分别回到对应窗口按 `Ctrl+C`。
+
+### 首次准备（只需执行一次）
+
+如果是首次部署或依赖尚未安装，后端可以使用独立虚拟环境：
 
 ```powershell
 cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8793
 ```
 
-### 2. 前端
-
-另开一个 PowerShell：
+前端依赖只需首次安装一次：
 
 ```powershell
 cd frontend
 npm install
+```
+
+完成首次准备后，日常启动请使用上面的固定解释器和启动命令。
+
+### 备用启动命令
+
+如果需要显式启动后端，也可以执行：
+
+```powershell
+cd backend
+& "D:\Anaconda3\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8793
+```
+
+前端仍使用：
+
+```powershell
+cd frontend
 npm run dev
 ```
 

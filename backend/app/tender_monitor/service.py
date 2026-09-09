@@ -3,10 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..config.service import ensure_config
 from ..notification.service import notify_new_projects
-from ..tender_matching.service import filter_catalog_by_monitoring, matches_manual_search, matches_monitoring_profile
+from ..tender_matching.service import evaluate_company_relevance, matches_manual_search
+from .adapters import MonitorAdapterError, adapter_for, is_procurement_notice
 from .custom_site import CustomSiteError, fetch_custom_site, test_custom_site
 
 if TYPE_CHECKING:
@@ -91,13 +93,31 @@ def _fixture_notices(site: dict[str, Any]) -> list[dict[str, Any]]:
 def _candidate_notices(store: "Store", site: dict[str, Any]) -> list[dict[str, Any]]:
     if site.get("custom") is True:
         return fetch_custom_site(site)
-    seed_catalog = store.seed_catalog()
-    source_records = [item for item in seed_catalog if _source_matches(item, str(site["id"]))]
-    return source_records or _fixture_notices(site)
+    try:
+        return adapter_for(site).fetch(site, ensure_config(store.config)["monitoring"])
+    except MonitorAdapterError:
+        if ensure_config(store.config)["monitoring"].get("demoFallback") is True:
+            seed_catalog = store.seed_catalog()
+            source_records = [item for item in seed_catalog if _source_matches(item, str(site["id"]))]
+            return source_records or _fixture_notices(site)
+        raise
+
+
+def _canonical_url(value: str) -> str:
+    if not value:
+        return ""
+    parsed = urlsplit(value.strip())
+    removable = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "_"}
+    query = urlencode([(key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True) if key not in removable])
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), query, ""))
 
 
 def _dedupe_key(item: dict[str, Any]) -> str:
-    return str(item.get("sourceUrl") or f"{item.get('title', '')}|{item.get('publishedDate', '')}").strip().lower()
+    url = _canonical_url(str(item.get("sourceUrl") or item.get("detailUrl") or ""))
+    if url:
+        return url
+    source = str(item.get("source") or item.get("sourceKey") or "").strip().lower()
+    return f"{source}|{item.get('title', '')}|{item.get('publishedDate', '')}".strip().lower()
 
 
 def _existing_keys(store: "Store") -> set[str]:
@@ -149,26 +169,67 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
     frequency = max(int(monitoring.get("frequencyMinutes", 30) or 30), 1)
 
     for site in targets:
+        site_matched_count = 0
+        site_added_count = 0
+        site_deduped_count = 0
         try:
             candidates = _candidate_notices(store, site)
-        except CustomSiteError as exc:
+        except (CustomSiteError, MonitorAdapterError) as exc:
             site["status"] = f"抓取失败：{str(exc)[:80]}"
             site["latest"] = fetched_at[:16].replace("T", " ")
             site_results.append({"siteId": site["id"], "name": site["name"], "status": site["status"], "count": 0})
             continue
         collected_count += len(candidates)
         for candidate in candidates:
-            if not matches_monitoring_profile(candidate, monitoring):
+            if not is_procurement_notice(
+                str(candidate.get("title", "")),
+                str(candidate.get("analysisText", "")),
+                str(candidate.get("sourceUrl") or candidate.get("detailUrl") or ""),
+            ):
+                continue
+            match = evaluate_company_relevance(candidate, store.company_knowledge, monitoring)
+            if not match["matched"]:
                 continue
             matched_count += 1
+            site_matched_count += 1
             key = _dedupe_key(candidate)
             if key in existing_keys:
                 deduped_count += 1
+                site_deduped_count += 1
                 continue
             item = {
                 **candidate,
                 "id": candidate.get("id") or store.new_id("monitor"),
                 "fetchedAt": fetched_at,
+                "relevanceScore": match["score"],
+                "matchedBusinessDirections": match["matchedBusinessDirections"],
+                "matchedScenarios": match["matchedScenarios"],
+                "matchedProducts": match["matchedProducts"],
+                "matchedCapabilities": match["matchedCapabilities"],
+                "matchedKeywords": match["matchedKeywords"],
+                "matchReasons": match["reasons"],
+                "excludeReason": match["excludeReason"],
+                "nextStage": match["nextStage"],
+                "shouldAnalyze": match["shouldAnalyze"],
+                "searchProfile": {
+                    "serviceType": monitoring.get("serviceType", ""),
+                    "region": monitoring.get("region", ""),
+                    "includeKeywords": deepcopy(monitoring.get("includeKeywords", [])),
+                    "excludeKeywords": deepcopy(monitoring.get("excludeKeywords", [])),
+                    "targetDirections": deepcopy(monitoring.get("targetDirections", [])),
+                    "targetScenarios": deepcopy(monitoring.get("targetScenarios", [])),
+                    "targetProducts": deepcopy(monitoring.get("targetProducts", [])),
+                    "targetCapabilities": deepcopy(monitoring.get("targetCapabilities", [])),
+                    "synonyms": deepcopy(monitoring.get("synonyms", [])),
+                    "targetProcurementTypes": deepcopy(monitoring.get("targetProcurementTypes", [])),
+                    "lookbackDays": monitoring.get("lookbackDays", 7),
+                },
+                "crawlMeta": {
+                    "siteId": site.get("id"),
+                    "siteName": site.get("name"),
+                    "dedupeKey": key,
+                    "fetchedAt": fetched_at,
+                },
                 "reminderStatus": "未提醒",
                 "notificationChannels": [],
                 "followUp": False,
@@ -177,15 +238,25 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
             store.catalog.insert(0, item)
             existing_keys.add(key)
             added.append(item)
+            site_added_count += 1
 
         site["latest"] = fetched_at[:16].replace("T", " ")
         site["next"] = _next_time(frequency)
         site["status"] = "运行正常"
-        site_results.append({"siteId": site["id"], "name": site["name"], "status": site["status"], "count": len(candidates)})
+        site_results.append({
+            "siteId": site["id"],
+            "name": site["name"],
+            "status": site["status"],
+            "count": len(candidates),
+            "matchedCount": site_matched_count,
+            "addedCount": site_added_count,
+            "dedupedCount": site_deduped_count,
+        })
 
     notification_result = notify_new_projects(store, added)
     stats = monitoring["stats"]
-    stats["latestCount"] = matched_count
+    stats["latestCount"] = len(added)
+    stats["latestMatchedCount"] = matched_count
     stats["totalCollected"] = int(stats.get("totalCollected", 0) or 0) + collected_count
     stats["lastFetchedAt"] = fetched_at[:16].replace("T", " ")
     stats["nextFetchedAt"] = _next_time(frequency)
@@ -198,6 +269,7 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
         "addedCount": len(added),
         "matchedCount": matched_count,
         "dedupedCount": deduped_count,
+        "collectedCount": collected_count,
         "items": [store.with_preview(item) for item in added],
         "sites": site_results,
         "monitoring": monitoring_status(store),
@@ -206,7 +278,16 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
 
 def test_monitor_site(site: dict[str, Any]) -> dict[str, Any]:
     if site.get("custom") is not True:
-        return {"success": False, "status": "预置平台", "detail": "预置平台使用专用适配器，无需配置自定义解析规则。"}
+        try:
+            monitoring = ensure_config({})["monitoring"]
+            monitoring["includeKeywords"] = monitoring.get("includeKeywords", [])[:1]
+            monitoring["maxKeywordsPerRun"] = 1
+            monitoring["maxPagesPerKeyword"] = 1
+            monitoring["fetchDetails"] = False
+            items = adapter_for(site).fetch(site, monitoring)
+            return {"success": True, "status": "试抓成功", "count": len(items), "items": items[:10]}
+        except MonitorAdapterError as exc:
+            return {"success": False, "status": "连接失败", "detail": str(exc), "count": 0, "items": []}
     try:
         return test_custom_site(site)
     except CustomSiteError as exc:
@@ -214,8 +295,22 @@ def test_monitor_site(site: dict[str, Any]) -> dict[str, Any]:
 
 
 def search_catalog(store: "Store", payload: dict[str, Any]) -> dict[str, Any]:
-    config = ensure_config(store.config)
-    monitored = filter_catalog_by_monitoring(store.catalog, config["monitoring"])
+    valid_items = [
+        item for item in store.catalog
+        if is_procurement_notice(
+            str(item.get("title", "")),
+            str(item.get("analysisText", "")),
+            str(item.get("sourceUrl") or item.get("detailUrl") or ""),
+        )
+    ]
+    monitored = sorted(
+        valid_items,
+        key=lambda item: str(item.get("fetchedAt") or item.get("publishedDate") or ""),
+        reverse=True,
+    )
+    if payload.get("currentOnly"):
+        today = datetime.now().astimezone().date().isoformat()
+        monitored = [item for item in monitored if str(item.get("publishedDate", "")) >= today]
     items = [
         store.with_preview(item)
         for item in monitored
@@ -229,6 +324,6 @@ def search_catalog(store: "Store", payload: dict[str, Any]) -> dict[str, Any]:
             "verifiedCount": len(items),
             "addedCount": 0,
             "dedupedCount": 0,
-            "sources": [{"name": "已配置监控网站", "status": "已筛选", "count": len(items)}],
+            "sources": [{"name": "已入库项目", "status": "已筛选", "count": len(items)}],
         },
     }

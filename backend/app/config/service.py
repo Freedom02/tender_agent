@@ -41,14 +41,40 @@ DEFAULT_MONITOR_SITES = [
 def default_monitoring_config() -> dict[str, Any]:
     return {
         "enabled": True,
-        "serviceType": "劳务派遣",
+        "serviceType": "数字孪生",
         "region": "全国",
-        "includeKeywords": ["劳务派遣", "人力资源服务"],
-        "excludeKeywords": [],
+        "targetDirections": [],
+        "targetScenarios": [],
+        "targetProducts": [],
+        "targetCapabilities": [],
+        "synonyms": [],
+        "targetProcurementTypes": [],
+        "includeKeywords": [
+            "数字孪生",
+            "三维可视化",
+            "智慧园区",
+            "数据中心",
+            "AI智能体",
+            "本体数据治理"
+        ],
+        "excludeKeywords": [
+            "中标公告",
+            "成交公告",
+            "结果公告",
+            "废标公告",
+            "终止公告"
+        ],
         "frequencyMinutes": 30,
+        "lookbackDays": 7,
+        "maxKeywordsPerRun": 20,
+        "maxPagesPerKeyword": 2,
+        "maxGenericItems": 50,
+        "fetchDetails": True,
+        "demoFallback": False,
         "sites": deepcopy(DEFAULT_MONITOR_SITES),
         "stats": {
             "latestCount": 0,
+            "latestMatchedCount": 0,
             "totalCollected": 0,
             "lastFetchedAt": "",
             "nextFetchedAt": "",
@@ -66,6 +92,18 @@ def default_notification_config() -> dict[str, Any]:
 def default_wecom_config() -> dict[str, Any]:
     return {
         "webhook": "",
+        "configured": False,
+    }
+
+
+def default_ai_config() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "provider": "OpenAI 兼容接口",
+        "baseUrl": "",
+        "apiKey": "",
+        "model": "",
+        "organizationId": "",
         "configured": False,
     }
 
@@ -94,6 +132,8 @@ def ensure_config(config: dict[str, Any] | None) -> dict[str, Any]:
     result["notifications"] = {**default_notification_config(), **result.get("notifications", {})}
     result["wecom"] = {**default_wecom_config(), **result.get("wecom", {})}
     result["wecom"]["configured"] = bool(result["wecom"].get("webhook"))
+    result["ai"] = {**default_ai_config(), **result.get("ai", {})}
+    result["ai"]["configured"] = bool(result["ai"].get("apiKey"))
     return result
 
 
@@ -110,6 +150,12 @@ def update_configuration(store: "Store", incoming: dict[str, Any]) -> dict[str, 
     incoming_wecom = incoming.get("wecom")
     if isinstance(incoming_wecom, dict) and not incoming_wecom.get("webhook"):
         next_config["wecom"]["webhook"] = current.get("wecom", {}).get("webhook", "")
+
+    incoming_ai = incoming.get("ai")
+    if isinstance(incoming_ai, dict):
+        incoming_key = str(incoming_ai.get("apiKey") or "").strip()
+        if not incoming_key or incoming_key in {"***", "已配置"}:
+            next_config["ai"]["apiKey"] = current.get("ai", {}).get("apiKey", "")
 
     next_config = ensure_config(next_config)
     store.save_config(next_config)
@@ -177,4 +223,6 @@ def public_configuration(config: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(ensure_config(config))
     result["wecom"]["webhook"] = "***" if result["wecom"].get("webhook") else ""
     result["wecom"]["configured"] = bool(config.get("wecom", {}).get("webhook"))
+    result["ai"]["apiKey"] = "***" if result["ai"].get("apiKey") else ""
+    result["ai"]["configured"] = bool(config.get("ai", {}).get("apiKey"))
     return result

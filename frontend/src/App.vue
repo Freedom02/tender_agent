@@ -16,6 +16,10 @@ const {
   loading,
   busy,
   activeTab,
+  company,
+  companyKnowledge,
+  selectedKnowledgeDetail,
+  knowledgeDetailLoading,
   catalog,
   libraries,
   workspaces,
@@ -28,6 +32,7 @@ const {
   selectedWorkspaceId,
   followUpStatus,
   importFile,
+  importKind,
   libraryFile,
   searchForm,
   importForm,
@@ -51,7 +56,9 @@ const {
   importDocument,
   saveDraft,
   saveConfig,
+  testAiConnection,
   saveLibrary,
+  openKnowledgeObject,
   runAutomation,
   runMonitoring,
   updateMonitorSite,
@@ -152,10 +159,12 @@ onMounted(loadBootstrap);
       :libraries="libraries"
       :import-form="importForm"
       :import-file="importFile"
+      :input-kind="importKind"
       :selected-library-key="libraryForm.key"
       :busy="busy"
       @evaluate="importDocument"
       @file-selected="importFile = $event"
+      @update:input-kind="importKind = $event"
       @update:selected-library-key="libraryForm.key = $event"
       @open-workspace="openWorkspace"
     />
@@ -185,9 +194,14 @@ onMounted(loadBootstrap);
 
     <LibraryDirectoryPage
       v-else-if="activeTab === 'libraries'"
+      :company="company"
+      :company-knowledge="companyKnowledge"
+      :knowledge-detail="selectedKnowledgeDetail"
+      :knowledge-detail-loading="knowledgeDetailLoading"
       :libraries="libraries"
       :selected-library-key="libraryForm.key"
       @select-library="openLibraryDocuments"
+      @open-object="openKnowledgeObject"
     />
 
     <LibraryDocumentsPage
@@ -206,6 +220,7 @@ onMounted(loadBootstrap);
       :search-form="searchForm"
       :config="config"
       :monitoring="monitoring"
+      :company-knowledge="companyKnowledge"
       :busy="busy"
       @save-config="saveConfig($event)"
       @run-site="runMonitoring($event)"
@@ -216,6 +231,7 @@ onMounted(loadBootstrap);
       @test-site="testMonitorSite"
       @test-in-app="testInAppNotification"
       @test-wecom="testWecom"
+      @test-ai="testAiConnection"
     />
   </AppShell>
 </template>

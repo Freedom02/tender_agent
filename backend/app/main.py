@@ -90,6 +90,7 @@ class ImportPayload(BaseModel):
     text: str = ""
     mimeType: str = ""
     fileBase64: str = ""
+    documentKind: str = "notice"
 
 
 class LibraryPayload(BaseModel):
@@ -107,6 +108,29 @@ def health() -> dict[str, str]:
 @app.get("/api/bootstrap")
 def bootstrap() -> dict[str, Any]:
     return store.bootstrap()
+
+
+@app.get("/api/company/profile")
+def company_profile() -> dict[str, Any]:
+    return store.company
+
+
+@app.get("/api/company/knowledge")
+def company_knowledge() -> dict[str, Any]:
+    return store.company_knowledge
+
+
+@app.get("/api/company/knowledge/objects")
+def company_knowledge_objects(object_type: str = "", q: str = "") -> dict[str, Any]:
+    return store.knowledge_objects(object_type=object_type, query=q)
+
+
+@app.get("/api/company/knowledge/objects/{object_type}/{object_id}")
+def company_knowledge_object_detail(object_type: str, object_id: str) -> dict[str, Any]:
+    result = store.knowledge_object_detail(object_type, object_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="未找到本体对象")
+    return result
 
 
 @app.get("/api/catalog")
@@ -176,9 +200,14 @@ def import_document(payload: ImportPayload) -> dict[str, Any]:
 
         content = base64.b64decode(payload.fileBase64.encode("utf-8"))
         name = payload.name or "uploaded-document.txt"
-        return store.import_document(name, content, payload.mimeType or "")
+        return store.import_document(name, content, payload.mimeType or "", payload.documentKind)
     text = payload.text or ""
-    return store.import_document(payload.name or "招标文件.txt", text.encode("utf-8"), payload.mimeType or "text/plain")
+    return store.import_document(
+        payload.name or "招标文件.txt",
+        text.encode("utf-8"),
+        payload.mimeType or "text/plain",
+        payload.documentKind,
+    )
 
 
 @app.get("/api/workspaces/{workspace_id}")

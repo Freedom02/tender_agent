@@ -5,13 +5,25 @@ import { api } from "../services/api";
 import { fileToBase64 } from "../shared/file-utils";
 import type { AppTab, StatItem } from "./navigation";
 import { createNavigationItems } from "./navigation";
-import type { BootstrapResponse, CatalogItem, LibrarySummary, MonitoringStatus, Workspace } from "../shared/types";
+import type {
+  BootstrapResponse,
+  CatalogItem,
+  CompanyKnowledge,
+  KnowledgeObjectDetail,
+  LibrarySummary,
+  MonitoringStatus,
+  Workspace
+} from "../shared/types";
 
 export function useAppState() {
   const loading = ref(false);
   const busy = ref(false);
   const activeTab = ref<AppTab>("catalog");
   const bootstrap = ref<BootstrapResponse | null>(null);
+  const company = ref<Record<string, unknown>>({});
+  const companyKnowledge = ref<CompanyKnowledge | null>(null);
+  const selectedKnowledgeDetail = ref<KnowledgeObjectDetail | null>(null);
+  const knowledgeDetailLoading = ref(false);
   const catalog = ref<CatalogItem[]>([]);
   const libraries = ref<LibrarySummary[]>([]);
   const workspaces = ref<Workspace[]>([]);
@@ -29,6 +41,7 @@ export function useAppState() {
   const selectedWorkspaceId = ref("");
   const followUpStatus = ref("");
   const importFile = ref<File | null>(null);
+  const importKind = ref<"notice" | "tender_document">("notice");
   const libraryFile = ref<File | null>(null);
 
   const searchForm = reactive({
@@ -96,6 +109,8 @@ export function useAppState() {
 
   function syncState(data: BootstrapResponse) {
     bootstrap.value = data;
+    company.value = data.company || {};
+    companyKnowledge.value = data.companyKnowledge || null;
     catalog.value = data.catalog || [];
     libraries.value = data.libraries || [];
     workspaces.value = data.workspaces || [];
@@ -258,7 +273,8 @@ export function useAppState() {
     try {
       const payload: Record<string, unknown> = {
         name: importForm.name || file?.name || "招标文件.txt",
-        text
+        text,
+        documentKind: importKind.value
       };
       if (file) {
         payload.fileBase64 = await fileToBase64(file);
@@ -312,6 +328,22 @@ export function useAppState() {
     }
   }
 
+  async function testAiConnection(ai: Record<string, unknown>) {
+    busy.value = true;
+    try {
+      const result = await api.testAiConnection(ai);
+      if (result.success) {
+        ElMessage.success(`${result.detail}${result.model ? `：${result.model}` : ""}`);
+      } else {
+        ElMessage.warning(result.detail || "模型接口测试失败");
+      }
+    } catch (error) {
+      ElMessage.error((error as Error).message);
+    } finally {
+      busy.value = false;
+    }
+  }
+
   async function saveLibrary() {
     if (!libraryForm.key) return;
     busy.value = true;
@@ -335,6 +367,18 @@ export function useAppState() {
       ElMessage.error((error as Error).message);
     } finally {
       busy.value = false;
+    }
+  }
+
+  async function openKnowledgeObject(objectType: string, objectId: string) {
+    knowledgeDetailLoading.value = true;
+    try {
+      selectedKnowledgeDetail.value = await api.knowledgeObjectDetail(objectType, objectId);
+    } catch (error) {
+      selectedKnowledgeDetail.value = null;
+      ElMessage.error((error as Error).message);
+    } finally {
+      knowledgeDetailLoading.value = false;
     }
   }
 
@@ -472,6 +516,10 @@ export function useAppState() {
     loading,
     busy,
     activeTab,
+    company,
+    companyKnowledge,
+    selectedKnowledgeDetail,
+    knowledgeDetailLoading,
     catalog,
     libraries,
     workspaces,
@@ -484,6 +532,7 @@ export function useAppState() {
     selectedWorkspaceId,
     followUpStatus,
     importFile,
+    importKind,
     libraryFile,
     searchForm,
     importForm,
@@ -507,7 +556,9 @@ export function useAppState() {
     importDocument,
     saveDraft,
     saveConfig,
+    testAiConnection,
     saveLibrary,
+    openKnowledgeObject,
     runAutomation,
     runMonitoring,
     updateMonitorSite,

@@ -9,12 +9,18 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from urllib import error, request
 import xml.etree.ElementTree as ET
 
 from fastapi import HTTPException
 from .config.service import ensure_config, public_configuration
-from .tender_matching.service import filter_catalog_by_monitoring, matches_manual_search
+from .tender_matching.eligibility import (
+    call_openai_compatible,
+    evaluate_announcement_eligibility,
+    test_ai_connection,
+)
+from .tender_matching.document_fine_matching import evaluate_tender_document
+from .tender_matching.service import evaluate_company_relevance, matches_manual_search
+from .tender_monitor.adapters import is_procurement_notice, repair_notice_fields, valid_time_value
 
 
 def now_iso() -> str:
@@ -38,6 +44,18 @@ def write_json(path: Path, value: Any) -> None:
 
 
 class Store:
+    KNOWLEDGE_COLLECTIONS: tuple[tuple[str, str], ...] = (
+        ("businessDirections", "业务方向"),
+        ("industryScenarios", "行业场景"),
+        ("products", "产品或服务"),
+        ("capabilities", "技术能力"),
+        ("qualifications", "资质证书"),
+        ("projectReferences", "项目业绩"),
+        ("materials", "企业材料"),
+        ("evidences", "证据"),
+        ("sourceFiles", "来源文件"),
+    )
+
     def __init__(self, root: Path):
         self.root = root
         self.runtime_root = root / "runtime"
@@ -47,12 +65,16 @@ class Store:
         self.config_path = root / "agent-config.json"
         self.catalog_seed_path = root / "demo-data" / "tender-catalog.json"
         self.company_path = root / "company-profile.json"
+        self.company_material_index_path = root / "company-material-index.json"
+        self.company_knowledge_path = root / "company-knowledge.json"
         self.ontology_path = root / "ontology-governance.json"
         self.workspaces_path = self.runtime_root / "workspaces.json"
         self.catalog: list[dict[str, Any]] = []
         self.libraries: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
         self.company: dict[str, Any] = {}
+        self.company_material_index: dict[str, Any] = {}
+        self.company_knowledge: dict[str, Any] = {}
         self.ontology: dict[str, Any] = {}
         self.workspaces: dict[str, dict[str, Any]] = {}
         self.reminders: list[dict[str, Any]] = []
@@ -60,6 +82,8 @@ class Store:
 
     def initialize(self) -> None:
         self.company = read_json(self.company_path, {})
+        self.company_material_index = read_json(self.company_material_index_path, {})
+        self.company_knowledge = read_json(self.company_knowledge_path, {})
         self.ontology = read_json(self.ontology_path, {})
         seed = read_json(self.catalog_seed_path, [])
         self.catalog = read_json(self.catalog_path, seed)
@@ -68,7 +92,13 @@ class Store:
         self.reminders = read_json(self.runtime_root / "reminders.json", [])
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
+        self._seed_company_library_index()
         self._seed_demo_records()
+        catalog_repaired = False
+        for item in self.catalog:
+            catalog_repaired = repair_notice_fields(item) or catalog_repaired
+        if catalog_repaired:
+            self.persist_catalog()
         write_json(self.config_path, self.config)
 
     @staticmethod
@@ -111,6 +141,93 @@ class Store:
                 ("outputs", "自动化产出库", "保存匹配工作台和响应文件导出包"),
             ]
         }
+
+    def _seed_company_library_index(self) -> None:
+        """Expose indexed UINO source files before all originals are uploaded."""
+        if not self.company_material_index:
+            return
+        company_library = self.libraries.setdefault(
+            "company",
+            {
+                "key": "company",
+                "name": "公司资料库",
+                "description": "企业资质、业绩、人员与服务能力",
+                "documents": [],
+            },
+        )
+        documents = company_library.setdefault("documents", [])
+        legacy_markers = (
+            "demo-company-",
+            "濮阳人才服务",
+            "安衡人力资源",
+            "劳务派遣经营许可证_模拟样本",
+            "人力资源服务许可证_模拟样本",
+            "公司综合材料_模拟版",
+            "公司综合介绍（演示）",
+        )
+        company_library["documents"] = [
+            item
+            for item in documents
+            if not any(
+                marker in f"{item.get('id', '')} {item.get('name', '')} {item.get('preview', '')}"
+                for marker in legacy_markers
+            )
+        ]
+        documents = company_library["documents"]
+        existing_ids = {str(item.get("sourceId") or item.get("id")) for item in documents}
+        for source in self.company_material_index.get("documents", []):
+            source_id = str(source.get("id", "")).strip()
+            if not source_id or source_id in existing_ids:
+                continue
+            documents.append(
+                {
+                    "id": f"indexed-{source_id.lower()}",
+                    "sourceId": source_id,
+                    "name": source.get("name", source_id),
+                    "type": source.get("type", "资料"),
+                    "savedAt": "",
+                    "storagePath": source.get("sourcePath", ""),
+                    "contentHash": "",
+                    "size": 0,
+                    "preview": source.get("purpose", ""),
+                    "indexedOnly": True,
+                    "status": source.get("status", "来源登记"),
+                    "evidenceLevel": source.get("evidenceLevel", "待核验"),
+                }
+            )
+            existing_ids.add(source_id)
+        self.persist_libraries()
+
+    def _company_qualification_names(self) -> list[str]:
+        values = self.company.get("qualifications", [])
+        names: list[str] = []
+        for value in values:
+            if isinstance(value, str):
+                names.append(value)
+            elif isinstance(value, dict):
+                name = str(value.get("name") or value.get("qualificationName") or "").strip()
+                if name:
+                    names.append(name)
+        return names
+
+    def _company_service_regions(self) -> list[str]:
+        values = self.company.get("service_regions", [])
+        regions: list[str] = []
+        for value in values:
+            if isinstance(value, str):
+                regions.append(value)
+            elif isinstance(value, dict):
+                # A pending nationwide label must not become an automatic pass.
+                if value.get("status") in {"待核验", "待补材料", "未核验"}:
+                    continue
+                name = str(value.get("name") or "").strip()
+                if name:
+                    regions.append(name)
+        return regions
+
+    def _company_service_types(self) -> list[str]:
+        values = self.company.get("serviceTypes", [])
+        return [str(value).strip() for value in values if str(value).strip()]
 
     def _seed_demo_records(self) -> None:
         if self.catalog:
@@ -180,7 +297,27 @@ class Store:
         return read_json(self.catalog_seed_path, [])
 
     def with_preview(self, item: dict[str, Any]) -> dict[str, Any]:
-        return self._with_preview(item)
+        result = self._with_preview(item)
+        match = evaluate_company_relevance(
+            result,
+            self.company_knowledge,
+            ensure_config(self.config).get("monitoring", {}),
+        )
+        result.update(
+            {
+                "relevanceScore": match["score"],
+                "matchedBusinessDirections": match["matchedBusinessDirections"],
+                "matchedScenarios": match["matchedScenarios"],
+                "matchedProducts": match["matchedProducts"],
+                "matchedCapabilities": match["matchedCapabilities"],
+                "matchedKeywords": match["matchedKeywords"],
+                "matchReasons": match["reasons"],
+                "excludeReason": match["excludeReason"],
+                "nextStage": match["nextStage"],
+                "shouldAnalyze": match["shouldAnalyze"],
+            }
+        )
+        return result
 
     def bootstrap(self) -> dict[str, Any]:
         from .tender_monitor.service import monitoring_status
@@ -193,6 +330,8 @@ class Store:
                 "relations": len(self.ontology.get("relations", [])),
             },
             "company": self.company,
+            "companyMaterialIndex": self.company_material_index,
+            "companyKnowledge": self.company_knowledge,
             "config": self.public_config(),
             "monitoring": monitoring_status(self),
             "libraries": self.library_snapshot(),
@@ -211,17 +350,31 @@ class Store:
         return config
 
     def filtered_catalog(self, query: str = "", region: str = "", type: str = "", current_only: bool = False) -> list[dict[str, Any]]:
-        monitoring = ensure_config(self.config)["monitoring"]
-        items = filter_catalog_by_monitoring(self.catalog, monitoring)
+        valid_items = [
+            item for item in self.catalog
+            if is_procurement_notice(
+                str(item.get("title", "")),
+                str(item.get("analysisText", "")),
+                str(item.get("sourceUrl") or item.get("detailUrl") or ""),
+            )
+        ]
+        items = sorted(
+            valid_items,
+            key=lambda item: str(item.get("fetchedAt") or item.get("publishedDate") or ""),
+            reverse=True,
+        )
         manual_payload = {"query": query, "region": region, "type": type}
         if current_only:
             items = [item for item in items if item.get("publishedDate", "") >= date.today().isoformat()]
-        return [self._with_preview(item) for item in items if matches_manual_search(item, manual_payload)]
+        return [self.with_preview(item) for item in items if matches_manual_search(item, manual_payload)]
 
     @staticmethod
     def _with_preview(item: dict[str, Any]) -> dict[str, Any]:
         result = dict(item)
         text = str(result.get("analysisText", ""))
+        for field in ("registrationPeriod", "registrationDeadline", "bidDeadline"):
+            if result.get(field) and not valid_time_value(result[field]):
+                result[field] = ""
         result.setdefault("status", "未处理")
         result.setdefault("followUp", False)
         result.setdefault("read", False)
@@ -232,7 +385,7 @@ class Store:
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
         item = next((item for item in self.catalog if item.get("id") == project_id), None)
-        return self._with_preview(item) if item else None
+        return self.with_preview(item) if item else None
 
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         from .tender_monitor.service import search_catalog
@@ -251,7 +404,7 @@ class Store:
             return None
         item["read"] = True
         self.persist_catalog()
-        return self._with_preview(item)
+        return self.with_preview(item)
 
     def set_follow_up(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         item = next((item for item in self.catalog if item.get("id") == project_id), None)
@@ -260,7 +413,7 @@ class Store:
         item["followUp"] = payload.get("followUp", True)
         item["followUpStatus"] = payload.get("followUpStatus", "")
         self.persist_catalog()
-        return self._with_preview(item)
+        return self.with_preview(item)
 
     def download_project(self, project_id: str) -> dict[str, Any] | None:
         item = next((item for item in self.catalog if item.get("id") == project_id), None)
@@ -274,7 +427,7 @@ class Store:
         item["downloadUrl"] = f"/runtime/projects/{project_id}/source/{target.name}"
         item["downloadFileName"] = target.name
         self.persist_catalog()
-        return {"item": self._with_preview(item), "download": {"status": "已下载", "fileName": target.name, "url": item["downloadUrl"]}}
+        return {"item": self.with_preview(item), "download": {"status": "已下载", "fileName": target.name, "url": item["downloadUrl"]}}
 
     def parse_tender(self, text: str, source: str) -> dict[str, Any]:
         def match(pattern: str, fallback: str = "未识别") -> str:
@@ -317,22 +470,34 @@ class Store:
 
     @staticmethod
     def detect_type(text: str) -> str:
-        for key, value in [("劳务派遣", "劳务派遣"), ("保安", "保安服务"), ("保洁", "保洁服务"), ("家政", "家政服务")]:
+        for key, value in [
+            ("数字孪生", "数字孪生"),
+            ("三维可视化", "三维可视化"),
+            ("数据中心", "数据中心与运维"),
+            ("智慧园区", "智慧园区"),
+            ("低空", "低空经济"),
+            ("智能体", "AI 智能体"),
+            ("劳务派遣", "劳务派遣"),
+            ("保安", "保安服务"),
+            ("保洁", "保洁服务"),
+            ("家政", "家政服务"),
+        ]:
             if key in text:
                 return value
-        return "人力资源服务"
+        return "未识别"
 
     @staticmethod
     def required_count(text: str) -> int:
         result = re.search(r"(?:不少于|至少|不低于)\s*(\d+)\s*个", text)
         return int(result.group(1)) if result else 0
 
-    def import_document(self, name: str, content: bytes, mime_type: str) -> dict[str, Any]:
+    def import_document(self, name: str, content: bytes, mime_type: str, document_kind: str = "notice") -> dict[str, Any]:
         if len(content) > 20 * 1024 * 1024:
             raise ValueError("招标文件需小于20MB")
-        text = self.extract_text_from_file(name, content, mime_type).strip()
+        parsed_file = self.extract_document_content(name, content, mime_type)
+        text = parsed_file["text"].strip()
         if len(text) < 20:
-            raise ValueError("未能从该文件提取到足够文字，请上传可复制文字的 TXT / Markdown / PDF / DOCX 文件")
+            raise ValueError("未能从该文件提取到足够文字，请上传可复制文字的 TXT / Markdown / PDF / DOCX / XLSX 文件")
         project_id = uid("local")
         source_dir = self.runtime_root / "projects" / project_id / "source"
         source_dir.mkdir(parents=True, exist_ok=True)
@@ -340,101 +505,196 @@ class Store:
         target = source_dir / f"{project_id}-{safe_name}"
         target.write_bytes(content)
         parsed = self.parse_tender(text, "本地上传")
+        kind = "tender_document" if document_kind == "tender_document" else "notice"
         item = {
             "id": project_id,
             "title": parsed["projectName"] if parsed["projectName"] != "未识别" else Path(name).stem,
             "category": parsed["serviceType"],
             "region": parsed["serviceLocation"],
-            "noticeType": "本地上传招标文件",
+            "noticeType": "本地上传完整招标文件" if kind == "tender_document" else "本地上传招标公告",
             "source": "本地上传",
             "publishedDate": date.today().isoformat(),
             "dataOrigin": "local_upload",
             "analysisText": text,
             "parsed": parsed,
+            "document": {
+                "kind": kind,
+                "name": name,
+                "mimeType": mime_type or "application/octet-stream",
+                "contentHash": hashlib.sha256(content).hexdigest(),
+                "parseMethod": parsed_file["parseMethod"],
+                "warnings": parsed_file["warnings"],
+                "segments": parsed_file["segments"],
+            },
             "downloadStatus": "已下载",
             "downloadUrl": f"/runtime/projects/{project_id}/source/{target.name}",
         }
         self.catalog.insert(0, item)
         self.persist_catalog()
-        return {"item": self._with_preview(item), "file": {"name": name, "parseStatus": "解析完成", "extractedTextLength": len(text)}}
+        return {
+            "item": self.with_preview(item),
+            "file": {
+                "name": name,
+                "parseStatus": "解析完成",
+                "parseMethod": parsed_file["parseMethod"],
+                "warnings": parsed_file["warnings"],
+                "extractedTextLength": len(text),
+            },
+        }
 
     def extract_text_from_file(self, name: str, content: bytes, mime_type: str = "") -> str:
+        return self.extract_document_content(name, content, mime_type)["text"]
+
+    def extract_document_content(self, name: str, content: bytes, mime_type: str = "") -> dict[str, Any]:
         lower = name.lower()
         if lower.endswith(".docx") or "wordprocessingml" in mime_type:
-            return self.extract_text_from_docx(content)
+            return self.extract_document_content_from_docx(content)
         if lower.endswith(".pdf") or "pdf" in mime_type.lower():
-            return self.extract_text_from_pdf(content)
-        return content.decode("utf-8", errors="ignore")
+            return self.extract_document_content_from_pdf(content)
+        if lower.endswith(".xlsx") or "spreadsheetml" in mime_type:
+            return self.extract_document_content_from_xlsx(content)
+        text = content.decode("utf-8", errors="ignore")
+        segments = [
+            {"sourceLocator": f"第{index + 1}行", "text": line.strip()}
+            for index, line in enumerate(text.splitlines())
+            if line.strip()
+        ]
+        return {
+            "text": "\n".join(item["text"] for item in segments),
+            "segments": segments,
+            "parseMethod": "plain_text",
+            "warnings": [],
+        }
 
     @staticmethod
     def extract_text_from_docx(content: bytes) -> str:
+        return Store.extract_document_content_from_docx(content)["text"]
+
+    @staticmethod
+    def extract_document_content_from_docx(content: bytes) -> dict[str, Any]:
         from io import BytesIO
 
-        with zipfile.ZipFile(BytesIO(content)) as archive:
-            try:
+        try:
+            with zipfile.ZipFile(BytesIO(content)) as archive:
                 xml = archive.read("word/document.xml")
-            except KeyError:
-                return ""
-        root = ET.fromstring(xml)
+        except (KeyError, zipfile.BadZipFile):
+            return {"text": "", "segments": [], "parseMethod": "docx_xml", "warnings": ["无法读取 DOCX 正文。"]}
+        try:
+            root = ET.fromstring(xml)
+        except ET.ParseError:
+            return {"text": "", "segments": [], "parseMethod": "docx_xml", "warnings": ["DOCX 正文 XML 解析失败。"]}
         namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        lines: list[str] = []
-        for paragraph in root.findall(".//w:p", namespace):
+        segments: list[dict[str, str]] = []
+        for index, paragraph in enumerate(root.findall(".//w:p", namespace)):
             parts = [node.text for node in paragraph.findall(".//w:t", namespace) if node.text]
             if parts:
-                lines.append("".join(parts))
-        return "\n".join(lines)
+                segments.append({"sourceLocator": f"第{index + 1}段", "text": "".join(parts).strip()})
+        return {
+            "text": "\n".join(item["text"] for item in segments),
+            "segments": segments,
+            "parseMethod": "docx_xml",
+            "warnings": [],
+        }
 
     @staticmethod
     def extract_text_from_pdf(content: bytes) -> str:
+        return Store.extract_document_content_from_pdf(content)["text"]
+
+    @staticmethod
+    def extract_document_content_from_pdf(content: bytes) -> dict[str, Any]:
         try:
             from pypdf import PdfReader
         except Exception:
-            return ""
+            return {"text": "", "segments": [], "parseMethod": "pypdf", "warnings": ["未安装 PDF 文字解析依赖。"]}
         from io import BytesIO
 
         try:
             reader = PdfReader(BytesIO(content))
         except Exception:
-            return ""
-        pages = []
-        for page in reader.pages:
+            return {"text": "", "segments": [], "parseMethod": "pypdf", "warnings": ["PDF 文件无法读取。"]}
+        segments: list[dict[str, str]] = []
+        warnings: list[str] = []
+        for index, page in enumerate(reader.pages):
             try:
-                pages.append(page.extract_text() or "")
+                page_text = (page.extract_text() or "").strip()
             except Exception:
-                pages.append("")
-        return "\n".join(pages)
+                page_text = ""
+            if page_text:
+                segments.append({"sourceLocator": f"第{index + 1}页", "text": page_text})
+            else:
+                warnings.append(f"第{index + 1}页未提取到文字，扫描件需后续接入 OCR。")
+        return {
+            "text": "\n".join(item["text"] for item in segments),
+            "segments": segments,
+            "parseMethod": "pypdf",
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def extract_document_content_from_xlsx(content: bytes) -> dict[str, Any]:
+        from io import BytesIO
+
+        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        try:
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                shared_strings: list[str] = []
+                if "xl/sharedStrings.xml" in archive.namelist():
+                    shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                    shared_strings = [
+                        "".join(node.text or "" for node in item.findall(".//main:t", namespace))
+                        for item in shared_root.findall(".//main:si", namespace)
+                    ]
+                sheets = sorted(
+                    name for name in archive.namelist()
+                    if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
+                )
+                segments: list[dict[str, str]] = []
+                for sheet_index, sheet_name in enumerate(sheets, start=1):
+                    root = ET.fromstring(archive.read(sheet_name))
+                    for row_index, row in enumerate(root.findall(".//main:sheetData/main:row", namespace), start=1):
+                        values: list[str] = []
+                        for cell in row.findall("main:c", namespace):
+                            value_node = cell.find("main:v", namespace)
+                            inline_node = cell.find("main:is/main:t", namespace)
+                            value = value_node.text if value_node is not None else (inline_node.text if inline_node is not None else "")
+                            if cell.get("t") == "s" and value and value.isdigit():
+                                shared_index = int(value)
+                                value = shared_strings[shared_index] if shared_index < len(shared_strings) else ""
+                            if value:
+                                values.append(value.strip())
+                        if values:
+                            segments.append({"sourceLocator": f"sheet{sheet_index} 第{row_index}行", "text": " | ".join(values)})
+        except (zipfile.BadZipFile, ET.ParseError, KeyError):
+            return {"text": "", "segments": [], "parseMethod": "xlsx_xml", "warnings": ["XLSX 文件解析失败。"]}
+        return {
+            "text": "\n".join(item["text"] for item in segments),
+            "segments": segments,
+            "parseMethod": "xlsx_xml",
+            "warnings": [],
+        }
 
     def match_project(self, item: dict[str, Any]) -> dict[str, Any]:
         text = str(item.get("analysisText", ""))
-        parsed = item.get("parsed") or self.parse_tender(text, "项目文件")
-        requirements = parsed.get("requirements", {})
-        qualifications = self.company.get("qualifications", [])
-        rows = []
-        for requirement in requirements.get("qualifications", []):
-            found = requirement in qualifications
-            rows.append({"kind": "资质", "requirement": requirement, "status": "满足" if found else "待补材料", "evidence": "公司资料库" if found else "企业材料库未找到对应依据", "risk": "低" if found else "高"})
-        performance = (requirements.get("performances") or [None])[0]
-        if performance:
-            matching = [entry for entry in self.company.get("performances", []) if entry.get("type") in {parsed.get("serviceType"), "人力资源服务"}]
-            required = performance.get("required_count", 0)
-            ok = not required or len(matching) >= required
-            rows.append({"kind": "业绩", "requirement": performance.get("text", ""), "status": "满足" if ok else "部分满足", "evidence": f"匹配到 {len(matching)} 个相关业绩，要求 {required or '未识别'} 个", "risk": "低" if ok else "高"})
-        personnel = (requirements.get("personnel") or [None])[0]
-        if personnel:
-            role = personnel.get("role", "项目人员")
-            found = next((entry for entry in self.company.get("personnel", []) if entry.get("role") == role), None)
-            rows.append({"kind": "人员", "requirement": personnel.get("text", ""), "status": "满足" if found else "待补材料", "evidence": f"{role} {found.get('count')}名" if found else "企业材料库未找到对应人员", "risk": "低" if found else "中"})
-        location = parsed.get("serviceLocation", "")
-        region_ok = any(region in location for region in self.company.get("service_regions", []))
-        rows.append({"kind": "地域", "requirement": location, "status": "满足" if region_ok else "待澄清", "evidence": "企业服务区域：" + "、".join(self.company.get("service_regions", [])), "risk": "低" if region_ok else "中"})
-        score = round(sum(20 if row["status"] == "满足" else 4 for row in rows))
-        score = min(score, 100)
-        thresholds = self.config.get("decisionThresholds", {"recommend": 78, "review": 58})
-        decision = "建议参与" if score >= thresholds.get("recommend", 78) else "人工评估" if score >= thresholds.get("review", 58) else "不建议参与"
-        risks = [{"level": row["risk"], "title": f"{row['kind']}需要关注", "detail": row["evidence"]} for row in rows if row["risk"] != "低"]
-        if not risks:
-            risks = [{"level": "低", "title": "暂未发现明显高风险", "detail": "仍需人工核验原始文件和附件。"}]
-        return {"rows": rows, "risks": risks, "score": score, "decision": decision, "project": parsed}
+        result = evaluate_announcement_eligibility(
+            text,
+            self.company_knowledge,
+            self.company,
+            ensure_config(self.config).get("ai", {}),
+        )
+        result["relevance"] = evaluate_company_relevance(
+            item,
+            self.company_knowledge,
+            ensure_config(self.config).get("monitoring", {}),
+        )
+        document = item.get("document") if isinstance(item.get("document"), dict) else {}
+        if document.get("kind") == "tender_document":
+            result["fineReview"] = evaluate_tender_document(
+                text,
+                document.get("segments") if isinstance(document.get("segments"), list) else [],
+                self.company_knowledge,
+                ensure_config(self.config).get("ai", {}),
+            )
+        return result
 
     def analyze(self, project_id: str) -> dict[str, Any] | None:
         item = next((entry for entry in self.catalog if entry.get("id") == project_id), None)
@@ -458,7 +718,7 @@ class Store:
         }
         self.persist_catalog()
         self.persist_runtime()
-        return {"item": self._with_preview(item), "workspace": self.workspaces[workspace_id], "reasoning": reasoning}
+        return {"item": self.with_preview(item), "workspace": self.workspaces[workspace_id], "reasoning": reasoning}
 
     def batch_match(self, project_ids: list[str]) -> dict[str, Any]:
         results = []
@@ -550,14 +810,6 @@ class Store:
         return {"answer": answer, "action": "agent" if agent else "answer", "sourceRefs": ["catalog", "libraries"]}
 
     def try_llm_answer(self, question: str, project: dict[str, Any] | None = None) -> str:
-        ai = self.config.get("ai", {})
-        if ai.get("enabled") is False:
-            return ""
-        base_url = str(ai.get("baseUrl") or os.getenv("AI_BASE_URL", "")).strip()
-        api_key = str(ai.get("apiKey") or os.getenv("AI_API_KEY", "")).strip()
-        model = str(ai.get("model") or os.getenv("AI_MODEL", "")).strip()
-        if not base_url or not api_key or not model:
-            return ""
         system_prompt = (
             "你是企业内部招投标智能体。"
             "请用简洁中文回答，优先引用当前项目、资料库、匹配结果和风险结论。"
@@ -565,29 +817,20 @@ class Store:
         )
         if project:
             system_prompt += f" 当前项目名称：{project.get('title', '')}。"
-        payload = {
-            "model": model,
-            "messages": [
+        result = call_openai_compatible(
+            ensure_config(self.config).get("ai", {}),
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
             ],
-            "temperature": float(ai.get("temperature", 0.2) or 0.2),
-        }
-        req = request.Request(
-            f"{base_url.rstrip('/')}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+            max_tokens=800,
+            temperature=0.2,
         )
-        try:
-            with request.urlopen(req, timeout=30) as response:
-                body = json.loads(response.read().decode("utf-8"))
-            return str(body["choices"][0]["message"]["content"]).strip()
-        except (OSError, ValueError, KeyError, error.URLError):
-            return ""
+        return str(result.get("content", "")) if result.get("success") else ""
+
+    @staticmethod
+    def test_ai_connection(ai: dict[str, Any]) -> dict[str, Any]:
+        return test_ai_connection(ai)
 
     def library_snapshot(self) -> list[dict[str, Any]]:
         return [
@@ -606,6 +849,154 @@ class Store:
         if not value:
             return None
         return {"key": key, **value}
+
+    def _knowledge_collection(self, object_type: str) -> tuple[str, str, list[dict[str, Any]]] | None:
+        for key, label in self.KNOWLEDGE_COLLECTIONS:
+            if key == object_type:
+                values = self.company_knowledge.get(key, [])
+                return key, label, values if isinstance(values, list) else []
+        return None
+
+    def _knowledge_index(self) -> dict[str, dict[str, Any]]:
+        index: dict[str, dict[str, Any]] = {}
+        company_id = str(self.company.get("companyId") or self.company_knowledge.get("meta", {}).get("companyId") or "").strip()
+        company_name = str(self.company.get("companyName") or self.company_knowledge.get("meta", {}).get("companyName") or "").strip()
+        if company_id:
+            index[company_id] = {
+                "objectType": "company",
+                "objectTypeLabel": "公司主体",
+                "item": {"id": company_id, "name": company_name, "companyName": company_name},
+            }
+        for key, label in self.KNOWLEDGE_COLLECTIONS:
+            collection = self._knowledge_collection(key)
+            if not collection:
+                continue
+            for item in collection[2]:
+                item_id = str(item.get("id", "")).strip()
+                if item_id:
+                    index[item_id] = {"objectType": key, "objectTypeLabel": label, "item": item}
+        source_index = {
+            str(item.get("id", "")).strip(): item
+            for item in self.company_material_index.get("documents", [])
+            if str(item.get("id", "")).strip()
+        }
+        for item_id, entry in index.items():
+            if entry["objectType"] != "sourceFiles":
+                continue
+            source = source_index.get(item_id)
+            if source:
+                entry["item"] = {**entry["item"], "sourcePath": source.get("sourcePath", ""), "purpose": source.get("purpose", "")}
+        return index
+
+    @staticmethod
+    def _knowledge_matches(item: dict[str, Any], query: str) -> bool:
+        if not query:
+            return True
+        haystack = " ".join(
+            str(value)
+            for value in item.values()
+            if isinstance(value, (str, int, float, list, dict))
+        ).lower()
+        return query.lower() in haystack
+
+    def knowledge_objects(self, object_type: str = "", query: str = "") -> dict[str, Any]:
+        collections: list[dict[str, Any]] = []
+        selected = [object_type] if object_type else [key for key, _ in self.KNOWLEDGE_COLLECTIONS]
+        for key in selected:
+            collection = self._knowledge_collection(key)
+            if not collection:
+                continue
+            _, label, values = collection
+            items = [
+                {"objectType": key, "objectTypeLabel": label, **item}
+                for item in values
+                if self._knowledge_matches(item, query.strip())
+            ]
+            collections.append({"objectType": key, "objectTypeLabel": label, "count": len(items), "items": items})
+        return {
+            "companyId": self.company.get("companyId", self.company_knowledge.get("meta", {}).get("companyId", "")),
+            "companyName": self.company.get("companyName", self.company_knowledge.get("meta", {}).get("companyName", "")),
+            "query": query,
+            "collections": collections,
+        }
+
+    def knowledge_object_detail(self, object_type: str, object_id: str) -> dict[str, Any] | None:
+        collection = self._knowledge_collection(object_type)
+        if not collection:
+            return None
+        _, label, values = collection
+        item = next((entry for entry in values if str(entry.get("id", "")) == object_id), None)
+        if not item:
+            return None
+
+        index = self._knowledge_index()
+        related: list[dict[str, Any]] = []
+        for relation in self.company_knowledge.get("relations", []):
+            if relation.get("fromId") != object_id and relation.get("toId") != object_id:
+                continue
+            related_id = relation.get("toId") if relation.get("fromId") == object_id else relation.get("fromId")
+            related_entry = index.get(str(related_id))
+            related.append(
+                {
+                    **relation,
+                    "direction": "outgoing" if relation.get("fromId") == object_id else "incoming",
+                    "relatedObject": (
+                        {
+                            "objectType": related_entry["objectType"],
+                            "objectTypeLabel": related_entry["objectTypeLabel"],
+                            **related_entry["item"],
+                        }
+                        if related_entry
+                        else None
+                    ),
+                }
+            )
+
+        def resolve_ids(ids: Any) -> list[dict[str, Any]]:
+            if not isinstance(ids, list):
+                return []
+            result: list[dict[str, Any]] = []
+            for item_id in ids:
+                entry = index.get(str(item_id))
+                if entry:
+                    result.append(
+                        {
+                            "objectType": entry["objectType"],
+                            "objectTypeLabel": entry["objectTypeLabel"],
+                            **entry["item"],
+                        }
+                    )
+            return result
+
+        evidence_ids = item.get("evidenceIds", [])
+        source_ids = item.get("sourceIds", [])
+        material_ids = item.get("materialIds", [])
+        if object_type == "evidences":
+            evidence_ids = [object_id]
+            source_ids = item.get("sourceIds", [])
+        if object_type == "sourceFiles":
+            source_ids = [object_id]
+        resolved_evidences = resolve_ids(evidence_ids)
+        resolved_materials = resolve_ids(material_ids)
+        resolved_source_ids = list(source_ids) if isinstance(source_ids, list) else []
+        for evidence in resolved_evidences:
+            for source_id in evidence.get("sourceIds", []):
+                if source_id not in resolved_source_ids:
+                    resolved_source_ids.append(source_id)
+        for material in resolved_materials:
+            for source_id in material.get("sourceIds", []):
+                if source_id not in resolved_source_ids:
+                    resolved_source_ids.append(source_id)
+
+        return {
+            "objectType": object_type,
+            "objectTypeLabel": label,
+            "object": item,
+            "related": related,
+            "evidences": resolved_evidences,
+            "materials": resolved_materials,
+            "sourceFiles": resolve_ids(resolved_source_ids),
+        }
 
     def save_library_document(self, key: str, name: str, content: bytes, mime_type: str) -> dict[str, Any]:
         if key not in self.libraries:

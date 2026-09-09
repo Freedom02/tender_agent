@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { Bell, CheckCircle2, CloudCog, Database, Globe2, KeyRound, Pencil, Play, Plus, Save, Search, Trash2, Zap } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
-import type { MonitoringStatus } from "../../shared/types";
+import type { CompanyKnowledge, MonitoringStatus } from "../../shared/types";
 
 const props = defineProps<{
   searchForm: {
@@ -13,6 +13,7 @@ const props = defineProps<{
   };
   config: Record<string, any>;
   monitoring: MonitoringStatus;
+  companyKnowledge: CompanyKnowledge | null;
   busy: boolean;
 }>();
 
@@ -20,6 +21,13 @@ const includeKeywords = ref("劳务派遣, 人力资源服务");
 const excludeKeywords = ref("");
 const serviceType = ref("劳务派遣");
 const region = ref("全国");
+const targetDirections = ref<string[]>([]);
+const targetScenarios = ref<string[]>([]);
+const targetProducts = ref<string[]>([]);
+const targetCapabilities = ref<string[]>([]);
+const synonyms = ref("");
+const targetProcurementTypes = ref("");
+const lookbackDays = ref(7);
 const frequency = ref("30");
 const monitorEnabled = ref(true);
 const showApiKey = ref(false);
@@ -28,11 +36,20 @@ const apiBaseUrl = ref("https://api.openai.com/v1");
 const apiKey = ref("");
 const apiModel = ref("gpt-4o-mini");
 const organizationId = ref("");
+const aiConfigured = computed(() => props.config.ai?.configured === true);
 
 const monitorSites = computed(() => props.monitoring.sites);
 const inAppEnabled = ref(true);
 const wecomEnabled = ref(false);
 const wecomWebhook = ref("");
+const serviceTypeOptions = ["劳务派遣", "人力资源服务", "咨询与技术服务", "物业与综合服务", "数字孪生", "智慧城市", "可视化平台", "保安服务", "保洁服务", "绿化养护", "软件开发"];
+const regionOptions = ["全国", "北京市", "上海市", "广东省", "湖北省", "四川省", "浙江省", "江苏省", "河南省", "成都市", "深圳市", "广州市"];
+const knowledgeOptions = computed(() => ({
+  directions: props.companyKnowledge?.businessDirections || [],
+  scenarios: props.companyKnowledge?.industryScenarios || [],
+  products: props.companyKnowledge?.products || [],
+  capabilities: props.companyKnowledge?.capabilities || []
+}));
 const siteDialogVisible = ref(false);
 const editingSiteId = ref("");
 const siteForm = ref({
@@ -62,6 +79,13 @@ function loadSavedConfig() {
   const wecom = props.config.wecom || {};
   serviceType.value = monitoring.serviceType || serviceType.value;
   region.value = monitoring.region || region.value;
+  targetDirections.value = [...(monitoring.targetDirections || [])];
+  targetScenarios.value = [...(monitoring.targetScenarios || [])];
+  targetProducts.value = [...(monitoring.targetProducts || [])];
+  targetCapabilities.value = [...(monitoring.targetCapabilities || [])];
+  synonyms.value = (monitoring.synonyms || []).join(", ");
+  targetProcurementTypes.value = (monitoring.targetProcurementTypes || []).join(", ");
+  lookbackDays.value = Number(monitoring.lookbackDays || lookbackDays.value);
   includeKeywords.value = (monitoring.includeKeywords || [includeKeywords.value]).join(", ");
   excludeKeywords.value = (monitoring.excludeKeywords || []).join(", ");
   frequency.value = String(monitoring.frequencyMinutes || frequency.value);
@@ -73,6 +97,24 @@ function loadSavedConfig() {
   apiBaseUrl.value = props.config.ai?.baseUrl || apiBaseUrl.value;
   apiModel.value = props.config.ai?.model || apiModel.value;
   organizationId.value = props.config.ai?.organizationId || organizationId.value;
+  apiKey.value = "";
+}
+
+function suggestOptions(options: string[], keyword: string, callback: (items: { value: string }[]) => void) {
+  const query = keyword.trim().toLowerCase();
+  callback(
+    options
+      .filter((item) => !query || item.toLowerCase().includes(query))
+      .map((item) => ({ value: item }))
+  );
+}
+
+function suggestServiceTypes(keyword: string, callback: (items: { value: string }[]) => void) {
+  suggestOptions(serviceTypeOptions, keyword, callback);
+}
+
+function suggestRegions(keyword: string, callback: (items: { value: string }[]) => void) {
+  suggestOptions(regionOptions, keyword, callback);
 }
 
 watch(
@@ -81,15 +123,32 @@ watch(
   { deep: true, immediate: true }
 );
 
+function currentAiConfig() {
+  return {
+    provider: apiProvider.value,
+    baseUrl: apiBaseUrl.value.trim(),
+    apiKey: apiKey.value.trim(),
+    model: apiModel.value.trim(),
+    organizationId: organizationId.value.trim()
+  };
+}
+
 function saveAllConfig() {
   emit("saveConfig", {
     monitoring: {
       enabled: monitorEnabled.value,
       serviceType: serviceType.value,
       region: region.value,
+      targetDirections: targetDirections.value,
+      targetScenarios: targetScenarios.value,
+      targetProducts: targetProducts.value,
+      targetCapabilities: targetCapabilities.value,
+      synonyms: synonyms.value.split(/[,，;；、]/).map((item) => item.trim()).filter(Boolean),
+      targetProcurementTypes: targetProcurementTypes.value.split(/[,，;；、]/).map((item) => item.trim()).filter(Boolean),
       includeKeywords: includeKeywords.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
       excludeKeywords: excludeKeywords.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
-      frequencyMinutes: Number(frequency.value)
+      frequencyMinutes: Number(frequency.value),
+      lookbackDays: lookbackDays.value
     },
     notifications: {
       inAppEnabled: inAppEnabled.value,
@@ -98,18 +157,12 @@ function saveAllConfig() {
     wecom: {
       webhook: wecomWebhook.value === "已配置" ? "" : wecomWebhook.value
     },
-    ai: {
-      provider: apiProvider.value,
-      baseUrl: apiBaseUrl.value,
-      apiKey: apiKey.value ? "已配置" : "",
-      model: apiModel.value,
-      organizationId: organizationId.value
-    }
+    ai: currentAiConfig()
   });
 }
 
 function testConnection() {
-  ElMessage.success("企业 API 连接测试通过（演示）");
+  emit("testAi", currentAiConfig());
 }
 
 const emit = defineEmits<{
@@ -122,6 +175,7 @@ const emit = defineEmits<{
   testSite: [siteId: string];
   testInApp: [];
   testWecom: [];
+  testAi: [ai: Record<string, unknown>];
 }>();
 
 function openCreateSite() {
@@ -225,22 +279,65 @@ function submitSite() {
 
           <el-form label-position="top">
             <el-form-item label="业务服务类型">
-              <el-select v-model="serviceType" class="full-width">
-                <el-option label="劳务派遣" value="劳务派遣" />
-                <el-option label="人力资源服务" value="人力资源服务" />
-                <el-option label="咨询与技术服务" value="咨询与技术服务" />
-                <el-option label="物业与综合服务" value="物业与综合服务" />
+              <el-autocomplete
+                v-model="serviceType"
+                class="full-width"
+                :fetch-suggestions="suggestServiceTypes"
+                clearable
+                :trigger-on-focus="true"
+                placeholder="选择或输入业务服务类型"
+              />
+            </el-form-item>
+
+            <el-alert
+              title="本体筛选为空时，系统会使用公司资料库中的全部方向、场景、产品和能力进行语义匹配。"
+              type="info"
+              :closable="false"
+              show-icon
+              class="profile-alert"
+            />
+
+            <el-form-item label="目标业务方向">
+              <el-select v-model="targetDirections" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定方向">
+                <el-option v-for="item in knowledgeOptions.directions" :key="item.id" :label="item.name" :value="item.id" />
               </el-select>
             </el-form-item>
 
-            <el-form-item label="目标地区">
-              <el-select v-model="region" class="full-width">
-                <el-option label="全国" value="全国" />
-                <el-option label="北京市" value="北京市" />
-                <el-option label="上海市" value="上海市" />
-                <el-option label="广东省" value="广东省" />
-                <el-option label="湖北省" value="湖北省" />
+            <el-form-item label="目标行业场景">
+              <el-select v-model="targetScenarios" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定场景">
+                <el-option v-for="item in knowledgeOptions.scenarios" :key="item.id" :label="item.name" :value="item.id" />
               </el-select>
+            </el-form-item>
+
+            <el-form-item label="目标产品或服务">
+              <el-select v-model="targetProducts" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定产品">
+                <el-option v-for="item in knowledgeOptions.products" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="目标技术能力">
+              <el-select v-model="targetCapabilities" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定能力">
+                <el-option v-for="item in knowledgeOptions.capabilities" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="同义词或业务补充词">
+              <el-input v-model="synonyms" placeholder="例如：数字孪生平台, 3D 可视化, DCIM" />
+            </el-form-item>
+
+            <el-form-item label="采购方式">
+              <el-input v-model="targetProcurementTypes" placeholder="可选，例如：公开招标, 竞争性磋商" />
+            </el-form-item>
+
+            <el-form-item label="目标地区">
+              <el-autocomplete
+                v-model="region"
+                class="full-width"
+                :fetch-suggestions="suggestRegions"
+                clearable
+                :trigger-on-focus="true"
+                placeholder="选择或输入目标地区"
+              />
             </el-form-item>
 
             <el-form-item label="包含关键词">
@@ -257,6 +354,11 @@ function submitSite() {
                 <el-radio-button label="60">每1小时</el-radio-button>
                 <el-radio-button label="360">每6小时</el-radio-button>
               </el-radio-group>
+            </el-form-item>
+
+            <el-form-item label="公告时间范围">
+              <el-input-number v-model="lookbackDays" :min="1" :max="90" controls-position="right" />
+              <span class="form-hint inline-hint">抓取最近多少天的公告</span>
             </el-form-item>
 
             <el-form-item label="提醒方式">
@@ -312,7 +414,7 @@ function submitSite() {
               <el-input
                 v-model="apiKey"
                 :type="showApiKey ? 'text' : 'password'"
-                placeholder="请输入企业 API Key"
+                :placeholder="aiConfigured ? '已配置，留空将保留当前密钥' : '请输入企业 API Key'"
                 autocomplete="new-password"
               >
                 <template #prefix><el-icon><KeyRound /></el-icon></template>
@@ -322,6 +424,7 @@ function submitSite() {
                   </button>
                 </template>
               </el-input>
+              <div v-if="aiConfigured" class="form-hint">密钥已由后端保存并脱敏显示；只有重新填写时才会更新。</div>
             </el-form-item>
 
             <el-row :gutter="12">
