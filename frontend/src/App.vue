@@ -46,6 +46,7 @@ const {
   loadBootstrap,
   runSearch,
   analyzeProject,
+  updateFineReviewStatus,
   markSelectedRead,
   saveFollowUp,
   toggleProjectReminder,
@@ -166,6 +167,7 @@ onMounted(loadBootstrap);
       @file-selected="importFile = $event"
       @update:input-kind="importKind = $event"
       @update:selected-library-key="libraryForm.key = $event"
+      @update-fine-status="updateFineReviewStatus($event.rowId, $event.status)"
       @open-workspace="openWorkspace"
     />
 

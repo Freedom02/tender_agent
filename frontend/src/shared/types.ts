@@ -103,6 +103,8 @@ export interface ReasoningRow {
   risk: string;
   suggestion?: string;
   confidence?: number;
+  manualStatus?: string;
+  statusSource?: "模型/规则" | "人工审核" | string;
 }
 
 export interface RiskItem {
@@ -150,6 +152,12 @@ export interface FineReviewResult {
   recommendation: string;
   clauseCount: number;
   statusCounts: Record<string, number>;
+  hardBlockers: Array<{
+    requirementId: string;
+    title: string;
+    detail: string;
+    sourceLocator?: string;
+  }>;
   unresolvedMandatory: Array<{
     requirementId: string;
     title: string;

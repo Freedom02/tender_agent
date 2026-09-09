@@ -551,6 +551,27 @@ body {
   font-weight: 700;
 }
 
+.fine-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fine-status-filter {
+  width: 200px;
+}
+
+.fine-status-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fine-status-cell .el-select {
+  width: 128px;
+}
+
 .matching-empty {
   min-height: 260px;
   border: 1px dashed var(--border-color);
@@ -559,6 +580,17 @@ body {
 
 .bid-workspace-page {
   min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .fine-review-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fine-status-filter {
+    width: 100%;
+  }
 }
 
 .generator-panel {

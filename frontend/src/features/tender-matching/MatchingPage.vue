@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { FileCheck2, FileText, Sparkles, Upload } from "lucide-vue-next";
 import type { LibrarySummary, Workspace } from "../../shared/types";
 
@@ -21,13 +21,32 @@ const emit = defineEmits<{
   fileSelected: [file: File | null];
   "update:input-kind": [kind: "notice" | "tender_document"];
   "update:selected-library-key": [key: string];
+  "update-fine-status": [payload: { rowId: string; status: string }];
   openWorkspace: [];
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
+const fineStatusFilter = ref("全部状态");
+const fineStatusValues = ["满足", "部分满足", "待确认", "待补材料", "待澄清", "不满足"];
 const fileName = computed(() => props.importFile?.name || "");
 const selectedLibrary = computed(
   () => props.libraries.find((library) => library.key === props.selectedLibraryKey) || props.libraries[0] || null
+);
+const fineStatusOptions = computed(() => {
+  const statusCounts = props.workspace?.reasoning.fineReview?.statusCounts || {};
+  return ["全部状态", ...Object.keys(statusCounts)];
+});
+const filteredFineRows = computed(() => {
+  const rows = props.workspace?.reasoning.fineReview?.rows || [];
+  if (fineStatusFilter.value === "全部状态") return rows;
+  return rows.filter((row) => row.status === fineStatusFilter.value);
+});
+
+watch(
+  () => props.workspace?.id,
+  () => {
+    fineStatusFilter.value = "全部状态";
+  }
 );
 
 function chooseFile() {
@@ -237,7 +256,12 @@ function onFileChange(event: Event) {
             <el-icon><FileCheck2 /></el-icon>
             <span>投标应答预审</span>
           </div>
-          <el-tag type="warning" effect="light">{{ workspace.reasoning.fineReview.recommendation }}</el-tag>
+          <el-tag
+            :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
+            effect="light"
+          >
+            {{ workspace.reasoning.fineReview.recommendation }}
+          </el-tag>
         </div>
       </template>
 
@@ -272,6 +296,15 @@ function onFileChange(event: Event) {
       />
 
       <el-alert
+        v-if="workspace.reasoning.fineReview.hardBlockers.length"
+        :title="`发现 ${workspace.reasoning.fineReview.hardBlockers.length} 条否决性条款未形成满足证据，已拦截参与建议。`"
+        type="error"
+        show-icon
+        :closable="false"
+        class="mt-12"
+      />
+
+      <el-alert
         v-if="workspace.reasoning.fineReview.unresolvedMandatory.length"
         :title="`存在 ${workspace.reasoning.fineReview.unresolvedMandatory.length} 条待补材料或待澄清的强制要求，请先人工复核。`"
         type="warning"
@@ -280,9 +313,38 @@ function onFileChange(event: Event) {
         class="mt-12"
       />
 
-      <el-table :data="workspace.reasoning.fineReview.rows" class="mt-12" size="small">
+      <div class="fine-review-toolbar mt-12">
+        <span class="form-hint">按匹配状态查看条款</span>
+        <el-select v-model="fineStatusFilter" aria-label="按匹配状态筛选" class="fine-status-filter">
+          <el-option
+            v-for="status in fineStatusOptions"
+            :key="status"
+            :label="status === '全部状态' ? status : `${status} ${workspace.reasoning.fineReview.statusCounts[status] ?? 0}`"
+            :value="status"
+          />
+        </el-select>
+      </div>
+
+      <el-table :data="filteredFineRows" class="mt-12" size="small">
         <el-table-column prop="kind" label="条款类型" width="110" />
-        <el-table-column prop="status" label="状态" width="100" />
+        <el-table-column label="状态" width="160">
+          <template #default="{ row }">
+            <div class="fine-status-cell">
+              <el-select
+                :model-value="row.status"
+                size="small"
+                :disabled="busy || !row.id"
+                aria-label="修改匹配结论"
+                @update:model-value="emit('update-fine-status', { rowId: row.id || '', status: $event })"
+              >
+                <el-option v-for="status in fineStatusValues" :key="status" :label="status" :value="status" />
+              </el-select>
+              <el-tag v-if="row.statusSource === '人工审核'" size="small" type="success" effect="plain">
+                人工
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="sourceLocator" label="文件定位" width="110" />
         <el-table-column prop="requirement" label="招标条款" min-width="220" />
         <el-table-column prop="evidence" label="企业证据" min-width="240" />

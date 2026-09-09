@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
-from .eligibility import call_openai_compatible
+from .eligibility import _is_gateway_timeout, call_openai_compatible
 
 
 ALLOWED_CATEGORIES = {
@@ -74,7 +75,7 @@ def _source_locator(item: dict[str, Any], index: int) -> str:
 
 def _category_for(text: str) -> str:
     value = _compact(text)
-    if any(term in value for term in ("无效投标", "否决", "废标", "拒绝", "不予受理", "不得参加")):
+    if any(term in value for term in ("无效投标", "投标无效", "否决", "废标", "拒绝", "不予受理", "不得参加")):
         return "rejection"
     if any(term in value for term in ("报价", "最高限价", "控制价", "下浮", "折扣", "费用")):
         return "pricing"
@@ -142,6 +143,7 @@ def _is_requirement(text: str) -> bool:
         "交付",
         "验收",
         "无效投标",
+        "投标无效",
         "否决",
     )
     return any(term in value for term in terms) or bool(
@@ -263,6 +265,41 @@ def _normalize_model_extraction(
     }
 
 
+def _model_input_batches(segments: list[dict[str, Any]]) -> list[str]:
+    candidates = [
+        f"[{_source_locator(segment, index)}] {_safe_text(segment.get('text'), 600)}"
+        for index, segment in enumerate(segments)
+        if (
+            _safe_text(segment.get("text"), 600)
+            and (_is_requirement(_safe_text(segment.get("text"), 600)) or _is_heading(_safe_text(segment.get("text"), 600)))
+        )
+    ]
+    if not candidates:
+        candidates = [
+            f"[{_source_locator(segment, index)}] {_safe_text(segment.get('text'), 600)}"
+            for index, segment in enumerate(segments[:80])
+            if _safe_text(segment.get("text"), 600)
+        ]
+    if not candidates:
+        return []
+
+    batch_count = min(4, max(1, math.ceil(sum(len(item) + 1 for item in candidates) / 5000)))
+    batches: list[str] = []
+    for batch_index in range(batch_count):
+        start = batch_index * len(candidates) // batch_count
+        end = (batch_index + 1) * len(candidates) // batch_count
+        selected: list[str] = []
+        length = 0
+        for item in candidates[start:end]:
+            if selected and length + len(item) + 1 > 5000:
+                break
+            selected.append(item)
+            length += len(item) + 1
+        if selected:
+            batches.append("\n".join(selected))
+    return batches
+
+
 def extract_tender_requirements(
     text: str,
     segments: list[dict[str, Any]],
@@ -280,11 +317,6 @@ def extract_tender_requirements(
             "extractionWarning": "未配置大模型，已使用规则拆解条款。",
         }
 
-    compact_segments = []
-    for index, segment in enumerate(segments[:500]):
-        content = _safe_text(segment.get("text"), 800)
-        if content:
-            compact_segments.append(f"[{_source_locator(segment, index)}] {content}")
     prompt = (
         "你是招标文件条款拆解助手。仅依据给定原文，拆成可以逐条核验的要求。"
         "不得判断企业是否满足，不得补写原文没有的内容。"
@@ -292,35 +324,71 @@ def extract_tender_requirements(
         '{"requirements":[{"id":"req-001","category":"qualification|performance|personnel|technical|commercial|document|pricing|contract|rejection|other",'
         '"text":"原文要求","section":"所在章节","sourceLocator":"必须原样引用输入方括号中的定位",'
         '"mandatory":true,"isRejection":false,"confidence":0.0}],"warnings":[]}'
-        "。复合条款拆成多个独立 requirement。"
+        "。复合条款拆成多个独立 requirement。每批最多输出 8 条最关键要求。"
     )
-    result = call_openai_compatible(
-        ai,
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": "招标文件片段如下：\n" + "\n".join(compact_segments)[:50000]},
-        ],
-        max_tokens=5000,
-        temperature=0,
-    )
-    if result.get("success"):
-        available_locators = {_source_locator(item, index) for index, item in enumerate(segments)}
+    available_locators = {_source_locator(item, index) for index, item in enumerate(segments)}
+    extracted: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    model_used = ""
+
+    for index, batch in enumerate(_model_input_batches(segments), start=1):
+        result = call_openai_compatible(
+            ai,
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"招标文件片段（第 {index} 批）如下：\n{batch}"},
+            ],
+            max_tokens=700,
+            temperature=0,
+        )
+        if _is_gateway_timeout(result):
+            result = call_openai_compatible(
+                ai,
+                [
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": f"招标文件片段（第 {index} 批，已压缩）如下：\n{batch[:2200]}",
+                    },
+                ],
+                max_tokens=350,
+                temperature=0,
+            )
+        if not result.get("success"):
+            warnings.append(f"第 {index} 批模型调用失败：{result.get('error', '未知错误')}")
+            continue
+
         normalized = _normalize_model_extraction(_json_from_model(result.get("content", "")) or {}, available_locators)
-        if normalized:
-            return {
-                **normalized,
-                "extractionMethod": "llm",
-                "modelUsed": result.get("model", ""),
-                "extractionWarning": "",
-            }
-        warning = "模型未返回可用 JSON，已回退到规则拆解。"
-    else:
-        warning = f"{result.get('error', '模型调用失败')}，已回退到规则拆解。"
+        if not normalized:
+            warnings.append(f"第 {index} 批模型未返回可用 JSON。")
+            continue
+        extracted.extend(normalized["requirements"])
+        warnings.extend(normalized["warnings"])
+        model_used = str(result.get("model", ""))
+
+    deduplicated: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for requirement in extracted:
+        key = (str(requirement.get("sourceLocator", "")), str(requirement.get("text", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(requirement)
+    if deduplicated:
+        return {
+            "requirements": deduplicated,
+            "warnings": warnings[:8],
+            "extractionMethod": "llm",
+            "modelUsed": model_used,
+            "extractionWarning": "部分条款批次未完成，已保留模型成功拆解结果。" if warnings else "",
+        }
+
+    warning = "；".join(warnings[:3]) or "模型未返回可用 JSON"
     return {
         **rule_result,
         "extractionMethod": "rule",
         "modelUsed": "",
-        "extractionWarning": warning,
+        "extractionWarning": f"{warning}，已回退到规则拆解。",
     }
 
 
@@ -466,6 +534,108 @@ def _risk_for_status(status: str) -> str:
     return "高"
 
 
+def summarize_fine_review(rows: list[dict[str, Any]], extraction: dict[str, Any]) -> dict[str, Any]:
+    weighted_score = 0.0
+    total_weight = 0
+    unresolved_mandatory = []
+    for row in rows:
+        category = str(row.get("category") or "other")
+        status = str(row.get("status") or "待确认")
+        weight = WEIGHTS.get(category, WEIGHTS["other"])
+        total_weight += weight
+        weighted_score += weight * SCORE_BY_STATUS.get(status, 35)
+        if row.get("mandatory") and status in {"待补材料", "待澄清", "不满足"}:
+            unresolved_mandatory.append(row)
+
+    score = round(weighted_score / total_weight) if total_weight else 0
+    rejection_risks = [
+        row for row in rows
+        if row.get("category") == "rejection" and row.get("status") != "满足"
+    ]
+    hard_blockers = [
+        {
+            "requirementId": str(row.get("id", "")),
+            "title": f"{row.get('kind', CATEGORY_LABELS['other'])}：{row.get('status', '待确认')}",
+            "detail": str(row.get("requirement", "")),
+            "sourceLocator": str(row.get("sourceLocator", "")),
+        }
+        for row in rejection_risks
+    ]
+    if hard_blockers:
+        recommendation = "不建议参与"
+    elif score >= 85 and not unresolved_mandatory:
+        recommendation = "建议进入正式投标准备"
+    elif score >= 70:
+        recommendation = "有条件参与，先补材料"
+    elif score >= 55:
+        recommendation = "人工重点评估"
+    else:
+        recommendation = "暂不建议参与"
+
+    risks = [
+        {
+            "level": str(row.get("risk", "中")),
+            "title": f"{row.get('kind', CATEGORY_LABELS['other'])}：{row.get('status', '待确认')}",
+            "detail": f"{row.get('requirement', '')}。{row.get('suggestion', '')}",
+            "sourceLocator": str(row.get("sourceLocator", "")),
+        }
+        for row in rows
+        if row.get("risk") != "低"
+    ][:30]
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "待确认")
+        counts[status] = counts.get(status, 0) + 1
+
+    return {
+        "rows": rows,
+        "risks": risks,
+        "score": score,
+        "decision": recommendation,
+        "recommendation": recommendation,
+        "clauseCount": len(rows),
+        "statusCounts": counts,
+        "hardBlockers": hard_blockers,
+        "unresolvedMandatory": [
+            {
+                "requirementId": str(row.get("id", "")),
+                "title": str(row.get("kind", CATEGORY_LABELS["other"])),
+                "detail": str(row.get("requirement", "")),
+                "sourceLocator": str(row.get("sourceLocator", "")),
+            }
+            for row in unresolved_mandatory
+        ],
+        "extraction": extraction,
+    }
+
+
+def update_fine_review_status(
+    fine_review: dict[str, Any],
+    row_id: str,
+    status: str,
+) -> dict[str, Any] | None:
+    if status not in SCORE_BY_STATUS:
+        raise ValueError(f"不支持的匹配状态：{status}")
+    rows = fine_review.get("rows")
+    if not isinstance(rows, list):
+        return None
+    target = next(
+        (row for row in rows if isinstance(row, dict) and str(row.get("id", "")) == row_id),
+        None,
+    )
+    if target is None:
+        return None
+    target["status"] = status
+    target["risk"] = _risk_for_status(status)
+    target["suggestion"] = _suggestion_for_status(status, str(target.get("category") or "other"))
+    target["manualStatus"] = status
+    target["statusSource"] = "人工审核"
+    extraction = fine_review.get("extraction")
+    if not isinstance(extraction, dict):
+        extraction = {}
+    return summarize_fine_review(rows, extraction)
+
+
 def evaluate_tender_document(
     text: str,
     segments: list[dict[str, Any]],
@@ -474,9 +644,6 @@ def evaluate_tender_document(
 ) -> dict[str, Any]:
     extraction = extract_tender_requirements(text, segments, ai)
     rows: list[dict[str, Any]] = []
-    weighted_score = 0.0
-    total_weight = 0
-    unresolved_mandatory: list[dict[str, Any]] = []
 
     for requirement in extraction["requirements"]:
         category = str(requirement.get("category") or "other")
@@ -502,58 +669,12 @@ def evaluate_tender_document(
             "confidence": requirement.get("confidence", 0),
         }
         rows.append(row)
-        weight = WEIGHTS.get(category, WEIGHTS["other"])
-        total_weight += weight
-        weighted_score += weight * SCORE_BY_STATUS.get(status, 35)
-        if row["mandatory"] and status in {"待补材料", "待澄清", "不满足"}:
-            unresolved_mandatory.append(row)
-
-    score = round(weighted_score / total_weight) if total_weight else 0
-    rejection_risks = [row for row in rows if row["category"] == "rejection" and row["status"] != "满足"]
-    if score >= 85 and not unresolved_mandatory and not rejection_risks:
-        recommendation = "建议进入正式投标准备"
-    elif score >= 70:
-        recommendation = "有条件参与，先补材料"
-    elif score >= 55:
-        recommendation = "人工重点评估"
-    else:
-        recommendation = "暂不建议参与"
-
-    risks = [
+    return summarize_fine_review(
+        rows,
         {
-            "level": row["risk"],
-            "title": f"{row['kind']}：{row['status']}",
-            "detail": f"{row['requirement']}。{row['suggestion']}",
-            "sourceLocator": row["sourceLocator"],
-        }
-        for row in rows
-        if row["risk"] != "低"
-    ][:30]
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["status"]] = counts.get(row["status"], 0) + 1
-
-    return {
-        "rows": rows,
-        "risks": risks,
-        "score": score,
-        "decision": recommendation,
-        "recommendation": recommendation,
-        "clauseCount": len(rows),
-        "statusCounts": counts,
-        "unresolvedMandatory": [
-            {
-                "requirementId": row["id"],
-                "title": row["kind"],
-                "detail": row["requirement"],
-                "sourceLocator": row["sourceLocator"],
-            }
-            for row in unresolved_mandatory
-        ],
-        "extraction": {
             "method": extraction["extractionMethod"],
             "modelUsed": extraction["modelUsed"],
             "warning": extraction["extractionWarning"],
             "warnings": extraction.get("warnings", []),
         },
-    }
+    )

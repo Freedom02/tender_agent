@@ -18,7 +18,7 @@ from .tender_matching.eligibility import (
     evaluate_announcement_eligibility,
     test_ai_connection,
 )
-from .tender_matching.document_fine_matching import evaluate_tender_document
+from .tender_matching.document_fine_matching import evaluate_tender_document, update_fine_review_status
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
 from .tender_monitor.adapters import is_procurement_notice, repair_notice_fields, valid_time_value
 
@@ -752,6 +752,28 @@ class Store:
             return None
         workspace["draft"] = draft
         workspace["draftVersion"] = int(workspace.get("draftVersion", 0)) + 1
+        self.persist_runtime()
+        return {"workspace": workspace}
+
+    def update_fine_review_row(
+        self,
+        workspace_id: str,
+        row_id: str,
+        status: str,
+    ) -> dict[str, Any] | None:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        reasoning = workspace.get("reasoning")
+        if not isinstance(reasoning, dict):
+            return None
+        fine_review = reasoning.get("fineReview")
+        if not isinstance(fine_review, dict):
+            return None
+        updated = update_fine_review_status(fine_review, row_id, status)
+        if not updated:
+            return None
+        reasoning["fineReview"] = updated
         self.persist_runtime()
         return {"workspace": workspace}
 

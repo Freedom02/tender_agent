@@ -70,6 +70,11 @@ class DraftPayload(BaseModel):
     draft: str = ""
 
 
+class FineReviewStatusPayload(BaseModel):
+    rowId: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+
+
 class AskPayload(BaseModel):
     question: str = Field(min_length=1)
     projectId: str = ""
@@ -223,6 +228,17 @@ def save_draft(workspace_id: str, payload: DraftPayload) -> dict[str, Any]:
     result = store.save_draft(workspace_id, payload.draft)
     if not result:
         raise HTTPException(status_code=404, detail="未找到工作台")
+    return result
+
+
+@app.post("/api/workspaces/{workspace_id}/fine-review/status")
+def update_fine_review_status_api(workspace_id: str, payload: FineReviewStatusPayload) -> dict[str, Any]:
+    try:
+        result = store.update_fine_review_row(workspace_id, payload.rowId, payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="未找到可更新的细匹配条款")
     return result
 
 

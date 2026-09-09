@@ -65,6 +65,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ draft })
     }),
+  updateFineReviewStatus: (workspaceId: string, rowId: string, status: string) =>
+    request<{ workspace: Workspace }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/fine-review/status`,
+      {
+        method: "POST",
+        body: JSON.stringify({ rowId, status })
+      }
+    ),
   saveLibrary: (libraryKey: string, payload: Record<string, unknown>) =>
     request<Record<string, unknown>>(`/api/libraries/${encodeURIComponent(libraryKey)}`, {
       method: "POST",

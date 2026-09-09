@@ -42,6 +42,19 @@ def _safe_text(value: Any, limit: int = 900) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+def _trim_model_input(value: Any, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    head = max(1, int(limit * 0.72))
+    tail = max(1, limit - head)
+    return f"{text[:head]}\n...[中间原文已压缩]...\n{text[-tail:]}"
+
+
+def _is_gateway_timeout(result: dict[str, Any]) -> bool:
+    return not result.get("success") and "HTTP 504" in str(result.get("error", ""))
+
+
 def _ai_settings(ai: dict[str, Any]) -> tuple[str, str, str]:
     base_url = str(ai.get("baseUrl") or os.getenv("AI_BASE_URL", "")).strip()
     api_key = str(ai.get("apiKey") or os.getenv("AI_API_KEY", "")).strip()
@@ -347,14 +360,27 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
         '"text":"原始要求","mandatory":true,"isRejection":false,"quantity":null,"timeLimit":"","confidence":0.0}],"warnings":[]}'
         "。每条 requirement 只保留一个可核验要求。"
     )
+    model_text = _trim_model_input(text, 5000)
     result = call_openai_compatible(
         ai,
         [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": f"公告原文如下：\n{text[:24000]}"},
+            {"role": "user", "content": f"公告原文如下：\n{model_text}"},
         ],
-        max_tokens=2400,
+        max_tokens=700,
     )
+    if _is_gateway_timeout(result):
+        result = call_openai_compatible(
+            ai,
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": f"公告原文如下（已压缩，仅提取最关键的可核验要求）：\n{_trim_model_input(text, 2200)}",
+                },
+            ],
+            max_tokens=350,
+        )
     if result["success"]:
         normalized = _normalize_model_extraction(_json_from_model(result["content"]) or {})
         if normalized:

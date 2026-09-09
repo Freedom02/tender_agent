@@ -311,6 +311,23 @@ export function useAppState() {
     }
   }
 
+  async function updateFineReviewStatus(rowId: string, status: string) {
+    if (!selectedWorkspace.value || !rowId) return;
+    busy.value = true;
+    try {
+      const result = await api.updateFineReviewStatus(selectedWorkspace.value.id, rowId, status);
+      const index = workspaces.value.findIndex((item) => item.id === result.workspace.id);
+      if (index >= 0) workspaces.value[index] = result.workspace;
+      else workspaces.value.unshift(result.workspace);
+      selectedWorkspaceId.value = result.workspace.id;
+      ElMessage.success("人工匹配结论已保存");
+    } catch (error) {
+      ElMessage.error((error as Error).message);
+    } finally {
+      busy.value = false;
+    }
+  }
+
   async function saveConfig(nextConfig?: Record<string, unknown>) {
     busy.value = true;
     try {
@@ -546,6 +563,7 @@ export function useAppState() {
     loadBootstrap,
     runSearch,
     analyzeProject,
+    updateFineReviewStatus,
     markSelectedRead,
     saveFollowUp,
     toggleProjectReminder,
