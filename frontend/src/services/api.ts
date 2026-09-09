@@ -65,12 +65,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ draft })
     }),
-  updateFineReviewStatus: (workspaceId: string, rowId: string, status: string) =>
+  updateFineReviewStatus: (workspaceId: string, rowId: string, status: string, reviewer = "当前用户") =>
     request<{ workspace: Workspace }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/fine-review/status`,
       {
         method: "POST",
-        body: JSON.stringify({ rowId, status })
+        body: JSON.stringify({ rowId, status, reviewer })
       }
     ),
   saveLibrary: (libraryKey: string, payload: Record<string, unknown>) =>

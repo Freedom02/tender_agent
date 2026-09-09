@@ -760,6 +760,7 @@ class Store:
         workspace_id: str,
         row_id: str,
         status: str,
+        reviewer: str = "当前用户",
     ) -> dict[str, Any] | None:
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
@@ -770,10 +771,40 @@ class Store:
         fine_review = reasoning.get("fineReview")
         if not isinstance(fine_review, dict):
             return None
+        rows = fine_review.get("rows")
+        previous_row = next(
+            (
+                row for row in rows
+                if isinstance(row, dict) and str(row.get("id", "")) == row_id
+            ),
+            None,
+        ) if isinstance(rows, list) else None
+        previous_status = str(previous_row.get("status", "待确认")) if previous_row else ""
         updated = update_fine_review_status(fine_review, row_id, status)
         if not updated:
             return None
         reasoning["fineReview"] = updated
+        if previous_status != status:
+            audit_records = workspace.setdefault("auditRecords", [])
+            if not isinstance(audit_records, list):
+                audit_records = []
+                workspace["auditRecords"] = audit_records
+            audit_records.append(
+                {
+                    "id": uid("audit"),
+                    "workspaceId": workspace_id,
+                    "projectId": str(workspace.get("projectId", "")),
+                    "projectTitle": str(workspace.get("title", "")),
+                    "rowId": row_id,
+                    "requirement": str(previous_row.get("requirement", "")) if previous_row else "",
+                    "previousStatus": previous_status,
+                    "newStatus": status,
+                    "reviewer": reviewer.strip() or "当前用户",
+                    "reviewedAt": now_iso(),
+                    "source": "人工审核",
+                }
+            )
+            workspace["auditRecords"] = audit_records[-200:]
         self.persist_runtime()
         return {"workspace": workspace}
 

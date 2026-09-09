@@ -572,6 +572,24 @@ body {
   width: 128px;
 }
 
+.audit-summary {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--success);
+  background: rgba(35, 168, 109, 0.06);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.audit-summary-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
 .matching-empty {
   min-height: 260px;
   border: 1px dashed var(--border-color);

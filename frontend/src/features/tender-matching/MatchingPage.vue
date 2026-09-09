@@ -29,6 +29,8 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const fineStatusFilter = ref("全部状态");
 const fineStatusValues = ["满足", "部分满足", "待确认", "待补材料", "待澄清", "不满足"];
 const fileName = computed(() => props.importFile?.name || "");
+const auditRecords = computed(() => props.workspace?.auditRecords || []);
+const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
 const selectedLibrary = computed(
   () => props.libraries.find((library) => library.key === props.selectedLibraryKey) || props.libraries[0] || null
 );
@@ -312,6 +314,19 @@ function onFileChange(event: Event) {
         :closable="false"
         class="mt-12"
       />
+
+      <div v-if="latestAuditRecord" class="audit-summary mt-12">
+        <div class="audit-summary-heading">
+          <strong>人工审核记录</strong>
+          <el-tag size="small" type="success" effect="plain">
+            共 {{ auditRecords.length }} 条
+          </el-tag>
+        </div>
+        <span>
+          最近一次：{{ latestAuditRecord.reviewer }}于 {{ latestAuditRecord.reviewedAt }} 将
+          “{{ latestAuditRecord.requirement }}”从“{{ latestAuditRecord.previousStatus }}”调整为“{{ latestAuditRecord.newStatus }}”
+        </span>
+      </div>
 
       <div class="fine-review-toolbar mt-12">
         <span class="form-hint">按匹配状态查看条款</span>

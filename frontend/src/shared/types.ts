@@ -179,8 +179,23 @@ export interface Workspace {
   title: string;
   project: CatalogItem;
   reasoning: ReasoningResult;
+  auditRecords?: AuditRecord[];
   draft: string;
   draftVersion: number;
+}
+
+export interface AuditRecord {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  projectTitle: string;
+  rowId: string;
+  requirement: string;
+  previousStatus: string;
+  newStatus: string;
+  reviewer: string;
+  reviewedAt: string;
+  source: string;
 }
 
 export interface LibraryDocument {
