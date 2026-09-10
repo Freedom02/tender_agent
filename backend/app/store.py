@@ -85,15 +85,15 @@ class Store:
         self.company_material_index = read_json(self.company_material_index_path, {})
         self.company_knowledge = read_json(self.company_knowledge_path, {})
         self.ontology = read_json(self.ontology_path, {})
-        seed = read_json(self.catalog_seed_path, [])
-        self.catalog = read_json(self.catalog_path, seed)
+        # The runtime catalog is authoritative. New tender projects must enter
+        # through a real monitor result or the upload endpoint.
+        self.catalog = read_json(self.catalog_path, [])
         self.config = ensure_config(read_json(self.config_path, self.default_config()))
         self.libraries = read_json(self.libraries_path, self.default_libraries())
         self.reminders = read_json(self.runtime_root / "reminders.json", [])
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
         self._seed_company_library_index()
-        self._seed_demo_records()
         catalog_repaired = False
         for item in self.catalog:
             catalog_repaired = repair_notice_fields(item) or catalog_repaired
@@ -228,51 +228,6 @@ class Store:
     def _company_service_types(self) -> list[str]:
         values = self.company.get("serviceTypes", [])
         return [str(value).strip() for value in values if str(value).strip()]
-
-    def _seed_demo_records(self) -> None:
-        if self.catalog:
-            return
-        self.catalog = [
-            {
-                "id": "sample-hospital-labor",
-                "title": "医院劳务派遣服务项目（完整招标样本）",
-                "category": "劳务派遣",
-                "region": "河南省濮阳市",
-                "noticeType": "Demo 完整招标文件",
-                "source": "本地脱敏示例",
-                "publishedDate": "2026-09-01",
-                "servicePeriod": "12个月",
-                "dataOrigin": "demo",
-                "analysisText": (
-                    "项目名称：濮阳市某医院2026年度劳务派遣服务项目\n"
-                    "项目编号：PY-HR-2026-018\n招标人：濮阳市某医院\n"
-                    "服务类型：劳务派遣\n服务地点：河南省濮阳市\n预算金额：人民币300万元/年\n"
-                    "服务期限：12个月\n投标截止时间：2026-09-08 09:30\n\n"
-                    "一、投标人资格要求\n1. 具有有效营业执照。\n"
-                    "2. 具有有效的人力资源服务许可证和劳务派遣经营许可证。\n"
-                    "3. 近三年承担过不少于3个类似医院或事业单位劳务派遣项目。\n"
-                    "4. 拟派项目经理1名，具有3年以上人力资源服务项目管理经验。\n\n"
-                    "二、服务要求\n负责人员招聘、入职、考勤、培训、薪酬核算和日常管理。\n"
-                    "提供驻场服务团队，建立投诉处理和应急响应机制。\n"
-                    "每月提交人员考勤、社保和服务质量报告。\n\n"
-                    "三、投标文件要求\n提交项目理解、人员配置、服务方案、质量保障和应急预案。\n"
-                    "未按要求提供资格证明材料的，视为无效投标。"
-                ),
-            },
-            {
-                "id": "sample-security",
-                "title": "医院保安服务项目（不匹配样本）",
-                "category": "保安服务",
-                "region": "河南省濮阳市",
-                "noticeType": "Demo 风险识别样本",
-                "source": "本地脱敏示例",
-                "publishedDate": "2026-09-01",
-                "servicePeriod": "12个月",
-                "dataOrigin": "demo",
-                "analysisText": "项目名称：某医院保安服务项目\n服务类型：保安服务\n服务地点：河南省濮阳市\n投标截止时间：2026-09-20 09:00\n资格要求：提供保安服务许可证；近三年承担过不少于2个医院保安服务项目。",
-            },
-        ]
-        self.persist_catalog()
 
     def persist_catalog(self) -> None:
         write_json(self.catalog_path, self.catalog)
