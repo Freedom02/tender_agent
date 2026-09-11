@@ -60,7 +60,7 @@ def sync_facts_to_m3(m3: M3Client, facts: dict[str, Any]) -> dict[str, Any]:
             org_id = org.get("organizationId") or "org-001"
             m3.upsert_object("organization", _clean_fields("organization", org, "organizationId"), str(org_id))
             objects += 1
-        except M3Error as e:
+        except Exception as e:
             warnings.append(f"organization 写入失败：{str(e)[:160]}")
 
     # 2) 7 个事实类（列表）
@@ -73,7 +73,7 @@ def sync_facts_to_m3(m3: M3Client, facts: dict[str, Any]) -> dict[str, Any]:
             try:
                 m3.upsert_object(key, _clean_fields(key, row, id_field), str(biz_id))
                 objects += 1
-            except M3Error as e:
+            except Exception as e:
                 warnings.append(f"{key}/{biz_id} 写入失败：{str(e)[:160]}")
 
     # 3) 关系边（与 build_edges 相同的确定性边表，方向 = fromClass → toClass）
@@ -85,7 +85,7 @@ def sync_facts_to_m3(m3: M3Client, facts: dict[str, Any]) -> dict[str, Any]:
             tgt_rid = m3.rid(to_snake, e["toId"])
             m3.create_edge(e["relationName"], src_rid, tgt_rid)
             edges += 1
-        except M3Error as err:
+        except Exception as err:
             warnings.append(f"边 {e['relationName']} {e['fromId']}→{e['toId']} 失败：{str(err)[:160]}")
 
     return {"objects": objects, "edges": edges, "warnings": warnings}
