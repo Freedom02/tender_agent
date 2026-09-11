@@ -7,8 +7,7 @@ export type AppTab =
   | "matching"
   | "workspace"
   | "generator"
-  | "libraries"
-  | "library-documents"
+  | "materials"
   | "config";
 
 export interface NavigationItem {
@@ -30,7 +29,7 @@ export function createNavigationItems(counts: Record<AppTab, number>): Navigatio
     { key: "follow-up", label: "跟进项目", icon: ClipboardCheck, count: counts["follow-up"] },
     { key: "matching", label: "匹配评估", icon: Waypoints, count: counts.matching },
     { key: "workspace", label: "标书工作台", icon: FileText, count: counts.workspace },
-    { key: "libraries", label: "企业资料库", icon: Database, count: counts.libraries },
+    { key: "materials", label: "企业材料", icon: Database, count: counts.materials },
     { key: "config", label: "自动化与配置", icon: Settings, count: counts.config }
   ];
 }

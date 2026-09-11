@@ -23,3 +23,9 @@ agent-config.json
 *.log
 .DS_Store
 Thumbs.db
+~$*
+
+# One-off M3 workspace / dev-test scripts / demo data (not for git)
+M3_workspace/
+backend/archive/
+demo-data/

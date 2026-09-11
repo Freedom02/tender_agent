@@ -489,6 +489,13 @@ body {
   margin-bottom: 12px;
 }
 
+.ocr-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .project-title {
   margin: 0 0 6px;
   color: var(--text-primary);
@@ -642,6 +649,25 @@ body {
   margin: 8px 0 0;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.profile-summary {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(5, 205, 153, 0.28);
+  border-radius: 10px;
+  background: rgba(5, 205, 153, 0.06);
+}
+
+.profile-summary .library-summary-title {
+  margin-bottom: 4px;
+}
+
+.profile-summary .profile-company {
+  margin: 4px 0 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .result-panel {

@@ -31,14 +31,14 @@
 - 项目相关性分、公告资格匹配分、风险列表和获取招标文件建议
 - 工作台草稿保存
 - Markdown、JSON、DOCX 响应底稿导出
-- 企业资料库原始文件保存和预览
+- 企业材料模板收集与导入（填 Excel 模板 → 打包 ZIP 上传导入 → 直接 upsert 进 M3）
 - AI 问答接口入口
 
 ### 尚未实现或不能按生产能力理解
 
-- 扫描 PDF 和图片 OCR
-- Excel 表格解析
-- 文档自动分类、字段抽取和人工确认
+- 扫描 PDF 和图片 OCR（招标文件侧）
+- 招标文件 Excel 表格解析
+- 招标文件文档自动分类、字段抽取和人工确认
 - 资料有效期、证照状态和原件核验
 - 页码级证据定位
 - 真正的三层匹配引擎
@@ -112,15 +112,15 @@ python -m compileall backend
 
 | 文件 | 用途 | 是否提交 |
 | --- | --- | --- |
-| `company-profile.json` | Demo 企业能力资料 | 是，必须脱敏 |
-| `agent-config.json` | 本机搜索、AI、通知和监控配置 | 否 |
-| `ontology-governance.json` | 领域本体与治理约束 | 是 |
+| `runtime/libraries/company/证明材料/` | 企业材料证据文件（相对 `evidencePath` 指向，可平滑切到 OSS） | 否 |
+| `agent-config.json` | 本机搜索、AI、通知、监控和 M3 连接配置 | 否 |
+| `ontology_model.json` | 领域本体与治理约束（由 build_ontology.py 从 ontology_defs.py 生成） | 是 |
 | `demo-data/tender-catalog.json` | 初始招标项目数据 | 是，必须使用演示/脱敏数据 |
 | `runtime/catalog.json` | 运行后的项目目录 | 否 |
 | `runtime/libraries.json` | 运行后的资料库索引 | 否 |
 | `runtime/workspaces.json` | 匹配工作台和草稿 | 否 |
 | `runtime/projects/` | 上传的招标文件和导出文件 | 否 |
-| `runtime/libraries/` | 上传的企业资料 | 否 |
+| `runtime/libraries/` | 上传的企业材料证据文件 | 否 |
 
 ## 5. API 清单
 
@@ -164,16 +164,29 @@ python -m compileall backend
 | `POST` | `/api/workspaces/{workspace_id}/draft` | 保存响应文件草稿 |
 | `POST` | `/api/tenders/{project_id}/generate-response` | 生成 Markdown、JSON、DOCX 底稿 |
 
-### 5.5 企业资料库
+### 5.5 企业材料
+
+企业材料以 M3 图库为单一事实源；导入直接 upsert 进 M3，读取/导出/编辑均走 M3。
 
 | 方法 | 路径 | 功能 |
 | --- | --- | --- |
+| `GET` | `/api/materials` | 企业材料全量（8 类 facts + relationships + profile） |
+| `GET` | `/api/materials/profile` | 企业画像（聚合） |
+| `GET` | `/api/materials/export?fmt=` | 导出 md / json / xlsx / m3 治理包 |
+| `GET` | `/api/materials/evidence-files?path=` | 枚举某事实证据文件夹内的文件 |
+| `POST` | `/api/materials/import` | 上传模板 ZIP，一步导入（upsert 进 M3） |
+| `POST` | `/api/materials/import/preview` | 导入预览（暂存，不写 M3） |
+| `GET` | `/api/materials/import/preview/{id}` | 查看预览完整解析结果 |
+| `POST` | `/api/materials/import/confirm` | 确认导入（upsert 进 M3，删暂存） |
+| `DELETE` | `/api/materials/import/preview/{id}` | 放弃预览 |
+| `GET` | `/api/ontology/meta` | 本体元信息（命名空间、版本、类/关系数） |
+| `GET` | `/api/ontology/summary` | 各类对象计数 |
+| `GET` | `/api/ontology/classes/{class}` | 读取某类对象（事实表） |
+| `POST/PUT/DELETE` | `/api/ontology/classes/{class}[/{id}]` | 本体对象 CRUD（增改删事实） |
 | `GET` | `/api/libraries` | 获取所有资料库摘要 |
 | `GET` | `/api/libraries/{library_key}` | 获取指定资料库详情 |
 | `POST` | `/api/libraries/{library_key}` | 保存资料文件或文本 |
 | `DELETE` | `/api/libraries/{library_key}/{document_id}` | 删除资料索引记录 |
-| `GET` | `/api/company/knowledge/objects` | 按本体对象分类和关键词查询公司对象 |
-| `GET` | `/api/company/knowledge/objects/{object_type}/{object_id}` | 查看对象详情、关系、证据和来源文件 |
 
 当前删除资料只删除索引，不保证已经同步删除磁盘上的原始文件，后续需要补齐存储清理策略。
 
@@ -210,7 +223,7 @@ python -m compileall backend
 
 1. 业务员选择项目，或者系统对新项目自动粗匹配。
 2. 系统提取公告中的项目类型、地区、报名/获取文件时间、投标截止时间和明显资格要求。
-3. 系统对照企业结构化资料，判断业务方向和基础报名资格。
+3. 系统对照企业结构化材料（M3 图库），判断业务方向和基础报名资格。
 4. 系统输出满足、待补材料、待澄清和高风险项。
 5. 业务员决定是否继续获取并上传完整招标文件。
 
@@ -218,9 +231,9 @@ python -m compileall backend
 
 1. 用户从原始网站或线下渠道自行获取招标文件。
 2. 用户上传 PDF、Word、Excel、图片或扫描件。
-3. 系统完成文本提取、OCR、文档分类和结构化解析。
+3. 系统完成文本提取、OCR、文档分类和结构化解析（招标侧，保持不变）。
 4. 系统将招标文件拆成资格、商务、技术、人员、业绩、报价、响应格式和否决项。
-5. 系统从企业资料库检索候选证据。
+5. 系统从企业材料（M3 图库）检索候选证据。
 6. 系统逐条判断满足、部分满足、不满足、待确认或未找到依据。
 7. 系统给出评分、风险、缺口清单、证据引用和投标建议。
 8. 业务员/经理进行最终决策并确认需要补充的材料。
@@ -275,7 +288,7 @@ python -m compileall backend
 
 - 第一层通过的项目
 - 公告正文和附件摘要
-- 企业结构化资料
+- 企业结构化材料
 
 重点条款：
 
@@ -389,34 +402,26 @@ python -m compileall backend
 - `人工重点评估`
 - `不建议参与`
 
-## 8. 企业资料库解析规划
+## 8. 企业材料模板收集规划
 
-### 8.1 资料入库流程
+企业材料（资质/业绩/人员/财务/产品/参数/证照）的数据来源已从「上传 PDF/DOCX 解析识别 + OCR + 字段抽取」改为「工作人员填 Excel 模板 → 打包 ZIP → 上传导入」。本节描述新的数据流。
+
+### 8.1 材料收集与导入流程
 
 ```text
-上传文件
-  -> 文件安全检查和哈希
-  -> 文档类型识别
-  -> 文本提取或 OCR
-  -> 页面/段落/表格结构保留
-  -> 文档分类
-  -> 字段抽取
-  -> 有效期和主体识别
-  -> 自动保存普通字段
-  -> 重要字段进入人工确认
-  -> 建立可检索证据索引
+设计企业材料收集表模板（企业材料收集表.xlsx）
+  -> 工作人员填写模板
+  -> 整理证明材料/ 文件夹（按序号对应）
+  -> 打包 ZIP（xlsx + 证明材料/）
+  -> 上传导入 /api/materials/import
+  -> 预览-确认（/api/materials/import/preview + confirm）
+  -> 直接 upsert 进 M3（对象 + 关系边），本地只落证明材料文件
+  -> 前端从 M3 展示/编辑
 ```
 
-### 8.2 第一阶段需要支持的格式
+### 8.2 导入数据覆盖范围
 
-- PDF 普通文本
-- PDF 扫描件
-- Word 文档
-- Excel 表格
-- JPG、PNG 等图片
-- 压缩包中的上述文件，需限制大小和层级
-
-### 8.3 建议的资料分类
+企业材料收集表覆盖 8 类 facts（本体 8 类）+ 8 条 relationships + edges 关系实例，包括：
 
 - 企业基本信息
 - 营业执照
@@ -426,24 +431,19 @@ python -m compileall backend
 - 类似项目业绩
 - 合同、验收证明和中标通知书
 - 财务和信用材料
-- 服务方案和案例
-- 响应文件模板
+- 产品与参数材料
+- 证照
 
-### 8.4 人工确认策略
+### 8.3 导入预览与人工确认
 
-自动保存：
+导入分「预览 → 确认」两步：
 
-- 文件名称、格式、大小、哈希
-- 可直接识别的标题和来源
-- 低风险的全文索引
+- 预览：`/api/materials/import/preview` 返回即将写入的 facts/relationships 供核对。
+- 确认：`/api/materials/import/confirm` 实际 upsert 进 M3。
 
-需要人工确认：
+导入后工作人员可继续通过本体 CRUD（`/api/ontology/classes/*`）维护数据。
 
-- 证书名称、编号和有效期
-- 企业主体名称
-- 业绩项目名称、金额、时间和服务类型
-- 人员角色、证书和可派遣状态
-- 影响投标资格的关键字段
+> 注：企业材料部分是人工填表，不再需要 OCR 和字段抽取；招标公告/招标文件的解析仍保留文本提取、OCR 和结构化解析。
 
 ## 9. 分阶段开发路线
 
@@ -469,27 +469,28 @@ python -m compileall backend
 - `python -m compileall backend` 通过
 - 关键 API 可正常返回
 
-### 阶段 1：企业资料库解析
+### 阶段 1：企业材料模板收集与导入
 
 目标：
 
-- 完成企业资料上传、解析、分类、字段抽取和人工确认
+- 完成企业材料模板设计、填写、ZIP 上传导入、落库和人工确认
 
 任务：
 
-- 引入统一 `Document`、`DocumentPage`、`Evidence` 数据结构
-- 增加 OCR 适配层
-- 增加 Excel 解析
-- 保存原始文件和解析版本
-- 增加有效期识别和过期提醒
+- 设计企业材料收集表模板（企业材料收集表.xlsx）
+- 实现 Excel 模板导入器（backend/app/importers/excel_importer.py，ZIP → facts）
+- 实现本体契约与写透（document_recognition/storage.py：build_edges/build_profile；m3/sync.py：sync_facts_to_m3）
+- 直接 upsert 进 M3（8 类对象 + 8 关系边），本地只落证明材料文件
+- 增加导入预览与人工确认（/api/materials/import/preview + confirm）
+- 增加本体 CRUD（/api/ontology/classes/*）
 - 增加用户确认状态
 
 验收：
 
-- 上传 PDF/Word/Excel/图片后可以查看解析状态
-- 重要字段有来源页码
-- 解析失败可以人工补录
-- 重新解析不会破坏历史版本
+- 上传模板 ZIP 后可查看导入结果
+- 重要字段可追溯到证明材料
+- 导入失败可以人工补录/编辑
+- 重复导入不会破坏历史版本
 
 ### 阶段 2：第一层相关性匹配
 
@@ -514,7 +515,7 @@ python -m compileall backend
 
 目标：
 
-- 根据公告文本和企业资料判断是否具备明显报名资格
+- 根据公告文本和企业材料判断是否具备明显报名资格
 
 任务：
 
@@ -541,13 +542,13 @@ python -m compileall backend
 - 多文件上传和文档集合
 - OCR、目录识别和页码保留
 - 资格/商务/技术/报价/格式条款拆解
-- 企业资料证据检索
+- 企业材料证据检索
 - 条款状态、风险和人工确认
 - 评分规则和决策阈值可配置
 
 验收：
 
-- 详细匹配结果可以逐条追溯到招标文件和企业资料页码
+- 详细匹配结果可以逐条追溯到招标文件和企业材料页码
 - 能输出高风险、待确认和缺失材料清单
 - 评分结果可解释并支持人工调整
 
@@ -652,12 +653,12 @@ npm run build
 - 重复公告不会重复进入项目库。
 - 来源异常时有明确失败状态。
 
-### 企业资料
+### 企业材料
 
-- 支持上传和保存原始文件。
-- 支持查看解析状态和预览。
+- 支持填写并上传企业材料收集表模板（ZIP）。
+- 支持导入预览与确认、查看导入结果。
 - 重要字段能标记为待确认。
-- 文件有哈希和版本，便于去重和追溯。
+- 材料记录有来源和版本，便于去重和追溯。
 
 ### 匹配
 

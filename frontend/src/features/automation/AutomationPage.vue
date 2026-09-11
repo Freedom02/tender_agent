@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { Bell, CheckCircle2, CloudCog, Database, Globe2, KeyRound, Pencil, Play, Plus, Save, Search, Trash2, Zap } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
-import type { CompanyKnowledge, MonitoringStatus } from "../../shared/types";
+import type { MonitoringStatus } from "../../shared/types";
 
 const props = defineProps<{
   searchForm: {
@@ -13,13 +13,12 @@ const props = defineProps<{
   };
   config: Record<string, any>;
   monitoring: MonitoringStatus;
-  companyKnowledge: CompanyKnowledge | null;
   busy: boolean;
 }>();
 
-const includeKeywords = ref("劳务派遣, 人力资源服务");
+const includeKeywords = ref("数字孪生, 数据智能, AI 智能体");
 const excludeKeywords = ref("");
-const serviceType = ref("劳务派遣");
+const serviceType = ref("数字孪生");
 const region = ref("全国");
 const targetDirections = ref<string[]>([]);
 const targetScenarios = ref<string[]>([]);
@@ -42,14 +41,8 @@ const monitorSites = computed(() => props.monitoring.sites);
 const inAppEnabled = ref(true);
 const wecomEnabled = ref(false);
 const wecomWebhook = ref("");
-const serviceTypeOptions = ["劳务派遣", "人力资源服务", "咨询与技术服务", "物业与综合服务", "数字孪生", "智慧城市", "可视化平台", "保安服务", "保洁服务", "绿化养护", "软件开发"];
+const serviceTypeOptions = ["数字孪生", "数据智能", "企业架构", "AI 智能体", "智慧园区", "智慧城市", "数据中心与运维", "低空经济", "电力与能源", "智慧矿山", "三维可视化", "软件开发"];
 const regionOptions = ["全国", "北京市", "上海市", "广东省", "湖北省", "四川省", "浙江省", "江苏省", "河南省", "成都市", "深圳市", "广州市"];
-const knowledgeOptions = computed(() => ({
-  directions: props.companyKnowledge?.businessDirections || [],
-  scenarios: props.companyKnowledge?.industryScenarios || [],
-  products: props.companyKnowledge?.products || [],
-  capabilities: props.companyKnowledge?.capabilities || []
-}));
 const siteDialogVisible = ref(false);
 const editingSiteId = ref("");
 const siteForm = ref({
@@ -298,27 +291,19 @@ function submitSite() {
             />
 
             <el-form-item label="目标业务方向">
-              <el-select v-model="targetDirections" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定方向">
-                <el-option v-for="item in knowledgeOptions.directions" :key="item.id" :label="item.name" :value="item.id" />
-              </el-select>
+              <el-select v-model="targetDirections" class="full-width" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip clearable placeholder="不限定方向" />
             </el-form-item>
 
             <el-form-item label="目标行业场景">
-              <el-select v-model="targetScenarios" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定场景">
-                <el-option v-for="item in knowledgeOptions.scenarios" :key="item.id" :label="item.name" :value="item.id" />
-              </el-select>
+              <el-select v-model="targetScenarios" class="full-width" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip clearable placeholder="不限定场景" />
             </el-form-item>
 
             <el-form-item label="目标产品或服务">
-              <el-select v-model="targetProducts" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定产品">
-                <el-option v-for="item in knowledgeOptions.products" :key="item.id" :label="item.name" :value="item.id" />
-              </el-select>
+              <el-select v-model="targetProducts" class="full-width" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip clearable placeholder="不限定产品" />
             </el-form-item>
 
             <el-form-item label="目标技术能力">
-              <el-select v-model="targetCapabilities" class="full-width" multiple collapse-tags collapse-tags-tooltip clearable placeholder="不限定能力">
-                <el-option v-for="item in knowledgeOptions.capabilities" :key="item.id" :label="item.name" :value="item.id" />
-              </el-select>
+              <el-select v-model="targetCapabilities" class="full-width" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip clearable placeholder="不限定能力" />
             </el-form-item>
 
             <el-form-item label="同义词或业务补充词">

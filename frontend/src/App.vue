@@ -8,18 +8,13 @@ import FollowUpPage from "./features/tender-monitor/FollowUpPage.vue";
 import MatchingPage from "./features/tender-matching/MatchingPage.vue";
 import BidWorkspacePage from "./features/bid-workspace/BidWorkspacePage.vue";
 import BidGeneratorPage from "./features/bid-workspace/BidGeneratorPage.vue";
-import LibraryDirectoryPage from "./features/document-library/LibraryDirectoryPage.vue";
-import LibraryDocumentsPage from "./features/document-library/LibraryDocumentsPage.vue";
+import MaterialsPage from "./features/document-library/MaterialsPage.vue";
 import AutomationPage from "./features/automation/AutomationPage.vue";
 
 const {
   loading,
   busy,
   activeTab,
-  company,
-  companyKnowledge,
-  selectedKnowledgeDetail,
-  knowledgeDetailLoading,
   catalog,
   libraries,
   workspaces,
@@ -33,13 +28,12 @@ const {
   followUpStatus,
   importFile,
   importKind,
-  libraryFile,
   searchForm,
   importForm,
   libraryForm,
   selectedProject,
   selectedWorkspace,
-  selectedLibrary,
+  materialsProfile,
   activeSectionLabel,
   navItems,
   stats,
@@ -58,8 +52,6 @@ const {
   saveDraft,
   saveConfig,
   testAiConnection,
-  saveLibrary,
-  openKnowledgeObject,
   runAutomation,
   runMonitoring,
   updateMonitorSite,
@@ -76,7 +68,7 @@ function pageTitle() {
   if (activeTab.value === "catalog") return "实时抓取监控";
   if (activeTab.value === "follow-up") return "跟进项目";
   if (activeTab.value === "generator") return "标书生成";
-  if (activeTab.value === "library-documents") return selectedLibrary.value?.name || "资料列表";
+  if (activeTab.value === "materials") return "企业材料";
   return selectedProject.value?.title || "请选择一个项目";
 }
 
@@ -84,7 +76,7 @@ function pageSubtitle() {
   if (activeTab.value === "catalog") return "24小时实时监控招标公告，每30分钟自动抓取一次。";
   if (activeTab.value === "follow-up") return "集中查看已标记跟进的招标项目，及时核对报名和响应文件截止时间。";
   if (activeTab.value === "generator") return "预览并编辑标书草稿，生成文档后下载响应文件。";
-  if (activeTab.value === "library-documents") return "管理当前资料库中的企业材料，可搜索、添加和维护资料。";
+  if (activeTab.value === "materials") return "集中管理企业资质、业绩、人员等投标资料，支持导入模板包或逐条维护。";
   if (selectedProject.value?.analysisPreview) return selectedProject.value.analysisPreview;
   if (activeTab.value === "matching") return "输入招标文件并选择企业资料库，查看资格要求与企业资历的匹配结果。";
   if (activeTab.value === "workspace") return "维护响应文件草稿并导出响应包。";
@@ -105,15 +97,6 @@ function openGenerator() {
 
 function backToWorkspace() {
   activeTab.value = "workspace";
-}
-
-function openLibraryDocuments(key: string) {
-  libraryForm.key = key;
-  activeTab.value = "library-documents";
-}
-
-function backToLibraryDirectory() {
-  activeTab.value = "libraries";
 }
 
 function updateDraft(value: string) {
@@ -162,6 +145,7 @@ onMounted(loadBootstrap);
       :import-file="importFile"
       :input-kind="importKind"
       :selected-library-key="libraryForm.key"
+      :materials-profile="materialsProfile"
       :busy="busy"
       @evaluate="importDocument"
       @file-selected="importFile = $event"
@@ -177,6 +161,7 @@ onMounted(loadBootstrap);
       :project="selectedProject"
       :libraries="libraries"
       :selected-library-key="libraryForm.key"
+      :materials-profile="materialsProfile"
       :busy="busy"
       @generate="openGenerator"
       @update:selected-library-key="libraryForm.key = $event"
@@ -194,35 +179,13 @@ onMounted(loadBootstrap);
       @update:draft="updateDraft"
     />
 
-    <LibraryDirectoryPage
-      v-else-if="activeTab === 'libraries'"
-      :company="company"
-      :company-knowledge="companyKnowledge"
-      :knowledge-detail="selectedKnowledgeDetail"
-      :knowledge-detail-loading="knowledgeDetailLoading"
-      :libraries="libraries"
-      :selected-library-key="libraryForm.key"
-      @select-library="openLibraryDocuments"
-      @open-object="openKnowledgeObject"
-    />
-
-    <LibraryDocumentsPage
-      v-else-if="activeTab === 'library-documents'"
-      :libraries="libraries"
-      :selected-library="selectedLibrary"
-      :library-form="libraryForm"
-      :busy="busy"
-      @back="backToLibraryDirectory"
-      @save="saveLibrary"
-      @file-selected="libraryFile = $event"
-    />
+    <MaterialsPage v-else-if="activeTab === 'materials'" />
 
     <AutomationPage
       v-else
       :search-form="searchForm"
       :config="config"
       :monitoring="monitoring"
-      :company-knowledge="companyKnowledge"
       :busy="busy"
       @save-config="saveConfig($event)"
       @run-site="runMonitoring($event)"

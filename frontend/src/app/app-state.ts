@@ -8,9 +8,8 @@ import { createNavigationItems } from "./navigation";
 import type {
   BootstrapResponse,
   CatalogItem,
-  CompanyKnowledge,
-  KnowledgeObjectDetail,
   LibrarySummary,
+  MaterialProfile,
   MonitoringStatus,
   Workspace
 } from "../shared/types";
@@ -21,9 +20,6 @@ export function useAppState() {
   const activeTab = ref<AppTab>("catalog");
   const bootstrap = ref<BootstrapResponse | null>(null);
   const company = ref<Record<string, unknown>>({});
-  const companyKnowledge = ref<CompanyKnowledge | null>(null);
-  const selectedKnowledgeDetail = ref<KnowledgeObjectDetail | null>(null);
-  const knowledgeDetailLoading = ref(false);
   const catalog = ref<CatalogItem[]>([]);
   const libraries = ref<LibrarySummary[]>([]);
   const workspaces = ref<Workspace[]>([]);
@@ -42,7 +38,8 @@ export function useAppState() {
   const followUpStatus = ref("");
   const importFile = ref<File | null>(null);
   const importKind = ref<"notice" | "tender_document">("notice");
-  const libraryFile = ref<File | null>(null);
+  const materialsProfile = ref<MaterialProfile | null>(null);
+  const materialsCounts = ref<Record<string, number>>({});
 
   const searchForm = reactive({
     query: "",
@@ -59,7 +56,8 @@ export function useAppState() {
   const libraryForm = reactive({
     key: "company",
     name: "",
-    text: ""
+    text: "",
+    fullPageOcr: false
   });
 
   const selectedProject = computed(
@@ -67,9 +65,6 @@ export function useAppState() {
   );
   const selectedWorkspace = computed(
     () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) || null
-  );
-  const selectedLibrary = computed(
-    () => libraries.value.find((item) => item.key === libraryForm.key) || libraries.value[0] || null
   );
   const activeSectionLabel = computed(
     () =>
@@ -79,8 +74,7 @@ export function useAppState() {
         matching: workspaces.value.length,
         workspace: workspaces.value.length,
         generator: workspaces.value.length,
-        "library-documents": libraries.value.reduce((sum, item) => sum + (item.documentCount || 0), 0),
-        libraries: libraries.value.reduce((sum, item) => sum + (item.documentCount || 0), 0),
+        materials: Object.values(materialsCounts.value).reduce((sum, n) => sum + n, 0),
         config: reminders.value.length
       }).find((item) => item.key === activeTab.value)?.label || "招标项目"
   );
@@ -91,8 +85,7 @@ export function useAppState() {
       matching: workspaces.value.length,
       workspace: workspaces.value.length,
       generator: workspaces.value.length,
-      "library-documents": libraries.value.reduce((sum, item) => sum + (item.documentCount || 0), 0),
-      libraries: libraries.value.reduce((sum, item) => sum + (item.documentCount || 0), 0),
+      materials: Object.values(materialsCounts.value).reduce((sum, n) => sum + n, 0),
       config: reminders.value.length
     })
   );
@@ -110,7 +103,7 @@ export function useAppState() {
   function syncState(data: BootstrapResponse) {
     bootstrap.value = data;
     company.value = data.company || {};
-    companyKnowledge.value = data.companyKnowledge || null;
+    materialsCounts.value = data.materialsCounts || {};
     catalog.value = data.catalog || [];
     libraries.value = data.libraries || [];
     workspaces.value = data.workspaces || [];
@@ -140,10 +133,19 @@ export function useAppState() {
     loading.value = true;
     try {
       syncState(await api.bootstrap());
+      await loadMaterialsProfile();
     } catch (error) {
       ElMessage.error((error as Error).message);
     } finally {
       loading.value = false;
+    }
+  }
+
+  async function loadMaterialsProfile() {
+    try {
+      materialsProfile.value = await api.getMaterialProfile();
+    } catch {
+      // 无识别结果或接口未就绪时静默，不阻断启动
     }
   }
 
@@ -365,44 +367,6 @@ export function useAppState() {
     }
   }
 
-  async function saveLibrary() {
-    if (!libraryForm.key) return;
-    busy.value = true;
-    try {
-      const payload: Record<string, unknown> = {
-        name: libraryForm.name || libraryFile.value?.name || "资料文件",
-        text: libraryForm.text.trim()
-      };
-      if (libraryFile.value) {
-        payload.fileBase64 = await fileToBase64(libraryFile.value);
-        payload.mimeType = libraryFile.value.type || "application/octet-stream";
-        payload.name = libraryFile.value.name;
-      }
-      const result = await api.saveLibrary(libraryForm.key, payload);
-      if (result.libraries) libraries.value = result.libraries as LibrarySummary[];
-      libraryForm.name = "";
-      libraryForm.text = "";
-      libraryFile.value = null;
-      ElMessage.success("资料已保存");
-    } catch (error) {
-      ElMessage.error((error as Error).message);
-    } finally {
-      busy.value = false;
-    }
-  }
-
-  async function openKnowledgeObject(objectType: string, objectId: string) {
-    knowledgeDetailLoading.value = true;
-    try {
-      selectedKnowledgeDetail.value = await api.knowledgeObjectDetail(objectType, objectId);
-    } catch (error) {
-      selectedKnowledgeDetail.value = null;
-      ElMessage.error((error as Error).message);
-    } finally {
-      knowledgeDetailLoading.value = false;
-    }
-  }
-
   async function runAutomation() {
     busy.value = true;
     try {
@@ -538,9 +502,6 @@ export function useAppState() {
     busy,
     activeTab,
     company,
-    companyKnowledge,
-    selectedKnowledgeDetail,
-    knowledgeDetailLoading,
     catalog,
     libraries,
     workspaces,
@@ -554,13 +515,13 @@ export function useAppState() {
     followUpStatus,
     importFile,
     importKind,
-    libraryFile,
     searchForm,
     importForm,
     libraryForm,
+    materialsProfile,
+    materialsCounts,
     selectedProject,
     selectedWorkspace,
-    selectedLibrary,
     activeSectionLabel,
     navItems,
     stats,
@@ -579,8 +540,6 @@ export function useAppState() {
     saveDraft,
     saveConfig,
     testAiConnection,
-    saveLibrary,
-    openKnowledgeObject,
     runAutomation,
     runMonitoring,
     updateMonitorSite,
