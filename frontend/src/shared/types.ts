@@ -82,9 +82,21 @@ export interface MonitoringStatus {
 
 export interface ReasoningRow {
   id?: string;
+  comparisonId?: string;
+  requirementId?: string;
+  layer?: number;
+  sourceStage?: "announcement" | "tender_document" | string;
   kind: string;
   category?: string;
+  module?: string;
   section?: string;
+  rawText?: string;
+  normalizedRequirement?: string;
+  importance?: "critical" | "high" | "medium" | "normal" | string;
+  requirementGroup?: string;
+  evidenceNeed?: string;
+  responseType?: string;
+  sourceFileId?: string;
   sourceLocator?: string;
   requirement: string;
   sourceText?: string;
@@ -94,17 +106,37 @@ export interface ReasoningRow {
   evidence: string;
   evidenceItems?: Array<{
     id: string;
+    evidenceId?: string;
+    materialId?: string;
     name: string;
+    sourceType?: "evidence" | "knowledge_object" | string;
     status?: string;
+    verificationStatus?: string;
     level?: string;
+    evidenceLevel?: string;
+    validFrom?: string;
+    validUntil?: string;
+    sourceFileIds?: string[];
     sourceFiles?: string[];
+    sourceLocator?: string;
+    locator?: string;
+    excerpt?: string;
+    isHistorical?: boolean;
+    isExpired?: boolean;
+    isVerified?: boolean;
   }>;
   matchedObjectIds?: string[];
+  matchedMaterialIds?: string[];
+  evidenceIds?: string[];
+  evidenceCoverageStatus?: string;
   risk: string;
+  riskLevel?: string;
+  reason?: string;
   suggestion?: string;
   confidence?: number;
   manualStatus?: string;
   statusSource?: "模型/规则" | "人工审核" | string;
+  reviewStatus?: string;
 }
 
 export interface RiskItem {
@@ -118,6 +150,7 @@ export interface ReasoningResult {
   risks: RiskItem[];
   score: number;
   decision: string;
+  summary?: MatchSummary;
   project?: Record<string, string>;
   relevance?: {
     score: number;
@@ -133,11 +166,14 @@ export interface ReasoningResult {
   eligibility?: {
     eligibilityScore: number;
     eligibilityStatus: string;
+    assessmentAvailable?: boolean;
     hardBlockers: Array<{
       requirementId: string;
       title: string;
       detail: string;
+      sourceLocator?: string;
     }>;
+    rejectionRisks?: MatchRiskReference[];
     shouldGetTenderDocument: boolean;
     recommendation: string;
   };
@@ -152,12 +188,14 @@ export interface FineReviewResult {
   recommendation: string;
   clauseCount: number;
   statusCounts: Record<string, number>;
+  summary?: MatchSummary;
   hardBlockers: Array<{
     requirementId: string;
     title: string;
     detail: string;
     sourceLocator?: string;
   }>;
+  rejectionRisks?: MatchRiskReference[];
   unresolvedMandatory: Array<{
     requirementId: string;
     title: string;
@@ -170,6 +208,31 @@ export interface FineReviewResult {
     warning?: string;
     warnings?: string[];
   };
+}
+
+export interface MatchRiskReference {
+  requirementId: string;
+  title: string;
+  detail: string;
+  sourceLocator?: string;
+}
+
+export interface MatchSummary {
+  totalRequirementCount: number;
+  statusCounts: Record<string, number>;
+  mandatoryCount: number;
+  mandatoryClosedCount: number;
+  mandatoryClosureRate: number;
+  evidenceRequiredCount: number;
+  evidenceCoveredCount: number;
+  verifiedEvidenceCount: number;
+  evidenceCoverageRate: number;
+  rejectionCount: number;
+  rejectionRiskCount: number;
+  hardBlockerCount: number;
+  pendingMaterialCount: number;
+  pendingClarificationCount: number;
+  notSatisfiedCount: number;
 }
 
 export interface Workspace {

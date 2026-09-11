@@ -123,8 +123,12 @@ export function useAppState() {
     if (!selectedProjectId.value && catalog.value.length) {
       selectedProjectId.value = catalog.value[0].id;
     }
-    if (!selectedWorkspaceId.value && workspaces.value[0]) {
-      selectedWorkspaceId.value = workspaces.value[0].id;
+    if (!selectedWorkspaceId.value && workspaces.value.length) {
+      const latest = workspaces.value[workspaces.value.length - 1];
+      selectedWorkspaceId.value = latest.id;
+      if (latest.reasoning?.fineReview?.rows?.length) {
+        importKind.value = "tender_document";
+      }
     }
     if (!libraries.value.some((item) => item.key === libraryForm.key) && libraries.value[0]) {
       libraryForm.key = libraries.value[0].key;

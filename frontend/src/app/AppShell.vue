@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { RefreshCcw } from "lucide-vue-next";
+import { ref } from "vue";
+import { PanelLeftClose, PanelLeftOpen, RefreshCcw } from "lucide-vue-next";
 import type { AppTab, NavigationItem, StatItem } from "./navigation";
 import MetricOverview from "../components/MetricOverview.vue";
 import ModuleNav from "../components/ModuleNav.vue";
@@ -19,6 +20,8 @@ const emit = defineEmits<{
   refresh: [];
   navigate: [tab: AppTab];
 }>();
+
+const sidebarVisible = ref(true);
 </script>
 
 <template>
@@ -29,16 +32,36 @@ const emit = defineEmits<{
         <span>投标业务智能工作台 / Vue3 + TypeScript + Element Plus</span>
       </div>
       <div class="topbar-right">
+        <el-tooltip v-if="!sidebarVisible" content="展开模块导航" placement="bottom">
+          <el-button
+            class="sidebar-toggle-button"
+            :icon="PanelLeftOpen"
+            text
+            circle
+            aria-label="展开模块导航"
+            @click="sidebarVisible = true"
+          />
+        </el-tooltip>
         <el-tag effect="plain" type="info">{{ activeSectionLabel }}</el-tag>
         <el-button :icon="RefreshCcw" text :loading="loading" @click="emit('refresh')">刷新</el-button>
       </div>
     </el-header>
 
     <el-container class="shell-body">
-      <el-aside class="sidebar" width="300px">
+      <el-aside v-show="sidebarVisible" class="sidebar" width="300px">
         <section class="sidebar-panel">
           <div class="panel-heading">
             <h2>模块导航</h2>
+            <el-tooltip content="隐藏模块导航" placement="right">
+              <el-button
+                class="sidebar-toggle-button"
+                :icon="PanelLeftClose"
+                text
+                circle
+                aria-label="隐藏模块导航"
+                @click="sidebarVisible = false"
+              />
+            </el-tooltip>
           </div>
           <ModuleNav :items="navItems" :active-tab="activeTab" @navigate="emit('navigate', $event)" />
         </section>

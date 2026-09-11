@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { FileCheck2, FileText, Sparkles, Upload } from "lucide-vue-next";
-import type { LibrarySummary, Workspace } from "../../shared/types";
+import type { LibrarySummary, MatchSummary, ReasoningRow, Workspace } from "../../shared/types";
 
 const props = defineProps<{
   workspace: Workspace | null;
@@ -27,7 +27,7 @@ const emit = defineEmits<{
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const fineStatusFilter = ref("全部状态");
-const fineStatusValues = ["满足", "部分满足", "待确认", "待补材料", "待澄清", "不满足"];
+const fineStatusValues = ["满足", "部分满足", "不满足", "待补材料", "待澄清", "不适用"];
 const fileName = computed(() => props.importFile?.name || "");
 const auditRecords = computed(() => props.workspace?.auditRecords || []);
 const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
@@ -43,6 +43,90 @@ const filteredFineRows = computed(() => {
   if (fineStatusFilter.value === "全部状态") return rows;
   return rows.filter((row) => row.status === fineStatusFilter.value);
 });
+
+const REQUIREMENT_MODULE_ORDER = ["资格审查要求", "商务和服务要求", "技术要求"];
+const MODULE_NUMBERS: Record<string, string> = {
+  资格审查要求: "②",
+  商务和服务要求: "③",
+  技术要求: "④",
+};
+const moduleGroups = computed(() => {
+  const rows = filteredFineRows.value.filter(
+    (row) => row.module && REQUIREMENT_MODULE_ORDER.includes(row.module)
+  );
+  return REQUIREMENT_MODULE_ORDER.map((module) => ({
+    module,
+    rows: rows.filter((row) => row.module === module),
+  })).filter((group) => group.rows.length > 0);
+});
+
+const activeModule = ref("资格审查要求");
+const activeModuleGroup = computed(() => {
+  return (
+    moduleGroups.value.find((group) => group.module === activeModule.value) ||
+    moduleGroups.value[0] ||
+    null
+  );
+});
+const announcementSummary = computed(() => props.workspace?.reasoning.summary || null);
+const fineSummary = computed(() => props.workspace?.reasoning.fineReview?.summary || null);
+const projectInfoLabels: Record<string, string> = {
+  projectName: "项目名称",
+  projectCode: "项目编号",
+  tendererName: "招标人 / 采购人",
+  agencyName: "代理机构",
+  procurementMethod: "采购方式",
+  noticeType: "公告类型",
+  tenderNoticeDate: "招标 / 采购公告发布日期",
+  noticeDate: "公告日期",
+  budgetAmount: "预算金额",
+  maxPrice: "最高限价",
+  serviceType: "项目类型",
+  serviceLocation: "项目地点",
+  bidDeadline: "投标截止时间",
+  openingTime: "开标时间",
+  bidLocation: "投标地点",
+  openingLocation: "开标地点",
+  projectDuration: "项目工期 / 履约期限",
+  warrantyRequirement: "质保要求",
+  bidCopyRequirement: "投标文件份数",
+  packagingRequirement: "封装要求",
+  signatureSealRequirement: "签字盖章要求",
+  jointVentureRequirement: "联合体要求",
+  tendererAddress: "采购人地址",
+  tendererContact: "采购人联系人",
+  tendererPhone: "采购人联系电话",
+  agencyAddress: "代理机构地址",
+  agencyContact: "代理机构联系人",
+  agencyPhone: "代理机构联系电话"
+};
+const projectInfoItems = computed(() => {
+  const project = props.workspace?.reasoning.project || {};
+  return Object.entries(projectInfoLabels)
+    .map(([key, label]) => ({ key, label, value: String(project[key] || "").trim() }))
+    .filter((item) => item.value);
+});
+
+function summaryItems(summary: MatchSummary | null) {
+  if (!summary) return [];
+  return [
+    { label: "要求总数", value: summary.totalRequirementCount, tone: "neutral" },
+    { label: "证据覆盖率", value: `${summary.evidenceCoverageRate}%`, tone: summary.evidenceCoverageRate >= 80 ? "success" : "warning" },
+    { label: "强制条款闭环", value: `${summary.mandatoryClosureRate}%`, tone: summary.mandatoryClosureRate >= 90 ? "success" : "warning" },
+    { label: "待补材料", value: summary.pendingMaterialCount, tone: summary.pendingMaterialCount ? "warning" : "success" },
+    { label: "待澄清", value: summary.pendingClarificationCount, tone: summary.pendingClarificationCount ? "warning" : "success" },
+    { label: "否决项风险", value: summary.rejectionRiskCount, tone: summary.rejectionRiskCount ? "danger" : "success" }
+  ];
+}
+
+function evidenceStatusType(
+  item: NonNullable<ReasoningRow["evidenceItems"]>[number]
+): "success" | "warning" | "info" | "danger" {
+  if (item.isExpired) return "danger";
+  if (item.isVerified) return "success";
+  if (item.isHistorical) return "info";
+  return "warning";
+}
 
 watch(
   () => props.workspace?.id,
@@ -170,7 +254,7 @@ function onFileChange(event: Event) {
       </el-col>
     </el-row>
 
-    <el-card v-if="workspace" class="panel result-panel" shadow="never">
+    <el-card v-if="workspace && inputKind === 'notice'" class="panel result-panel" shadow="never">
       <template #header>
         <div class="panel-header">
           <div class="result-title">
@@ -183,8 +267,14 @@ function onFileChange(event: Event) {
 
       <div class="score-overview">
         <div class="score-ring">
-          <strong>{{ workspace.reasoning.eligibility?.eligibilityScore ?? workspace.reasoning.score }}</strong>
-          <span>资格匹配分</span>
+          <strong>
+            {{
+              workspace.reasoning.eligibility?.assessmentAvailable === false
+                ? "--"
+                : workspace.reasoning.eligibility?.eligibilityScore ?? workspace.reasoning.score
+            }}
+          </strong>
+          <span>{{ workspace.reasoning.eligibility?.assessmentAvailable === false ? "资料不足" : "资格匹配分" }}</span>
         </div>
         <div class="score-summary">
           <p class="result-project">{{ workspace.title }}</p>
@@ -199,7 +289,7 @@ function onFileChange(event: Event) {
           </p>
           <div class="catalog-meta">
             <el-tag size="small" effect="plain">
-              {{ workspace.reasoning.extraction?.method === "llm" ? "大模型结构化抽取" : "规则抽取" }}
+              {{ workspace.reasoning.extraction?.method?.includes("llm") ? "大模型 + 规则校验" : "规则抽取" }}
             </el-tag>
             <el-tag v-if="workspace.reasoning.extraction?.modelUsed" size="small" effect="plain">
               {{ workspace.reasoning.extraction.modelUsed }}
@@ -217,6 +307,41 @@ function onFileChange(event: Event) {
         class="mt-12"
       />
 
+      <div v-if="projectInfoItems.length" class="project-info-section mt-12">
+        <div class="section-heading">
+          <strong>项目基础信息</strong>
+          <span>基础信息不参与企业资格匹配</span>
+        </div>
+        <div class="project-info-grid">
+          <div v-for="item in projectInfoItems" :key="item.key" class="project-info-item">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <el-alert
+        v-for="warning in workspace.reasoning.extraction?.warnings || []"
+        :key="warning"
+        :title="warning"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="mt-12"
+      />
+
+      <div v-if="announcementSummary" class="match-summary-grid mt-12">
+        <div
+          v-for="item in summaryItems(announcementSummary)"
+          :key="item.label"
+          class="match-summary-item"
+          :data-tone="item.tone"
+        >
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </div>
+      </div>
+
       <el-alert
         v-if="workspace.reasoning.eligibility?.hardBlockers?.length"
         title="发现未满足的硬性资格项，当前不建议参与。"
@@ -226,17 +351,47 @@ function onFileChange(event: Event) {
         class="mt-12"
       />
 
-      <el-table :data="workspace.reasoning.rows" class="mt-12" size="small">
-        <el-table-column prop="kind" label="评估维度" width="110" />
-        <el-table-column prop="status" label="匹配状态" width="100" />
-        <el-table-column prop="requirement" label="招标要求" min-width="190" />
-        <el-table-column prop="evidence" label="企业依据" min-width="220" />
-        <el-table-column label="建议与理由" min-width="220">
-          <template #default="{ row }">
-            {{ row.suggestion || row.risk }}
-          </template>
-        </el-table-column>
-      </el-table>
+      <div class="section-heading mt-12">
+        <strong>资格条件智能筛查</strong>
+        <span>仅匹配企业资质、人员、业绩、财务、信用及其他资格准入条款</span>
+      </div>
+      <template v-if="workspace.reasoning.rows.length">
+        <el-table :data="workspace.reasoning.rows" class="mt-12" size="small">
+          <el-table-column prop="kind" label="资格类型" width="110" />
+          <el-table-column prop="status" label="匹配状态" width="100" />
+          <el-table-column prop="requirement" label="资格准入条款" min-width="190" />
+          <el-table-column label="企业依据" min-width="260">
+            <template #default="{ row }">
+              <div v-if="row.evidenceItems?.length" class="evidence-list">
+                <div v-for="evidence in row.evidenceItems" :key="evidence.evidenceId || evidence.id" class="evidence-item">
+                  <div class="evidence-item-heading">
+                    <strong>{{ evidence.name }}</strong>
+                    <el-tag size="small" :type="evidenceStatusType(evidence)" effect="plain">
+                      {{ evidence.verificationStatus || evidence.status || "待核验" }}
+                    </el-tag>
+                  </div>
+                  <span v-if="evidence.sourceFiles?.length">{{ evidence.sourceFiles.join("、") }}</span>
+                  <span v-if="evidence.sourceLocator || evidence.locator">
+                    {{ evidence.sourceLocator || evidence.locator }}
+                  </span>
+                  <p v-if="evidence.excerpt">{{ evidence.excerpt }}</p>
+                </div>
+              </div>
+              <span v-else class="form-hint">{{ row.evidence }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="建议与理由" min-width="220">
+            <template #default="{ row }">
+              {{ row.suggestion || row.risk }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <el-empty
+        v-else
+        class="qualification-empty"
+        description="当前内容未识别到可用于资格匹配的准入条款"
+      />
 
       <div v-if="workspace.reasoning.risks.length" class="risk-list">
         <el-card
@@ -251,19 +406,22 @@ function onFileChange(event: Event) {
       </div>
     </el-card>
 
-    <el-card v-if="workspace?.reasoning.fineReview" class="panel result-panel" shadow="never">
+    <el-card v-if="workspace?.reasoning.fineReview && inputKind === 'tender_document'" class="panel result-panel" shadow="never">
       <template #header>
         <div class="panel-header">
           <div class="result-title">
             <el-icon><FileCheck2 /></el-icon>
             <span>投标应答预审</span>
           </div>
-          <el-tag
-            :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
-            effect="light"
-          >
-            {{ workspace.reasoning.fineReview.recommendation }}
-          </el-tag>
+          <div class="catalog-actions">
+            <el-tag
+              :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
+              effect="light"
+            >
+              {{ workspace.reasoning.fineReview.recommendation }}
+            </el-tag>
+            <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
+          </div>
         </div>
       </template>
 
@@ -297,10 +455,31 @@ function onFileChange(event: Event) {
         class="mt-12"
       />
 
+      <div v-if="fineSummary" class="match-summary-grid mt-12">
+        <div
+          v-for="item in summaryItems(fineSummary)"
+          :key="item.label"
+          class="match-summary-item"
+          :data-tone="item.tone"
+        >
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </div>
+      </div>
+
       <el-alert
         v-if="workspace.reasoning.fineReview.hardBlockers.length"
-        :title="`发现 ${workspace.reasoning.fineReview.hardBlockers.length} 条否决性条款未形成满足证据，已拦截参与建议。`"
+        :title="`发现 ${workspace.reasoning.fineReview.hardBlockers.length} 条已确认不满足的否决性条款，已拦截参与建议。`"
         type="error"
+        show-icon
+        :closable="false"
+        class="mt-12"
+      />
+
+      <el-alert
+        v-if="!workspace.reasoning.fineReview.hardBlockers.length && workspace.reasoning.fineReview.rejectionRisks?.length"
+        :title="`存在 ${workspace.reasoning.fineReview.rejectionRisks.length} 条否决性要求尚未闭环，必须人工核验后才能进入正式编制。`"
+        type="warning"
         show-icon
         :closable="false"
         class="mt-12"
@@ -340,14 +519,44 @@ function onFileChange(event: Event) {
         </el-select>
       </div>
 
-      <el-table :data="filteredFineRows" class="mt-12" size="small">
-        <el-table-column prop="kind" label="条款类型" width="110" />
-        <el-table-column label="状态" width="160">
-          <template #default="{ row }">
-            <div class="fine-status-cell">
+      <div v-if="projectInfoItems.length" class="module-block">
+        <div class="module-heading">
+          <span class="module-num">①</span>
+          <strong>招标项目基本信息</strong>
+        </div>
+        <div class="project-info-grid">
+          <div v-for="item in projectInfoItems" :key="item.key" class="project-info-item">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="moduleGroups.length" class="module-tabs">
+        <button
+          v-for="group in moduleGroups"
+          :key="group.module"
+          type="button"
+          class="module-tab"
+          :class="{ 'module-tab--active': group.module === (activeModuleGroup?.module || '') }"
+          @click="activeModule = group.module"
+        >
+          <span class="module-num">{{ MODULE_NUMBERS[group.module] }}</span>
+          <strong>{{ group.module }}</strong>
+          <el-tag size="small" effect="plain">{{ group.rows.length }} 条</el-tag>
+        </button>
+      </div>
+
+      <div v-if="activeModuleGroup" class="module-block">
+        <ol class="requirement-list">
+          <li v-for="(row, idx) in activeModuleGroup.rows" :key="`${activeModuleGroup.module}-${idx}`" class="requirement-item">
+            <div class="requirement-item-head">
+              <span class="requirement-index">{{ idx + 1 }}</span>
+              <el-tag size="small" effect="plain">{{ row.kind }}</el-tag>
               <el-select
                 :model-value="row.status"
                 size="small"
+                class="requirement-status-select"
                 :disabled="busy || !row.id"
                 aria-label="修改匹配结论"
                 @update:model-value="emit('update-fine-status', { rowId: row.id || '', status: $event })"
@@ -357,15 +566,37 @@ function onFileChange(event: Event) {
               <el-tag v-if="row.statusSource === '人工审核'" size="small" type="success" effect="plain">
                 人工
               </el-tag>
+              <span v-if="row.sourceLocator" class="requirement-locator">{{ row.sourceLocator }}</span>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="sourceLocator" label="文件定位" width="110" />
-        <el-table-column prop="requirement" label="招标条款" min-width="220" />
-        <el-table-column prop="evidence" label="企业证据" min-width="240" />
-        <el-table-column prop="suggestion" label="处理建议" min-width="220" />
-      </el-table>
+            <div class="requirement-text">{{ row.requirement }}</div>
+            <div class="requirement-meta">
+              <div v-if="row.evidenceItems?.length" class="evidence-list">
+                <div v-for="evidence in row.evidenceItems" :key="evidence.evidenceId || evidence.id" class="evidence-item">
+                  <div class="evidence-item-heading">
+                    <strong>{{ evidence.name }}</strong>
+                    <el-tag size="small" :type="evidenceStatusType(evidence)" effect="plain">
+                      {{ evidence.verificationStatus || evidence.status || "待核验" }}
+                    </el-tag>
+                  </div>
+                  <span v-if="evidence.sourceFiles?.length">{{ evidence.sourceFiles.join("、") }}</span>
+                  <span v-if="evidence.sourceLocator || evidence.locator">
+                    {{ evidence.sourceLocator || evidence.locator }}
+                  </span>
+                  <p v-if="evidence.excerpt">{{ evidence.excerpt }}</p>
+                </div>
+              </div>
+              <span v-else class="form-hint">{{ row.evidence }}</span>
+              <span v-if="row.suggestion" class="requirement-suggestion">建议：{{ row.suggestion }}</span>
+            </div>
+          </li>
+        </ol>
+      </div>
+
+      <el-empty
+        v-if="!projectInfoItems.length && !moduleGroups.length"
+        class="qualification-empty"
+        description="当前内容未识别到可展示的要求"
+      />
     </el-card>
-    <el-empty v-else class="matching-empty" description="上传招标文件或粘贴招标内容后开始评估" />
   </div>
 </template>

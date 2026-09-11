@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-import xml.etree.ElementTree as ET
 
 from fastapi import HTTPException
 from .config.service import ensure_config, public_configuration
@@ -19,6 +16,8 @@ from .tender_matching.eligibility import (
     test_ai_connection,
 )
 from .tender_matching.document_fine_matching import evaluate_tender_document, update_fine_review_status
+from .tender_matching.document_parser import parse_docx, parse_pdf, parse_plain_text, parse_xlsx
+from .tender_matching.document_structure import enrich_document_structure
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
 from .tender_monitor.adapters import is_procurement_notice, repair_notice_fields, valid_time_value
 
@@ -399,9 +398,9 @@ class Store:
         risks = [line.strip() for line in text.splitlines() if any(word in line for word in ["废标", "无效投标", "否决", "逾期"])]
         return {
             "tenderProjectId": uid("project"),
-            "projectName": match(r"项目名称[:：]\s*([^\r\n]+)"),
-            "projectCode": match(r"项目编号[:：]\s*([^\r\n]+)"),
-            "tendererName": match(r"招标人[:：]\s*([^\r\n]+)"),
+            "projectName": match(r"(?:采购项目名称|招标项目名称|项目名称)[:：]\s*([^\r\n]+)"),
+            "projectCode": match(r"(?:采购项目编号|招标项目编号|项目编号|采购编号|招标编号)[:：]\s*([^\r\n]+)"),
+            "tendererName": match(r"(?:采购人名称|招标人名称|采购单位|采购人|招标人)[:：]\s*([^\r\n]+)"),
             "serviceType": service_type,
             "serviceLocation": match(r"服务地点[:：]\s*([^\r\n]+)"),
             "budgetAmount": match(r"(?:预算金额|最高限价)[:：]\s*([^\r\n]+)"),
@@ -447,8 +446,8 @@ class Store:
         return int(result.group(1)) if result else 0
 
     def import_document(self, name: str, content: bytes, mime_type: str, document_kind: str = "notice") -> dict[str, Any]:
-        if len(content) > 20 * 1024 * 1024:
-            raise ValueError("招标文件需小于20MB")
+        if len(content) > 100 * 1024 * 1024:
+            raise ValueError("招标文件需小于100MB")
         parsed_file = self.extract_document_content(name, content, mime_type)
         text = parsed_file["text"].strip()
         if len(text) < 20:
@@ -473,6 +472,7 @@ class Store:
             "analysisText": text,
             "parsed": parsed,
             "document": {
+                "id": uid("tender-file"),
                 "kind": kind,
                 "name": name,
                 "mimeType": mime_type or "application/octet-stream",
@@ -480,6 +480,11 @@ class Store:
                 "parseMethod": parsed_file["parseMethod"],
                 "warnings": parsed_file["warnings"],
                 "segments": parsed_file["segments"],
+                "units": parsed_file.get("units", parsed_file["segments"]),
+                "tables": parsed_file.get("tables", []),
+                "metadata": parsed_file.get("metadata", {}),
+                "sections": parsed_file.get("sections", []),
+                "structureWarnings": parsed_file.get("structureWarnings", []),
             },
             "downloadStatus": "已下载",
             "downloadUrl": f"/runtime/projects/{project_id}/source/{target.name}",
@@ -503,23 +508,12 @@ class Store:
     def extract_document_content(self, name: str, content: bytes, mime_type: str = "") -> dict[str, Any]:
         lower = name.lower()
         if lower.endswith(".docx") or "wordprocessingml" in mime_type:
-            return self.extract_document_content_from_docx(content)
+            return enrich_document_structure(parse_docx(content))
         if lower.endswith(".pdf") or "pdf" in mime_type.lower():
-            return self.extract_document_content_from_pdf(content)
+            return enrich_document_structure(parse_pdf(content))
         if lower.endswith(".xlsx") or "spreadsheetml" in mime_type:
-            return self.extract_document_content_from_xlsx(content)
-        text = content.decode("utf-8", errors="ignore")
-        segments = [
-            {"sourceLocator": f"第{index + 1}行", "text": line.strip()}
-            for index, line in enumerate(text.splitlines())
-            if line.strip()
-        ]
-        return {
-            "text": "\n".join(item["text"] for item in segments),
-            "segments": segments,
-            "parseMethod": "plain_text",
-            "warnings": [],
-        }
+            return enrich_document_structure(parse_xlsx(content))
+        return enrich_document_structure(parse_plain_text(content))
 
     @staticmethod
     def extract_text_from_docx(content: bytes) -> str:
@@ -527,29 +521,7 @@ class Store:
 
     @staticmethod
     def extract_document_content_from_docx(content: bytes) -> dict[str, Any]:
-        from io import BytesIO
-
-        try:
-            with zipfile.ZipFile(BytesIO(content)) as archive:
-                xml = archive.read("word/document.xml")
-        except (KeyError, zipfile.BadZipFile):
-            return {"text": "", "segments": [], "parseMethod": "docx_xml", "warnings": ["无法读取 DOCX 正文。"]}
-        try:
-            root = ET.fromstring(xml)
-        except ET.ParseError:
-            return {"text": "", "segments": [], "parseMethod": "docx_xml", "warnings": ["DOCX 正文 XML 解析失败。"]}
-        namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        segments: list[dict[str, str]] = []
-        for index, paragraph in enumerate(root.findall(".//w:p", namespace)):
-            parts = [node.text for node in paragraph.findall(".//w:t", namespace) if node.text]
-            if parts:
-                segments.append({"sourceLocator": f"第{index + 1}段", "text": "".join(parts).strip()})
-        return {
-            "text": "\n".join(item["text"] for item in segments),
-            "segments": segments,
-            "parseMethod": "docx_xml",
-            "warnings": [],
-        }
+        return parse_docx(content)
 
     @staticmethod
     def extract_text_from_pdf(content: bytes) -> str:
@@ -557,97 +529,37 @@ class Store:
 
     @staticmethod
     def extract_document_content_from_pdf(content: bytes) -> dict[str, Any]:
-        try:
-            from pypdf import PdfReader
-        except Exception:
-            return {"text": "", "segments": [], "parseMethod": "pypdf", "warnings": ["未安装 PDF 文字解析依赖。"]}
-        from io import BytesIO
-
-        try:
-            reader = PdfReader(BytesIO(content))
-        except Exception:
-            return {"text": "", "segments": [], "parseMethod": "pypdf", "warnings": ["PDF 文件无法读取。"]}
-        segments: list[dict[str, str]] = []
-        warnings: list[str] = []
-        for index, page in enumerate(reader.pages):
-            try:
-                page_text = (page.extract_text() or "").strip()
-            except Exception:
-                page_text = ""
-            if page_text:
-                segments.append({"sourceLocator": f"第{index + 1}页", "text": page_text})
-            else:
-                warnings.append(f"第{index + 1}页未提取到文字，扫描件需后续接入 OCR。")
-        return {
-            "text": "\n".join(item["text"] for item in segments),
-            "segments": segments,
-            "parseMethod": "pypdf",
-            "warnings": warnings,
-        }
+        return parse_pdf(content)
 
     @staticmethod
     def extract_document_content_from_xlsx(content: bytes) -> dict[str, Any]:
-        from io import BytesIO
-
-        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-        try:
-            with zipfile.ZipFile(BytesIO(content)) as archive:
-                shared_strings: list[str] = []
-                if "xl/sharedStrings.xml" in archive.namelist():
-                    shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
-                    shared_strings = [
-                        "".join(node.text or "" for node in item.findall(".//main:t", namespace))
-                        for item in shared_root.findall(".//main:si", namespace)
-                    ]
-                sheets = sorted(
-                    name for name in archive.namelist()
-                    if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
-                )
-                segments: list[dict[str, str]] = []
-                for sheet_index, sheet_name in enumerate(sheets, start=1):
-                    root = ET.fromstring(archive.read(sheet_name))
-                    for row_index, row in enumerate(root.findall(".//main:sheetData/main:row", namespace), start=1):
-                        values: list[str] = []
-                        for cell in row.findall("main:c", namespace):
-                            value_node = cell.find("main:v", namespace)
-                            inline_node = cell.find("main:is/main:t", namespace)
-                            value = value_node.text if value_node is not None else (inline_node.text if inline_node is not None else "")
-                            if cell.get("t") == "s" and value and value.isdigit():
-                                shared_index = int(value)
-                                value = shared_strings[shared_index] if shared_index < len(shared_strings) else ""
-                            if value:
-                                values.append(value.strip())
-                        if values:
-                            segments.append({"sourceLocator": f"sheet{sheet_index} 第{row_index}行", "text": " | ".join(values)})
-        except (zipfile.BadZipFile, ET.ParseError, KeyError):
-            return {"text": "", "segments": [], "parseMethod": "xlsx_xml", "warnings": ["XLSX 文件解析失败。"]}
-        return {
-            "text": "\n".join(item["text"] for item in segments),
-            "segments": segments,
-            "parseMethod": "xlsx_xml",
-            "warnings": [],
-        }
+        return parse_xlsx(content)
 
     def match_project(self, item: dict[str, Any]) -> dict[str, Any]:
         text = str(item.get("analysisText", ""))
+        document = item.get("document") if isinstance(item.get("document"), dict) else {}
+        source_file_id = str(document.get("id") or document.get("contentHash") or item.get("id") or "")
         result = evaluate_announcement_eligibility(
             text,
             self.company_knowledge,
             self.company,
             ensure_config(self.config).get("ai", {}),
+            source_file_id,
         )
         result["relevance"] = evaluate_company_relevance(
             item,
             self.company_knowledge,
             ensure_config(self.config).get("monitoring", {}),
         )
-        document = item.get("document") if isinstance(item.get("document"), dict) else {}
         if document.get("kind") == "tender_document":
             result["fineReview"] = evaluate_tender_document(
                 text,
                 document.get("segments") if isinstance(document.get("segments"), list) else [],
                 self.company_knowledge,
                 ensure_config(self.config).get("ai", {}),
+                source_file_id,
+                document.get("sections") if isinstance(document.get("sections"), list) else [],
+                document.get("tables") if isinstance(document.get("tables"), list) else [],
             )
         return result
 
@@ -734,7 +646,7 @@ class Store:
             ),
             None,
         ) if isinstance(rows, list) else None
-        previous_status = str(previous_row.get("status", "待确认")) if previous_row else ""
+        previous_status = str(previous_row.get("status", "待澄清")) if previous_row else ""
         updated = update_fine_review_status(fine_review, row_id, status)
         if not updated:
             return None
