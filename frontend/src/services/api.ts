@@ -1,9 +1,13 @@
 import type {
   BootstrapResponse,
   CatalogItem,
-  KnowledgeObjectDetail,
-  KnowledgeObjectCollection,
+  EvidenceFilesResponse,
+  ImportResult,
+  MaterialFact,
+  MaterialProfile,
   MonitoringStatus,
+  OntologyMeta,
+  OntologySummary,
   Workspace
 } from "../shared/types";
 
@@ -21,14 +25,6 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   bootstrap: () => request<BootstrapResponse>("/api/bootstrap"),
-  knowledgeObjects: (objectType = "", query = "") =>
-    request<{ companyId: string; companyName: string; query: string; collections: KnowledgeObjectCollection[] }>(
-      `/api/company/knowledge/objects?object_type=${encodeURIComponent(objectType)}&q=${encodeURIComponent(query)}`
-    ),
-  knowledgeObjectDetail: (objectType: string, objectId: string) =>
-    request<KnowledgeObjectDetail>(
-      `/api/company/knowledge/objects/${encodeURIComponent(objectType)}/${encodeURIComponent(objectId)}`
-    ),
   search: (payload: Record<string, unknown>) =>
     request<{ items: CatalogItem[]; search: Record<string, unknown> }>("/api/search/realtime", {
       method: "POST",
@@ -65,11 +61,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ draft })
     }),
-  saveLibrary: (libraryKey: string, payload: Record<string, unknown>) =>
-    request<Record<string, unknown>>(`/api/libraries/${encodeURIComponent(libraryKey)}`, {
+  // ---- 企业材料本体（M3 读取）----
+  getOntologyMeta: () => request<OntologyMeta>("/api/ontology/meta"),
+  getOntologySummary: () => request<OntologySummary>("/api/ontology/summary"),
+  getFacts: (className: string, limit = 20) =>
+    request<MaterialFact[]>(`/api/ontology/classes/${encodeURIComponent(className)}?limit=${limit}`),
+  createFact: (className: string, fields: Record<string, unknown>) =>
+    request<MaterialFact>(`/api/ontology/classes/${encodeURIComponent(className)}`, {
+      method: "POST",
+      body: JSON.stringify({ fields })
+    }),
+  updateFact: (className: string, id: string, fields: Record<string, unknown>) =>
+    request<MaterialFact>(`/api/ontology/classes/${encodeURIComponent(className)}/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ fields })
+    }),
+  deleteFact: (className: string, id: string) =>
+    request<{ deleted: boolean }>(`/api/ontology/classes/${encodeURIComponent(className)}/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    }),
+  getEvidenceFiles: (path: string) =>
+    request<EvidenceFilesResponse>(`/api/materials/evidence-files?path=${encodeURIComponent(path)}`),
+  importMaterials: (payload: { fileBase64: string; fileName: string }) =>
+    request<ImportResult>("/api/materials/import", {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  getMaterialProfile: () => request<MaterialProfile>("/api/materials/profile"),
   saveConfig: (config: Record<string, unknown>) =>
     request<{ config: Record<string, unknown> }>("/api/config", {
       method: "POST",

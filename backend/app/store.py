@@ -44,18 +44,6 @@ def write_json(path: Path, value: Any) -> None:
 
 
 class Store:
-    KNOWLEDGE_COLLECTIONS: tuple[tuple[str, str], ...] = (
-        ("businessDirections", "业务方向"),
-        ("industryScenarios", "行业场景"),
-        ("products", "产品或服务"),
-        ("capabilities", "技术能力"),
-        ("qualifications", "资质证书"),
-        ("projectReferences", "项目业绩"),
-        ("materials", "企业材料"),
-        ("evidences", "证据"),
-        ("sourceFiles", "来源文件"),
-    )
-
     def __init__(self, root: Path):
         self.root = root
         self.runtime_root = root / "runtime"
@@ -63,36 +51,26 @@ class Store:
         self.catalog_path = self.runtime_root / "catalog.json"
         self.libraries_path = self.runtime_root / "libraries.json"
         self.config_path = root / "agent-config.json"
-        self.catalog_seed_path = root / "demo-data" / "tender-catalog.json"
-        self.company_path = root / "company-profile.json"
-        self.company_material_index_path = root / "company-material-index.json"
-        self.company_knowledge_path = root / "company-knowledge.json"
-        self.ontology_path = root / "ontology-governance.json"
         self.workspaces_path = self.runtime_root / "workspaces.json"
         self.catalog: list[dict[str, Any]] = []
         self.libraries: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
         self.company: dict[str, Any] = {}
-        self.company_material_index: dict[str, Any] = {}
+        # 历史遗留：招标匹配/监控的企业数据源（旧 company-knowledge.json 已删，现为空壳）。
         self.company_knowledge: dict[str, Any] = {}
-        self.ontology: dict[str, Any] = {}
         self.workspaces: dict[str, dict[str, Any]] = {}
         self.reminders: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
 
     def initialize(self) -> None:
-        self.company = read_json(self.company_path, {})
-        self.company_material_index = read_json(self.company_material_index_path, {})
-        self.company_knowledge = read_json(self.company_knowledge_path, {})
-        self.ontology = read_json(self.ontology_path, {})
-        seed = read_json(self.catalog_seed_path, [])
-        self.catalog = read_json(self.catalog_path, seed)
+        # 企业数据单一来源：M3 图库（本地不再落 company-materials.json，只保留证明材料文件）。
+        self.catalog = read_json(self.catalog_path, [])
         self.config = ensure_config(read_json(self.config_path, self.default_config()))
         self.libraries = read_json(self.libraries_path, self.default_libraries())
         self.reminders = read_json(self.runtime_root / "reminders.json", [])
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
-        self._seed_company_library_index()
+        self._refresh_company_from_m3()
         self._seed_demo_records()
         catalog_repaired = False
         for item in self.catalog:
@@ -142,62 +120,6 @@ class Store:
             ]
         }
 
-    def _seed_company_library_index(self) -> None:
-        """Expose indexed UINO source files before all originals are uploaded."""
-        if not self.company_material_index:
-            return
-        company_library = self.libraries.setdefault(
-            "company",
-            {
-                "key": "company",
-                "name": "公司资料库",
-                "description": "企业资质、业绩、人员与服务能力",
-                "documents": [],
-            },
-        )
-        documents = company_library.setdefault("documents", [])
-        legacy_markers = (
-            "demo-company-",
-            "濮阳人才服务",
-            "安衡人力资源",
-            "劳务派遣经营许可证_模拟样本",
-            "人力资源服务许可证_模拟样本",
-            "公司综合材料_模拟版",
-            "公司综合介绍（演示）",
-        )
-        company_library["documents"] = [
-            item
-            for item in documents
-            if not any(
-                marker in f"{item.get('id', '')} {item.get('name', '')} {item.get('preview', '')}"
-                for marker in legacy_markers
-            )
-        ]
-        documents = company_library["documents"]
-        existing_ids = {str(item.get("sourceId") or item.get("id")) for item in documents}
-        for source in self.company_material_index.get("documents", []):
-            source_id = str(source.get("id", "")).strip()
-            if not source_id or source_id in existing_ids:
-                continue
-            documents.append(
-                {
-                    "id": f"indexed-{source_id.lower()}",
-                    "sourceId": source_id,
-                    "name": source.get("name", source_id),
-                    "type": source.get("type", "资料"),
-                    "savedAt": "",
-                    "storagePath": source.get("sourcePath", ""),
-                    "contentHash": "",
-                    "size": 0,
-                    "preview": source.get("purpose", ""),
-                    "indexedOnly": True,
-                    "status": source.get("status", "来源登记"),
-                    "evidenceLevel": source.get("evidenceLevel", "待核验"),
-                }
-            )
-            existing_ids.add(source_id)
-        self.persist_libraries()
-
     def _company_qualification_names(self) -> list[str]:
         values = self.company.get("qualifications", [])
         names: list[str] = []
@@ -234,42 +156,42 @@ class Store:
             return
         self.catalog = [
             {
-                "id": "sample-hospital-labor",
-                "title": "医院劳务派遣服务项目（完整招标样本）",
-                "category": "劳务派遣",
-                "region": "河南省濮阳市",
+                "id": "sample-smartpark-digitaltwin",
+                "title": "智慧园区数字孪生平台建设项目（完整招标样本）",
+                "category": "数字孪生",
+                "region": "福建省福州市",
                 "noticeType": "Demo 完整招标文件",
                 "source": "本地脱敏示例",
                 "publishedDate": "2026-09-01",
                 "servicePeriod": "12个月",
                 "dataOrigin": "demo",
                 "analysisText": (
-                    "项目名称：濮阳市某医院2026年度劳务派遣服务项目\n"
-                    "项目编号：PY-HR-2026-018\n招标人：濮阳市某医院\n"
-                    "服务类型：劳务派遣\n服务地点：河南省濮阳市\n预算金额：人民币300万元/年\n"
+                    "项目名称：福州市某智慧园区数字孪生平台建设项目\n"
+                    "项目编号：FZ-DT-2026-018\n招标人：福州市某产业园区管委会\n"
+                    "服务类型：数字孪生\n服务地点：福建省福州市\n预算金额：人民币300万元\n"
                     "服务期限：12个月\n投标截止时间：2026-09-08 09:30\n\n"
                     "一、投标人资格要求\n1. 具有有效营业执照。\n"
-                    "2. 具有有效的人力资源服务许可证和劳务派遣经营许可证。\n"
-                    "3. 近三年承担过不少于3个类似医院或事业单位劳务派遣项目。\n"
-                    "4. 拟派项目经理1名，具有3年以上人力资源服务项目管理经验。\n\n"
-                    "二、服务要求\n负责人员招聘、入职、考勤、培训、薪酬核算和日常管理。\n"
-                    "提供驻场服务团队，建立投诉处理和应急响应机制。\n"
-                    "每月提交人员考勤、社保和服务质量报告。\n\n"
-                    "三、投标文件要求\n提交项目理解、人员配置、服务方案、质量保障和应急预案。\n"
+                    "2. 具有有效的信息安全管理体系认证（ISO27001）。\n"
+                    "3. 近三年承担过不少于3个类似园区数字孪生或可视化平台项目。\n"
+                    "4. 拟派项目经理1名，具有3年以上数字孪生平台实施经验。\n\n"
+                    "二、服务要求\n建设园区三维可视化底座、物联数据接入和运维管理功能。\n"
+                    "提供低代码场景搭建能力，支持园区态势感知和告警联动。\n"
+                    "每月提交平台运行、数据接入和质量保障报告。\n\n"
+                    "三、投标文件要求\n提交项目理解、技术方案、实施计划、质量保障和应急预案。\n"
                     "未按要求提供资格证明材料的，视为无效投标。"
                 ),
             },
             {
-                "id": "sample-security",
-                "title": "医院保安服务项目（不匹配样本）",
-                "category": "保安服务",
-                "region": "河南省濮阳市",
+                "id": "sample-nonmatch-logistics",
+                "title": "医院后勤综合服务项目（不匹配样本）",
+                "category": "后勤服务",
+                "region": "河南省郑州市",
                 "noticeType": "Demo 风险识别样本",
                 "source": "本地脱敏示例",
                 "publishedDate": "2026-09-01",
                 "servicePeriod": "12个月",
                 "dataOrigin": "demo",
-                "analysisText": "项目名称：某医院保安服务项目\n服务类型：保安服务\n服务地点：河南省濮阳市\n投标截止时间：2026-09-20 09:00\n资格要求：提供保安服务许可证；近三年承担过不少于2个医院保安服务项目。",
+                "analysisText": "项目名称：某医院后勤综合服务项目\n服务类型：后勤综合服务\n服务地点：河南省郑州市\n投标截止时间：2026-09-20 09:00\n资格要求：近三年承担过不少于2个医院后勤服务项目。",
             },
         ]
         self.persist_catalog()
@@ -292,9 +214,6 @@ class Store:
     @staticmethod
     def new_id(prefix: str) -> str:
         return uid(prefix)
-
-    def seed_catalog(self) -> list[dict[str, Any]]:
-        return read_json(self.catalog_seed_path, [])
 
     def with_preview(self, item: dict[str, Any]) -> dict[str, Any]:
         result = self._with_preview(item)
@@ -319,19 +238,50 @@ class Store:
         )
         return result
 
+    def _materials_counts(self) -> dict[str, int]:
+        """8 类事实计数（M3 图库，前端首屏徽标用）。"""
+        keys = (
+            "organization", "qualification_certificate", "performance_case",
+            "staff_member", "financial_evidence", "technical_product",
+            "technical_parameter", "credential",
+        )
+        cached = getattr(self, "_m3_counts", None)
+        if cached:
+            return {k: cached.get(k, 0) for k in keys}
+        return {k: 0 for k in keys}
+
+    def _refresh_company_from_m3(self) -> None:
+        """从 M3 拉取企业 facts，刷新 self.company（画像）与 self._m3_counts（计数）。
+
+        best-effort：M3 不可用时保持现有值（首次为空画像/零计数），不抛异常。
+        """
+        from .document_recognition.storage import FACT_LIST_KEYS, build_profile
+        from .m3.sync import build_m3_client, read_facts_from_m3
+
+        try:
+            facts = read_facts_from_m3(build_m3_client(self))
+            self.company = build_profile(facts)
+            counts: dict[str, int] = {"organization": 1 if facts.get("organization") else 0}
+            for key in FACT_LIST_KEYS:
+                counts[key] = len(facts.get(key, []))
+            self._m3_counts = counts
+        except Exception:
+            if not getattr(self, "_m3_counts", None):
+                empty: dict[str, int] = {"organization": 0}
+                for key in FACT_LIST_KEYS:
+                    empty[key] = 0
+                self._m3_counts = empty
+
     def bootstrap(self) -> dict[str, Any]:
         from .tender_monitor.service import monitoring_status
 
+        # 每次首屏从 M3 刷新画像与计数（best-effort），保证导入后徽标/匹配数据即时更新。
+        self._refresh_company_from_m3()
+
         return {
-            "ontology": {
-                "name": self.ontology.get("meta", {}).get("name", "招投标智能体本体"),
-                "version": self.ontology.get("meta", {}).get("version", "1.0.0"),
-                "classes": len(self.ontology.get("classes", [])),
-                "relations": len(self.ontology.get("relations", [])),
-            },
             "company": self.company,
-            "companyMaterialIndex": self.company_material_index,
-            "companyKnowledge": self.company_knowledge,
+            "ontology": {"name": "tenderhub", "version": "V0.4", "classes": 8, "relations": 8},
+            "materialsCounts": self._materials_counts(),
             "config": self.public_config(),
             "monitoring": monitoring_status(self),
             "libraries": self.library_snapshot(),
@@ -436,7 +386,7 @@ class Store:
 
         service_type = match(r"(?:服务类型|项目类型)[:：]\s*([^\r\n]+)", self.detect_type(text))
         qualifications = [
-            name for name in ["营业执照", "人力资源服务许可证", "劳务派遣经营许可证", "保安服务许可证"]
+            name for name in ["营业执照", "ISO9001", "ISO14001", "ISO20000", "ISO27001", "ITSS", "CMMI", "CNAS"]
             if name in text
         ]
         performance_lines = [line.strip() for line in text.splitlines() if "类似" in line or "业绩" in line]
@@ -477,10 +427,9 @@ class Store:
             ("智慧园区", "智慧园区"),
             ("低空", "低空经济"),
             ("智能体", "AI 智能体"),
-            ("劳务派遣", "劳务派遣"),
-            ("保安", "保安服务"),
-            ("保洁", "保洁服务"),
-            ("家政", "家政服务"),
+            ("数据智能", "数据智能"),
+            ("企业架构", "企业架构"),
+            ("智慧矿山", "智慧矿山"),
         ]:
             if key in text:
                 return value
@@ -849,154 +798,6 @@ class Store:
         if not value:
             return None
         return {"key": key, **value}
-
-    def _knowledge_collection(self, object_type: str) -> tuple[str, str, list[dict[str, Any]]] | None:
-        for key, label in self.KNOWLEDGE_COLLECTIONS:
-            if key == object_type:
-                values = self.company_knowledge.get(key, [])
-                return key, label, values if isinstance(values, list) else []
-        return None
-
-    def _knowledge_index(self) -> dict[str, dict[str, Any]]:
-        index: dict[str, dict[str, Any]] = {}
-        company_id = str(self.company.get("companyId") or self.company_knowledge.get("meta", {}).get("companyId") or "").strip()
-        company_name = str(self.company.get("companyName") or self.company_knowledge.get("meta", {}).get("companyName") or "").strip()
-        if company_id:
-            index[company_id] = {
-                "objectType": "company",
-                "objectTypeLabel": "公司主体",
-                "item": {"id": company_id, "name": company_name, "companyName": company_name},
-            }
-        for key, label in self.KNOWLEDGE_COLLECTIONS:
-            collection = self._knowledge_collection(key)
-            if not collection:
-                continue
-            for item in collection[2]:
-                item_id = str(item.get("id", "")).strip()
-                if item_id:
-                    index[item_id] = {"objectType": key, "objectTypeLabel": label, "item": item}
-        source_index = {
-            str(item.get("id", "")).strip(): item
-            for item in self.company_material_index.get("documents", [])
-            if str(item.get("id", "")).strip()
-        }
-        for item_id, entry in index.items():
-            if entry["objectType"] != "sourceFiles":
-                continue
-            source = source_index.get(item_id)
-            if source:
-                entry["item"] = {**entry["item"], "sourcePath": source.get("sourcePath", ""), "purpose": source.get("purpose", "")}
-        return index
-
-    @staticmethod
-    def _knowledge_matches(item: dict[str, Any], query: str) -> bool:
-        if not query:
-            return True
-        haystack = " ".join(
-            str(value)
-            for value in item.values()
-            if isinstance(value, (str, int, float, list, dict))
-        ).lower()
-        return query.lower() in haystack
-
-    def knowledge_objects(self, object_type: str = "", query: str = "") -> dict[str, Any]:
-        collections: list[dict[str, Any]] = []
-        selected = [object_type] if object_type else [key for key, _ in self.KNOWLEDGE_COLLECTIONS]
-        for key in selected:
-            collection = self._knowledge_collection(key)
-            if not collection:
-                continue
-            _, label, values = collection
-            items = [
-                {"objectType": key, "objectTypeLabel": label, **item}
-                for item in values
-                if self._knowledge_matches(item, query.strip())
-            ]
-            collections.append({"objectType": key, "objectTypeLabel": label, "count": len(items), "items": items})
-        return {
-            "companyId": self.company.get("companyId", self.company_knowledge.get("meta", {}).get("companyId", "")),
-            "companyName": self.company.get("companyName", self.company_knowledge.get("meta", {}).get("companyName", "")),
-            "query": query,
-            "collections": collections,
-        }
-
-    def knowledge_object_detail(self, object_type: str, object_id: str) -> dict[str, Any] | None:
-        collection = self._knowledge_collection(object_type)
-        if not collection:
-            return None
-        _, label, values = collection
-        item = next((entry for entry in values if str(entry.get("id", "")) == object_id), None)
-        if not item:
-            return None
-
-        index = self._knowledge_index()
-        related: list[dict[str, Any]] = []
-        for relation in self.company_knowledge.get("relations", []):
-            if relation.get("fromId") != object_id and relation.get("toId") != object_id:
-                continue
-            related_id = relation.get("toId") if relation.get("fromId") == object_id else relation.get("fromId")
-            related_entry = index.get(str(related_id))
-            related.append(
-                {
-                    **relation,
-                    "direction": "outgoing" if relation.get("fromId") == object_id else "incoming",
-                    "relatedObject": (
-                        {
-                            "objectType": related_entry["objectType"],
-                            "objectTypeLabel": related_entry["objectTypeLabel"],
-                            **related_entry["item"],
-                        }
-                        if related_entry
-                        else None
-                    ),
-                }
-            )
-
-        def resolve_ids(ids: Any) -> list[dict[str, Any]]:
-            if not isinstance(ids, list):
-                return []
-            result: list[dict[str, Any]] = []
-            for item_id in ids:
-                entry = index.get(str(item_id))
-                if entry:
-                    result.append(
-                        {
-                            "objectType": entry["objectType"],
-                            "objectTypeLabel": entry["objectTypeLabel"],
-                            **entry["item"],
-                        }
-                    )
-            return result
-
-        evidence_ids = item.get("evidenceIds", [])
-        source_ids = item.get("sourceIds", [])
-        material_ids = item.get("materialIds", [])
-        if object_type == "evidences":
-            evidence_ids = [object_id]
-            source_ids = item.get("sourceIds", [])
-        if object_type == "sourceFiles":
-            source_ids = [object_id]
-        resolved_evidences = resolve_ids(evidence_ids)
-        resolved_materials = resolve_ids(material_ids)
-        resolved_source_ids = list(source_ids) if isinstance(source_ids, list) else []
-        for evidence in resolved_evidences:
-            for source_id in evidence.get("sourceIds", []):
-                if source_id not in resolved_source_ids:
-                    resolved_source_ids.append(source_id)
-        for material in resolved_materials:
-            for source_id in material.get("sourceIds", []):
-                if source_id not in resolved_source_ids:
-                    resolved_source_ids.append(source_id)
-
-        return {
-            "objectType": object_type,
-            "objectTypeLabel": label,
-            "object": item,
-            "related": related,
-            "evidences": resolved_evidences,
-            "materials": resolved_materials,
-            "sourceFiles": resolve_ids(resolved_source_ids),
-        }
 
     def save_library_document(self, key: str, name: str, content: bytes, mime_type: str) -> dict[str, Any]:
         if key not in self.libraries:

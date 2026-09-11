@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { FileCheck2, FileText, Sparkles, Upload } from "lucide-vue-next";
-import type { LibrarySummary, Workspace } from "../../shared/types";
+import { Download, FileCheck2, FileText, Sparkles, Upload } from "lucide-vue-next";
+import type { LibrarySummary, MaterialProfile, Workspace } from "../../shared/types";
 
 const props = defineProps<{
   workspace: Workspace | null;
@@ -14,6 +14,7 @@ const props = defineProps<{
   };
   inputKind: "notice" | "tender_document";
   selectedLibraryKey: string;
+  materialsProfile: MaterialProfile | null;
 }>();
 
 const emit = defineEmits<{
@@ -37,6 +38,10 @@ function chooseFile() {
 function onFileChange(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0] || null;
   emit("fileSelected", file);
+}
+
+function exportReport() {
+  window.open("/api/materials/export", "_blank");
 }
 </script>
 
@@ -136,6 +141,36 @@ function onFileChange(event: Event) {
                 {{ document.name }}
               </el-tag>
             </div>
+          </div>
+          <div v-if="materialsProfile?.qualifications?.length" class="profile-summary">
+            <div class="library-summary-title">
+              <el-icon><FileCheck2 /></el-icon>
+              <strong>已识别企业画像</strong>
+              <el-button :icon="Download" size="small" text type="primary" @click="exportReport">
+                导出报告
+              </el-button>
+            </div>
+            <p v-if="materialsProfile.company" class="profile-company">{{ materialsProfile.company }}</p>
+            <div class="catalog-meta">
+              <el-tag
+                v-for="q in materialsProfile.qualifications.slice(0, 6)"
+                :key="q"
+                size="small"
+                type="success"
+                effect="plain"
+              >
+                {{ q }}
+              </el-tag>
+            </div>
+            <p class="form-hint">
+              证书 {{ materialsProfile.certificates?.length || 0 }} 份
+              <template v-if="materialsProfile.certificates?.length">
+                · {{ materialsProfile.certificates.map((c) => c.name).join("、") }}
+              </template>
+            </p>
+            <p v-if="materialsProfile.service_regions?.length" class="form-hint">
+              服务区域：{{ materialsProfile.service_regions.join("、") }}
+            </p>
           </div>
           <el-empty v-else description="暂无可用的企业资料库" />
         </el-card>

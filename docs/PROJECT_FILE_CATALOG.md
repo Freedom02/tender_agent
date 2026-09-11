@@ -18,8 +18,6 @@ tender_agent/
 ├─ .env.example
 ├─ .gitignore
 ├─ README.md
-├─ company-profile.json
-├─ ontology-governance.json
 ├─ UI设计规范.md
 ├─ 模块协作说明.md
 ├─ demo-data/
@@ -28,6 +26,8 @@ tender_agent/
 ├─ backend/
 │  ├─ requirements.txt
 │  ├─ run.py
+│  ├─ build_data.py
+│  ├─ build_ontology.py
 │  └─ app/
 │     ├─ __init__.py
 │     ├─ main.py
@@ -35,12 +35,21 @@ tender_agent/
 │     ├─ api/
 │     │  ├─ __init__.py
 │     │  ├─ config.py
+│     │  ├─ materials.py
 │     │  ├─ monitoring.py
 │     │  ├─ notifications.py
+│     │  ├─ ontology.py
 │     │  └─ wecom.py
 │     ├─ config/
 │     │  ├─ __init__.py
 │     │  └─ service.py
+│     ├─ document_recognition/
+│     │  ├─ ontology_defs.py
+│     │  └─ storage.py
+│     ├─ importers/
+│     │  └─ excel_importer.py
+│     ├─ m3/
+│     │  └─ client.py
 │     ├─ notification/
 │     │  ├─ __init__.py
 │     │  └─ service.py
@@ -55,6 +64,13 @@ tender_agent/
 │     └─ wecom/
 │        ├─ __init__.py
 │        └─ service.py
+├─ M3_workspace/
+│  ├─ generate_sql.py
+│  ├─ import_tenderhub.py
+│  ├─ drop_tenderhub.py
+│  ├─ query_m3.py
+│  ├─ verify_tenderhub.py
+│  └─ regenerate_ontology_outputs.py
 ├─ frontend/
 │  ├─ index.html
 │  ├─ package.json
@@ -102,7 +118,7 @@ tender_agent/
    ├─ workspaces.json
    ├─ reminders.json
    ├─ automation-runs.json
-   ├─ libraries/
+   ├─ libraries/company/证明材料/   # 企业材料证据文件（事实在 M3，本地只留证据文件）
    └─ projects/
 ```
 
@@ -115,11 +131,10 @@ tender_agent/
 | `.env.example` | AI 接口环境变量示例 | 可以补充非敏感变量；禁止提交真实密钥 |
 | `.gitignore` | 忽略依赖、运行数据、密钥和构建产物 | 新增本地生成目录时同步维护 |
 | `README.md` | 项目简介、启动方式和 Demo 状态 | 面向所有开发成员，保持简明 |
-| `company-profile.json` | 北京优锘科技股份有限公司的单公司结构化能力资料，包含业务方向、产品、能力、资质、业绩和资料质量状态 | 当前为基于现有资料列表的 V0.1 初始模型 |
-| `company-material-index.json` | 北京优锘科技股份有限公司的来源文件索引和资料对象统计 | 只登记来源，不复制原始文件；原始资料仍在 `tender_ontology` 项目中 |
-| `ontology-governance.json` | 招投标领域本体、关系、证据和治理规则 | 领域模型变更时需要同步评审 |
 | `UI设计规范.md` | 前端界面、交互和视觉约束 | 前端改版前先阅读 |
 | `模块协作说明.md` | 当前前端模块职责和协作边界 | 团队分工调整时更新 |
+
+> 说明：企业材料单一来源为 **M3 图库 `/tenderhub`**（由《企业材料收集表.xlsx》模板导入 upsert 产出）。本地不再落 `company-materials.json`，只保留证明材料文件（`runtime/libraries/company/证明材料/`）。旧的 `company-profile.json`、`company-knowledge.json`、`company-material-index.json`、`ontology-governance.json` 已删除，不再作为现状列出。
 
 ### 3.1 演示数据
 
@@ -152,17 +167,20 @@ tender_agent/
 | 文件 | 功能 | 关键内容 |
 | --- | --- | --- |
 | `backend/run.py` | 本地启动辅助入口 | 用于以 Python 方式启动 FastAPI |
-| `backend/app/main.py` | FastAPI 应用入口和路由注册 | 创建 `Store`、注册生命周期任务、定义通用 API、挂载前端构建产物 |
+| `backend/app/main.py` | FastAPI 应用入口和路由注册 | 创建 `Store`、注册生命周期任务、挂载 config/materials/monitoring/notifications/ontology/wecom 6 个路由 + catalog/search/import/analyze/ask/libraries 等内部接口 |
 | `backend/app/__init__.py` | Python 包标识 | 不承载业务逻辑 |
 | `backend/requirements.txt` | Python 依赖 | FastAPI、Uvicorn、DOCX、PDF 等依赖 |
+| `backend/build_data.py` | 构建脚本 | JSON → cleaned_data CSV |
+| `backend/build_ontology.py` | 构建脚本 | ontology_defs → ontology_model.json |
 
-`main.py` 当前提供的通用接口包括：
+`main.py` 挂载的路由与通用接口包括：
 
 - 健康检查和初始化数据：`/api/health`、`/api/bootstrap`
 - 项目检索和项目动作：`/api/catalog`、`/api/search/realtime`、项目已读、跟进、快照下载
 - 匹配和工作台：`/api/tenders/match`、`/api/analyze`、工作台草稿和响应文件生成
 - 文件导入：`/api/import`
-- 企业资料库：`/api/libraries`
+- 企业材料：`/api/materials/import`、`/api/materials/import/preview`、`/api/materials/import/confirm`、`/api/materials/profile`、`/api/materials/export`、`/api/materials/evidence-files`
+- M3 本体 CRUD：`/api/ontology/*`
 - 自动化和提醒：`/api/automation/*`、`/api/reminders`
 - AI 问答：`/api/ask`、`/api/agent/chat`
 
@@ -170,7 +188,7 @@ tender_agent/
 
 | 文件 | 功能 | 当前状态 |
 | --- | --- | --- |
-| `backend/app/store.py` | 本地 JSON 存储、文件落盘、文档提取、项目解析、匹配、工作台和问答的总业务门面 | Demo 逻辑集中，后续应拆分为领域服务和持久化层 |
+| `backend/app/store.py` | 本地 JSON 存储（catalog/workspace/libraries/reminders/automation）、文件落盘、文档提取、项目解析、匹配、工作台和问答的总业务门面，企业材料则写透 M3 图库 | Demo 逻辑集中，后续应拆分为领域服务和持久化层 |
 
 `Store` 当前管理：
 
@@ -179,8 +197,9 @@ tender_agent/
 - `workspaces.json`：匹配工作台和响应草稿
 - `reminders.json`：提醒记录
 - `automation-runs.json`：自动化执行记录
+- 企业材料事实存于 **M3 图库 `/tenderhub`**（本地不再落 `company-materials.json`）
 - `runtime/projects/`：项目源文件和输出文件
-- `runtime/libraries/`：资料库原始文件
+- `runtime/libraries/company/证明材料/`：企业材料证据文件
 
 注意：当前没有真正的数据库、多租户、用户身份和权限控制。
 
@@ -189,14 +208,27 @@ tender_agent/
 | 文件 | 路由前缀 | 功能 |
 | --- | --- | --- |
 | `backend/app/api/config.py` | `/api/config` | 读取和保存搜索、评分、AI、监控、通知等配置 |
+| `backend/app/api/materials.py` | `/api/materials` | 企业材料 API（导入 / 预览-确认 / 读取 / 证据文件 / 导出） |
 | `backend/app/api/monitoring.py` | `/api/monitoring` | 查询监控状态、运行抓取、管理自定义网站、测试自定义网站 |
 | `backend/app/api/notifications.py` | `/api/notifications` | 项目提醒开关和站内通知测试 |
+| `backend/app/api/ontology.py` | `/api/ontology` | M3 本体 CRUD |
 | `backend/app/api/wecom.py` | `/api/wecom` | 企业微信 Webhook 测试 |
 | 各目录下的 `__init__.py` | 无 | Python 包标识，不增加业务行为 |
 
 API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂业务不应继续堆到路由函数中。
 
-### 4.4 配置领域
+### 4.4 企业材料与本体领域
+
+| 文件 | 功能 |
+| --- | --- |
+| `backend/app/document_recognition/ontology_defs.py` | 本体定义单一来源（8 类 + 8 条关系） |
+| `backend/app/document_recognition/storage.py` | 本体契约（relationships/build_edges/build_profile） |
+| `backend/app/importers/excel_importer.py` | 模板导入器（ZIP → facts） |
+| `backend/app/m3/client.py` | M3 客户端（Cookie 登录 + MQL） |
+
+> 说明：企业材料已从「上传 PDF/DOCX + OCR + 字段抽取」改为「工作人员填《企业材料收集表.xlsx》模板 → 打包 ZIP → 上传导入」。旧的 `document_recognition/` 下 parser/extraction_engine/normalizer/patterns/pipeline/schema/modules/module_router/llm 等识别代码已归档到 `_archive/document_recognition_v1/`。
+
+### 4.5 配置领域
 
 | 文件 | 功能 |
 | --- | --- |
@@ -213,7 +245,7 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 - 监控网站及抓取规则
 - 站内提醒和企业微信
 
-### 4.5 招标项目监控领域
+### 4.6 招标项目监控领域
 
 | 文件 | 功能 |
 | --- | --- |
@@ -231,16 +263,16 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 - 复杂 JavaScript 页面渲染
 - 真实平台的长期稳定适配保证
 
-### 4.6 匹配领域
+### 4.7 匹配领域
 
 | 文件 | 功能 | 当前状态 |
 | --- | --- | --- |
 | `backend/app/tender_matching/service.py` | 监控画像和手动搜索的项目过滤 | 已实现基础关键词、地区、服务类型过滤 |
-| `Store.match_project()` | 公告/招标文件与公司资料的演示匹配和评分 | 当前集中在 `store.py`，后续需要拆分为三层匹配服务 |
+| `Store.match_project()` | 公告/招标文件与企业材料的演示匹配和评分 | 当前集中在 `store.py`，后续需要拆分为三层匹配服务 |
 
 当前能够演示：
 
-- 资质是否在公司资料中出现
+- 资质是否在企业材料中出现
 - 类似业绩数量是否达到公告识别出的数量
 - 项目经理或项目人员是否存在
 - 服务地点是否属于公司服务区域
@@ -255,7 +287,7 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 - 资料有效期核验
 - 条款冲突和缺失附件的系统化判断
 
-### 4.7 通知领域
+### 4.8 通知领域
 
 | 文件 | 功能 |
 | --- | --- |
@@ -263,6 +295,17 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 | `backend/app/wecom/service.py` | 企业微信 Webhook 消息发送和测试 |
 
 通知不能替代业务员审核。正式版本需要记录通知对象、发送结果、失败原因和重试状态。
+
+### 4.9 M3_workspace 脚本
+
+| 文件 | 功能 |
+| --- | --- |
+| `M3_workspace/generate_sql.py` | CSV → DDL+DML SQL |
+| `M3_workspace/import_tenderhub.py` | 导入在线 M3 |
+| `M3_workspace/drop_tenderhub.py` | 清空 M3 命名空间 |
+| `M3_workspace/query_m3.py` | 查询 M3 |
+| `M3_workspace/verify_tenderhub.py` | 验证 M3 |
+| `M3_workspace/regenerate_ontology_outputs.py` | defs → ontology_model.json + JSONRule.json |
 
 ## 5. 前端文件
 
@@ -306,7 +349,7 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 
 当前页面上的评分和结论来自后端 Demo 匹配逻辑，不应在前端自行重新计算。
 
-### 5.5 企业资料库
+### 5.5 企业材料
 
 | 文件 | 功能 | 当前状态 |
 | --- | --- | --- |
@@ -314,7 +357,7 @@ API 路由层只负责参数接收、调用服务和转换 HTTP 错误。复杂�
 | `frontend/src/features/document-library/LibraryDocumentsPage.vue` | 资料列表、上传入口、搜索和展示 |
 | `frontend/src/features/document-library/LibraryPage.vue` | 另一份资料库页面实现，目前与 `LibraryDocumentsPage.vue` 有重复，尚未接入主流程 |
 
-资料库前端当前能够上传文件和文本，但后端主要保存原始文件及预览文本，尚未完成 OCR、自动分类、字段抽取和人工确认工作流。
+> 说明：企业材料前端当前围绕「模板收集 / 导入」展开（填写《企业材料收集表.xlsx》→ 打包 ZIP → 上传导入 → 直接 upsert 进 M3 → 从 M3 展示/编辑），不再需要 OCR、自动分类和字段抽取工作流。
 
 ### 5.6 自动化配置
 
@@ -342,7 +385,7 @@ frontend/src/main.ts
   -> useAppState()
   -> GET /api/bootstrap
   -> Store.bootstrap()
-  -> 读取 company-profile.json、ontology-governance.json、demo-data 和 runtime
+  -> 从 M3 图库刷新企业画像与计数，并读取 demo-data 和 runtime
   -> 返回项目、资料库、监控、配置、工作台和提醒
 ```
 
@@ -391,8 +434,8 @@ frontend/src/main.ts
 
 - `backend/app/store.py`：当前是所有业务的共享核心，改动容易影响多个流程
 - `backend/app/main.py`：影响 API 路由和应用生命周期
-- `company-profile.json`：会改变匹配演示结果
-- `ontology-governance.json`：会改变领域建模约束
+- `backend/app/document_recognition/ontology_defs.py`：本体定义单一来源（8 类 + 8 关系），会改变领域建模约束
+- M3 图库 `/tenderhub`：企业材料单一事实源，会改变匹配演示结果
 - `.gitignore`：可能影响数据泄露或提交内容
 
 ### 禁止提交
@@ -409,11 +452,13 @@ frontend/src/main.ts
 
 1. `Store` 承担了存储、解析、匹配、生成和问答多个职责，需要逐步拆分。
 2. 资料库当前只有文件元数据和预览文本，没有文档版本、来源、有效期、分类和证据页码。
-3. PDF 只支持普通文本提取，扫描 PDF 和图片需要 OCR。
-4. DOCX 提取当前只读取段落文本，表格、页眉页脚、批注和图片文字尚未处理。
-5. Excel 和图片格式还没有完整的后端解析链路。
+3. PDF 只支持普通文本提取，扫描 PDF 和图片需要 OCR（招标文件侧）。
+4. DOCX 提取当前只读取段落文本，表格、页眉页脚、批注和图片文字尚未处理（招标文件侧）。
+5. Excel 和图片格式（招标文件侧）还没有完整的后端解析链路。
 6. `LibraryPage.vue` 与 `LibraryDocumentsPage.vue` 重复，需要后续确定唯一实现。
 7. 当前监控平台适配器主要用于 Demo，真实平台需要单独适配和回归测试。
 8. 当前没有数据库、多公司隔离、用户认证、权限和审计日志。
 9. “下载项目”当前实际保存公告文本快照，不是真实招标文件自动下载。
 10. 当前评分是演示评分，不能作为法律、商务或投标承诺。
+
+> 注：企业材料部分已改为模板收集/导入（不再需要 OCR/字段抽取），上述「OCR/解析」技术债仅针对招标公告/招标文件侧。

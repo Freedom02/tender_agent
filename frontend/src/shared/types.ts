@@ -197,52 +197,6 @@ export interface LibrarySummary {
   documents: LibraryDocument[];
 }
 
-export interface CompanyKnowledge {
-  meta?: Record<string, any>;
-  counts?: Record<string, number>;
-  businessDirections?: Record<string, any>[];
-  industryScenarios?: Record<string, any>[];
-  products?: Record<string, any>[];
-  capabilities?: Record<string, any>[];
-  qualifications?: Record<string, any>[];
-  projectReferences?: Record<string, any>[];
-  materials?: Record<string, any>[];
-  evidences?: Record<string, any>[];
-  relations?: Record<string, any>[];
-  sourceFiles?: Record<string, any>[];
-}
-
-export interface KnowledgeObject {
-  id: string;
-  objectType: string;
-  objectTypeLabel: string;
-  name?: string;
-  description?: string;
-  status?: string;
-  verificationStatus?: string;
-  evidenceLevel?: string;
-  sourcePath?: string;
-  locator?: string;
-  [key: string]: any;
-}
-
-export interface KnowledgeObjectCollection {
-  objectType: string;
-  objectTypeLabel: string;
-  count: number;
-  items: KnowledgeObject[];
-}
-
-export interface KnowledgeObjectDetail {
-  objectType: string;
-  objectTypeLabel: string;
-  object: KnowledgeObject;
-  related: Array<Record<string, any> & { relatedObject?: KnowledgeObject | null }>;
-  evidences: KnowledgeObject[];
-  materials: KnowledgeObject[];
-  sourceFiles: KnowledgeObject[];
-}
-
 export interface BootstrapResponse {
   ontology: {
     name: string;
@@ -250,9 +204,8 @@ export interface BootstrapResponse {
     classes: number;
     relations: number;
   };
+  materialsCounts: Record<string, number>;
   company: Record<string, unknown>;
-  companyMaterialIndex?: Record<string, unknown>;
-  companyKnowledge?: CompanyKnowledge;
   config: Record<string, any>;
   monitoring?: MonitoringStatus;
   catalog: CatalogItem[];
@@ -260,4 +213,95 @@ export interface BootstrapResponse {
   reminders: Record<string, unknown>[];
   automation: Record<string, any>;
   workspaces: Workspace[];
+}
+
+export interface MaterialCertificate {
+  name: string;
+  number?: string;
+  validUntil?: string;
+  issuer?: string;
+}
+
+export interface MaterialPerformance {
+  name: string;
+  industry?: string;
+  type?: string;
+  region?: string;
+  amount?: string;
+  date?: string;
+}
+
+export interface MaterialPersonnel {
+  role: string;
+  count?: number | null;
+  experienceYears?: number | null;
+}
+
+export interface MaterialProfile {
+  company: string;
+  qualifications: string[];
+  certificates: MaterialCertificate[];
+  performances: MaterialPerformance[];
+  personnel: MaterialPersonnel[];
+  service_regions: string[];
+  capabilities: string[];
+}
+
+// ---------------- 企业材料本体（M3 读取）----------------
+
+export interface OntologyAttrDef {
+  name: string; // snake_case
+  cn: string;
+  type: string; // varchar/text/date/timestamp/int/double
+  isPk: boolean;
+}
+
+export interface OntologyClassDef {
+  name: string; // snake_case
+  cnName: string;
+  description: string;
+  attrs: OntologyAttrDef[];
+}
+
+export interface OntologyRelationDef {
+  name: string;
+  fromClass: string;
+  toClass: string;
+  description: string;
+}
+
+export interface OntologyMeta {
+  classes: OntologyClassDef[];
+  relations: OntologyRelationDef[];
+}
+
+export interface OntologySummary {
+  namespace: string;
+  classes: number;
+  relations: number;
+  counts: Record<string, number>;
+  unavailable: string[];
+}
+
+export interface MaterialFact {
+  id: string; // RID：tenderhub_{class}:{businessId}
+  [key: string]: unknown;
+}
+
+export interface EvidenceFile {
+  name: string;
+  url: string;
+  size: number;
+}
+
+export interface EvidenceFilesResponse {
+  path: string;
+  files: EvidenceFile[];
+}
+
+export interface ImportResult {
+  stats: Record<string, number>;
+  warnings: string[];
+  m3Sync: { objects: number; edges: number; warnings: string[] };
+  profile: Record<string, unknown>;
 }

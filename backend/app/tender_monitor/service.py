@@ -19,17 +19,6 @@ def _format_time(value: datetime) -> str:
     return value.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _source_matches(item: dict[str, Any], site_id: str) -> bool:
-    source = str(item.get("source", "")).lower()
-    if site_id == "government-procurement":
-        return "政府采购" in source or "ccgp" in str(item.get("sourceUrl", "")).lower()
-    if site_id == "public-resource":
-        return "公共资源" in source or "ggzy" in str(item.get("sourceUrl", "")).lower()
-    if site_id == "service-platform":
-        return "招标投标公共服务" in source or "cebpubservice" in str(item.get("sourceUrl", "")).lower()
-    return False
-
-
 def _fixture_notices(site: dict[str, Any]) -> list[dict[str, Any]]:
     today = datetime.now().astimezone().date().isoformat()
     source_id = str(site["id"])
@@ -38,52 +27,52 @@ def _fixture_notices(site: dict[str, Any]) -> list[dict[str, Any]]:
     fixtures = {
         "government-procurement": [
             {
-                "id": "monitor-ccgp-labor-2026",
-                "title": "某市公共服务中心劳务派遣服务采购项目",
-                "category": "劳务派遣",
+                "id": "monitor-ccgp-digitaltwin-2026",
+                "title": "某市智慧园区数字孪生平台建设项目",
+                "category": "数字孪生",
                 "region": "全国",
                 "noticeType": "公开招标公告",
                 "publishedDate": today,
                 "source": source_name,
                 "sourceUrl": f"{url}/cggg/index.htm",
-                "analysisText": "项目名称：某市公共服务中心劳务派遣服务采购项目。服务类型：劳务派遣、人力资源服务。服务地点：全国。公告类型：公开招标公告。",
+                "analysisText": "项目名称：某市智慧园区数字孪生平台建设项目。服务类型：数字孪生、智慧园区。服务地点：全国。公告类型：公开招标公告。",
             },
             {
-                "id": "monitor-ccgp-security-2026",
-                "title": "某医院秩序维护服务采购项目",
-                "category": "保安服务",
+                "id": "monitor-ccgp-datacenter-2026",
+                "title": "某数据中心可视化运维管理项目",
+                "category": "数据中心",
                 "region": "北京市",
                 "noticeType": "公开招标公告",
                 "publishedDate": today,
                 "source": source_name,
                 "sourceUrl": f"{url}/cggg/index.htm",
-                "analysisText": "项目名称：某医院秩序维护服务采购项目。服务类型：保安服务。服务地点：北京市。",
+                "analysisText": "项目名称：某数据中心可视化运维管理项目。服务类型：数据中心与运维。服务地点：北京市。",
             },
         ],
         "public-resource": [
             {
-                "id": "monitor-ggzy-hr-2026",
-                "title": "某产业园区人力资源外包服务项目",
-                "category": "人力资源服务",
+                "id": "monitor-ggzy-dataintel-2026",
+                "title": "某企业数据智能分析平台采购项目",
+                "category": "数据智能",
                 "region": "全国",
                 "noticeType": "招标公告",
                 "publishedDate": today,
                 "source": source_name,
                 "sourceUrl": f"{url}/information/",
-                "analysisText": "项目名称：某产业园区人力资源外包服务项目。服务类型：人力资源服务、劳务派遣。服务地点：全国。",
+                "analysisText": "项目名称：某企业数据智能分析平台采购项目。服务类型：数据智能、AI 智能体。服务地点：全国。",
             }
         ],
         "service-platform": [
             {
-                "id": "monitor-cebp-labor-2026",
-                "title": "某集团劳务派遣服务项目",
-                "category": "劳务派遣",
+                "id": "monitor-cebp-lowalt-2026",
+                "title": "某市低空经济态势感知平台项目",
+                "category": "低空经济",
                 "region": "广东省",
                 "noticeType": "招标公告",
                 "publishedDate": today,
                 "source": source_name,
                 "sourceUrl": url,
-                "analysisText": "项目名称：某集团劳务派遣服务项目。服务类型：劳务派遣。服务地点：广东省。",
+                "analysisText": "项目名称：某市低空经济态势感知平台项目。服务类型：低空经济、数字孪生。服务地点：广东省。",
             }
         ],
     }
@@ -97,9 +86,7 @@ def _candidate_notices(store: "Store", site: dict[str, Any]) -> list[dict[str, A
         return adapter_for(site).fetch(site, ensure_config(store.config)["monitoring"])
     except MonitorAdapterError:
         if ensure_config(store.config)["monitoring"].get("demoFallback") is True:
-            seed_catalog = store.seed_catalog()
-            source_records = [item for item in seed_catalog if _source_matches(item, str(site["id"]))]
-            return source_records or _fixture_notices(site)
+            return _fixture_notices(site)
         raise
 
 

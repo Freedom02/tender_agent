@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { BriefcaseBusiness, Database, FileText, Rocket, Save, Upload } from "lucide-vue-next";
-import type { CatalogItem, LibrarySummary, Workspace } from "../../shared/types";
+import type { CatalogItem, LibrarySummary, MaterialProfile, Workspace } from "../../shared/types";
 
 const props = defineProps<{
   workspace: Workspace | null;
   project: CatalogItem | null;
   libraries: LibrarySummary[];
   selectedLibraryKey: string;
+  materialsProfile: MaterialProfile | null;
   busy: boolean;
 }>();
 
@@ -28,13 +29,14 @@ const selectedLibrary = computed(
 const templates = [
   { value: "standard", label: "标准服务类响应文件", detail: "适用于咨询、服务采购和综合服务项目" },
   { value: "technical", label: "技术服务方案模板", detail: "突出技术方案、实施计划和交付保障" },
-  { value: "labor", label: "劳务派遣项目模板", detail: "适用于劳务派遣、人力资源服务项目" }
+  { value: "digital-twin", label: "数字孪生技术服务模板", detail: "适用于数字孪生、数据智能和技术服务项目" }
 ];
 
 const industries = [
-  { value: "human-resources", label: "人力资源服务" },
-  { value: "consulting", label: "咨询与技术服务" },
-  { value: "property", label: "物业与综合服务" },
+  { value: "digital-twin", label: "数字孪生" },
+  { value: "data-intelligence", label: "数据智能" },
+  { value: "smart-park", label: "智慧园区" },
+  { value: "data-center", label: "数据中心与运维" },
   { value: "other", label: "其他行业" }
 ];
 
@@ -147,6 +149,24 @@ function onFileChange(event: Event) {
             <span>{{ selectedLibrary.name }}，已收录 {{ selectedLibrary.documentCount }} 份企业材料</span>
           </div>
           <span v-else class="form-hint">暂无企业资料库，将无法自动引用公司资质和案例。</span>
+          <div v-if="materialsProfile?.qualifications?.length" class="profile-summary">
+            <span class="form-hint">已识别：</span>
+            <el-tag
+              v-for="q in materialsProfile.qualifications.slice(0, 5)"
+              :key="q"
+              size="small"
+              type="success"
+              effect="plain"
+            >
+              {{ q }}
+            </el-tag>
+            <span class="form-hint">
+              证书 {{ materialsProfile.certificates?.length || 0 }} 份
+              <template v-if="materialsProfile.service_regions?.length">
+                · 区域 {{ materialsProfile.service_regions.join("、") }}
+              </template>
+            </span>
+          </div>
         </el-col>
       </el-row>
 

@@ -11,8 +11,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .api.config import create_router as create_config_router
+from .api.materials import create_router as create_materials_router
 from .api.monitoring import create_router as create_monitoring_router
 from .api.notifications import create_router as create_notifications_router
+from .api.ontology import create_router as create_ontology_router
 from .api.wecom import create_router as create_wecom_router
 from .store import Store
 from .tender_monitor.service import search_catalog
@@ -50,8 +52,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(create_config_router(store))
+app.include_router(create_materials_router(store))
 app.include_router(create_monitoring_router(store))
 app.include_router(create_notifications_router(store))
+app.include_router(create_ontology_router(store))
 app.include_router(create_wecom_router(store))
 
 
@@ -108,29 +112,6 @@ def health() -> dict[str, str]:
 @app.get("/api/bootstrap")
 def bootstrap() -> dict[str, Any]:
     return store.bootstrap()
-
-
-@app.get("/api/company/profile")
-def company_profile() -> dict[str, Any]:
-    return store.company
-
-
-@app.get("/api/company/knowledge")
-def company_knowledge() -> dict[str, Any]:
-    return store.company_knowledge
-
-
-@app.get("/api/company/knowledge/objects")
-def company_knowledge_objects(object_type: str = "", q: str = "") -> dict[str, Any]:
-    return store.knowledge_objects(object_type=object_type, query=q)
-
-
-@app.get("/api/company/knowledge/objects/{object_type}/{object_id}")
-def company_knowledge_object_detail(object_type: str, object_id: str) -> dict[str, Any]:
-    result = store.knowledge_object_detail(object_type, object_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="未找到本体对象")
-    return result
 
 
 @app.get("/api/catalog")
