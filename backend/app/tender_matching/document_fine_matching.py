@@ -215,6 +215,9 @@ def _is_requirement(text: str) -> bool:
         "具有",
         "不少于",
         "不低于",
+        "不超过",
+        "不大于",
+        "不小于",
         "至少",
         "投标人",
         "供应商",
@@ -232,6 +235,21 @@ def _is_requirement(text: str) -> bool:
         "无效投标",
         "投标无效",
         "否决",
+        "支持",
+        "兼容",
+        "满足",
+        "符合",
+        "参数",
+        "性能",
+        "指标",
+        "规格",
+        "精度",
+        "范围",
+        "响应时间",
+        "并发",
+        "吞吐",
+        "≥",
+        "≤",
     )
     return any(term in value for term in terms) or bool(
         re.match(r"^(?:\d+(?:\.\d+)*[、.]|[（(]\d+[)）])", _safe_text(text, 100))
@@ -410,7 +428,7 @@ def extract_tender_requirements_by_rule(text: str, segments: list[dict[str, Any]
             continue
         current_section = _section_for(segment_text, current_section)
         requirements.extend(_requirement_from_segment(segment, len(requirements), current_section))
-        if len(requirements) >= 80:
+        if len(requirements) >= 500:
             break
 
     return {
@@ -443,7 +461,7 @@ def _normalize_model_extraction(
     if not isinstance(raw_requirements, list):
         return None
     requirements: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_requirements[:100]):
+    for index, raw in enumerate(raw_requirements[:500]):
         if not isinstance(raw, dict):
             continue
         text = _safe_text(raw.get("text"), 1200)
@@ -499,7 +517,7 @@ def _model_input_batches(segments: list[dict[str, Any]]) -> list[str]:
     if not candidates:
         return []
 
-    batch_count = min(8, max(1, math.ceil(sum(len(item) + 1 for item in candidates) / 2500)))
+    batch_count = min(30, max(1, math.ceil(sum(len(item) + 1 for item in candidates) / 2200)))
     batches: list[str] = []
     for batch_index in range(batch_count):
         start = batch_index * len(candidates) // batch_count
@@ -556,7 +574,7 @@ def extract_tender_requirements(
         '{"requirements":[{"id":"req-001","category":"qualification|compliance|rejection|commercial|pricing|contract|service_plan|performance|document|technical",'
         '"text":"原文要求","section":"所在章节","sourceLocator":"必须原样引用输入方括号中的定位",'
         '"mandatory":true,"isRejection":false,"confidence":0.0}],"warnings":[]}'
-        "。每批最多输出 8 条最关键要求。"
+        "。请逐条提取该批原文中全部可核验要求，不要只挑关键条款，不要合并、不要遗漏，保持原文顺序。每批最多输出 30 条。"
     )
     available_locators = {
         _source_locator(item, index)
@@ -573,7 +591,7 @@ def extract_tender_requirements(
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": f"招标文件片段（第 {index} 批）如下：\n{batch}"},
             ],
-            max_tokens=2500,
+            max_tokens=4000,
             temperature=0,
         )
         if _is_gateway_timeout(result):

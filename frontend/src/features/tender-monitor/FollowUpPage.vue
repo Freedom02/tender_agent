@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ClipboardCheck, ExternalLink, Flag } from "lucide-vue-next";
+import { ClipboardCheck, ExternalLink, Flag, Search } from "lucide-vue-next";
 import type { CatalogItem } from "../../shared/types";
 
 defineProps<{
@@ -8,6 +8,7 @@ defineProps<{
 
 const emit = defineEmits<{
   removeFollowUp: [item: CatalogItem];
+  enterMatching: [item: CatalogItem];
 }>();
 </script>
 
@@ -41,27 +42,22 @@ const emit = defineEmits<{
       </el-table-column>
       <el-table-column prop="category" label="类型" width="150" />
       <el-table-column prop="region" label="地区" min-width="170" />
-      <el-table-column label="报名时间" min-width="190">
+      <el-table-column label="报名时间" min-width="220">
         <template #default="{ row }">
           {{ row.registrationPeriod || row.registrationDeadline || "待核验" }}
         </template>
       </el-table-column>
-      <el-table-column label="响应文件截止时间" min-width="190">
+      <el-table-column label="响应文件截止时间" min-width="220" class-name="deadline-col">
         <template #default="{ row }">
           {{ row.bidDeadline || "待核验" }}
         </template>
       </el-table-column>
       <el-table-column label="操作" width="120" fixed="right">
         <template #default="{ row }">
-          <el-button
-            size="small"
-            :icon="Flag"
-            type="success"
-            plain
-            @click="emit('removeFollowUp', row)"
-          >
-            取消跟进
-          </el-button>
+          <div class="action-stack">
+            <el-button size="small" :icon="Flag" type="success" plain @click="emit('removeFollowUp', row)">取消跟进</el-button>
+            <el-button size="small" :icon="Search" type="primary" plain @click="emit('enterMatching', row)">进入匹配</el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -69,3 +65,19 @@ const emit = defineEmits<{
     <el-empty v-else description="暂无跟进项目，请先在招标项目列表中点击“跟进”" />
   </el-card>
 </template>
+
+<style scoped>
+:deep(.deadline-col .cell) {
+  padding-left: 24px !important;
+}
+
+.action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+.action-stack :deep(.el-button) {
+  margin-left: 0 !important;
+}
+</style>

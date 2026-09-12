@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,10 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# M3 画像刷新缓存时长（秒）：避免每次 bootstrap 都打 8 条 MQL 拖慢首屏。
+M3_REFRESH_TTL_SECONDS = 60.0
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
@@ -57,6 +62,8 @@ class Store:
         self.company: dict[str, Any] = {}
         # 历史遗留：招标匹配/监控的企业数据源（旧 company-knowledge.json 已删，现为空壳）。
         self.company_knowledge: dict[str, Any] = {}
+        # M3 画像刷新缓存：上次刷新时间戳。
+        self._m3_last_refresh = 0.0
         self.workspaces: dict[str, dict[str, Any]] = {}
         self.reminders: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
@@ -70,7 +77,6 @@ class Store:
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
         self._refresh_company_from_m3()
-        self._seed_demo_records()
         catalog_repaired = False
         for item in self.catalog:
             catalog_repaired = repair_notice_fields(item) or catalog_repaired
@@ -249,11 +255,16 @@ class Store:
             return {k: cached.get(k, 0) for k in keys}
         return {k: 0 for k in keys}
 
-    def _refresh_company_from_m3(self) -> None:
+    def _refresh_company_from_m3(self, force: bool = False) -> None:
         """从 M3 拉取企业 facts，刷新 self.company（画像）与 self._m3_counts（计数）。
 
         best-effort：M3 不可用时保持现有值（首次为空画像/零计数），不抛异常。
+        默认按 M3_REFRESH_TTL_SECONDS 做缓存，避免每次 bootstrap 都打 8 条 MQL 拖慢首屏。
         """
+        now = time.time()
+        if not force and (now - self._m3_last_refresh) < M3_REFRESH_TTL_SECONDS:
+            return
+
         from .document_recognition.storage import FACT_LIST_KEYS, build_profile
         from .m3.sync import build_m3_client, read_facts_from_m3
 
@@ -270,6 +281,8 @@ class Store:
                 for key in FACT_LIST_KEYS:
                     empty[key] = 0
                 self._m3_counts = empty
+        finally:
+            self._m3_last_refresh = time.time()
 
     def bootstrap(self) -> dict[str, Any]:
         from .tender_monitor.service import monitoring_status

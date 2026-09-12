@@ -178,6 +178,7 @@ export function useAppState() {
       if (existing >= 0) workspaces.value[existing] = result.workspace;
       else workspaces.value.unshift(result.workspace);
       selectedWorkspaceId.value = result.workspace.id;
+      importKind.value = result.workspace.reasoning?.fineReview ? "tender_document" : "notice";
       activeTab.value = "matching";
       ElMessage.success("匹配分析完成");
     } catch (error) {
@@ -489,7 +490,11 @@ export function useAppState() {
 
   function selectProject(item: CatalogItem) {
     selectedProjectId.value = item.id;
-    if (item.workspaceId) selectedWorkspaceId.value = item.workspaceId;
+    if (item.workspaceId) {
+      selectedWorkspaceId.value = item.workspaceId;
+      const ws = workspaces.value.find((w) => w.id === item.workspaceId);
+      if (ws) importKind.value = ws.reasoning?.fineReview ? "tender_document" : "notice";
+    }
     followUpStatus.value = item.followUpStatus || "";
   }
 

@@ -463,6 +463,7 @@ def create_router(store: Any) -> APIRouter:
             if org:
                 facts["organization"] = org
         m3_sync = sync_facts_to_m3(m3, facts)
+        store._refresh_company_from_m3(force=True)
 
         return {
             "stats": result["stats"],
@@ -548,6 +549,7 @@ def create_router(store: Any) -> APIRouter:
                 facts["organization"] = org
         m3_sync = sync_facts_to_m3(m3, facts)
         path.unlink(missing_ok=True)
+        store._refresh_company_from_m3(force=True)
 
         return {
             "stats": record["stats"],

@@ -77,41 +77,11 @@ function displayTime(value?: string) {
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="匹配业务" width="140">
-            <template #default="{ row }">
-              {{ row.matchedBusinessDirections?.[0] || row.searchProfile?.serviceType || row.matchedKeywords?.[0] || "未命中" }}
-            </template>
-          </el-table-column>
-          <el-table-column label="本体命中" min-width="260">
-            <template #default="{ row }">
-              <div class="ontology-hit-list">
-                <el-tag v-for="item in (row.matchedProducts || []).slice(0, 2)" :key="`product-${item}`" size="small" effect="plain">{{ item }}</el-tag>
-                <el-tag v-for="item in (row.matchedScenarios || []).slice(0, 2)" :key="`scenario-${item}`" size="small" type="success" effect="plain">{{ item }}</el-tag>
-                <el-tag v-for="item in (row.matchedCapabilities || []).slice(0, 1)" :key="`capability-${item}`" size="small" type="warning" effect="plain">{{ item }}</el-tag>
-                <span v-if="!row.matchedProducts?.length && !row.matchedScenarios?.length && !row.matchedCapabilities?.length">待人工复核</span>
-              </div>
-            </template>
-          </el-table-column>
           <el-table-column prop="region" label="地区" width="120" />
           <el-table-column prop="publishedDate" label="发布日期" width="120" />
-          <el-table-column label="下一步" width="150">
-            <template #default="{ row }">
-              <el-tooltip v-if="row.matchReasons?.length" :content="row.matchReasons.join('；')" placement="top">
-                <el-tag :type="row.shouldAnalyze ? 'success' : row.nextStage === '人工复核' ? 'warning' : 'info'" effect="plain">
-                  {{ row.nextStage || "待评估" }}
-                </el-tag>
-              </el-tooltip>
-              <el-tag v-else type="info" effect="plain">{{ row.nextStage || "待评估" }}</el-tag>
-            </template>
-          </el-table-column>
           <el-table-column label="获取文件时间" min-width="180">
             <template #default="{ row }">
               {{ displayTime(row.registrationPeriod || row.registrationDeadline) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="提交截止" min-width="160">
-            <template #default="{ row }">
-              {{ displayTime(row.bidDeadline) }}
             </template>
           </el-table-column>
           <el-table-column label="状态" width="130">

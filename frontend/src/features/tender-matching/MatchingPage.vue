@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { Download, FileCheck2, FileText, Sparkles, Upload } from "lucide-vue-next";
-import type { LibrarySummary, MatchSummary, MaterialProfile, ReasoningRow, Workspace } from "../../shared/types";
+import { computed, nextTick, ref, watch } from "vue";
+import { ChevronRight, FileCheck2, History, Sparkles, Upload } from "lucide-vue-next";
+import type { MatchSummary, ReasoningRow, Workspace } from "../../shared/types";
 
 const props = defineProps<{
   workspace: Workspace | null;
-  libraries: LibrarySummary[];
+  workspaces: Workspace[];
   busy: boolean;
   importFile: File | null;
   importForm: {
@@ -13,28 +13,25 @@ const props = defineProps<{
     text: string;
   };
   inputKind: "notice" | "tender_document";
-  selectedLibraryKey: string;
-  materialsProfile: MaterialProfile | null;
 }>();
 
 const emit = defineEmits<{
   evaluate: [];
   fileSelected: [file: File | null];
   "update:input-kind": [kind: "notice" | "tender_document"];
-  "update:selected-library-key": [key: string];
   "update-fine-status": [payload: { rowId: string; status: string }];
   openWorkspace: [];
+  selectWorkspace: [workspace: Workspace];
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
+const resultArea = ref<HTMLElement | null>(null);
 const fineStatusFilter = ref("全部状态");
 const fineStatusValues = ["满足", "部分满足", "不满足", "待补材料", "待澄清", "不适用"];
 const fileName = computed(() => props.importFile?.name || "");
 const auditRecords = computed(() => props.workspace?.auditRecords || []);
 const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
-const selectedLibrary = computed(
-  () => props.libraries.find((library) => library.key === props.selectedLibraryKey) || props.libraries[0] || null
-);
+const historyWorkspaces = computed(() => props.workspaces);
 const fineStatusOptions = computed(() => {
   const statusCounts = props.workspace?.reasoning.fineReview?.statusCounts || {};
   return ["全部状态", ...Object.keys(statusCounts)];
@@ -131,8 +128,11 @@ function evidenceStatusType(
 
 watch(
   () => props.workspace?.id,
-  () => {
+  (workspaceId, previousWorkspaceId) => {
     fineStatusFilter.value = "全部状态";
+    if (workspaceId && previousWorkspaceId && workspaceId !== previousWorkspaceId) {
+      void nextTick(() => resultArea.value?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    }
   }
 );
 
@@ -143,10 +143,6 @@ function chooseFile() {
 function onFileChange(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0] || null;
   emit("fileSelected", file);
-}
-
-function exportReport() {
-  window.open("/api/materials/export", "_blank");
 }
 </script>
 
@@ -209,79 +205,52 @@ function exportReport() {
         <el-card class="panel" shadow="never">
           <template #header>
             <div class="panel-header">
-              <span>企业资料库</span>
-              <el-tag v-if="selectedLibrary" type="success" effect="plain">
-                {{ selectedLibrary.documentCount }} 份资料
+              <div class="result-title">
+                <el-icon><History /></el-icon>
+                <span>历史匹配项目</span>
+              </div>
+              <el-tag type="info" effect="plain">
+                {{ historyWorkspaces.length }} 个项目
               </el-tag>
             </div>
           </template>
 
-          <el-select
-            :model-value="selectedLibraryKey"
-            class="field"
-            placeholder="选择用于匹配的资料库"
-            @update:model-value="emit('update:selected-library-key', $event)"
-          >
-            <el-option
-              v-for="library in libraries"
-              :key="library.key"
-              :label="library.name"
-              :value="library.key"
-            />
-          </el-select>
-
-          <div v-if="selectedLibrary" class="library-summary">
-            <div class="library-summary-title">
-              <el-icon><FileText /></el-icon>
-              <strong>{{ selectedLibrary.name }}</strong>
-            </div>
-            <p>{{ selectedLibrary.description || "将使用企业资质、案例和服务能力资料参与匹配。" }}</p>
-            <div class="catalog-meta">
-              <el-tag
-                v-for="document in selectedLibrary.documents.slice(0, 4)"
-                :key="document.id"
-                size="small"
-                effect="plain"
-              >
-                {{ document.name }}
-              </el-tag>
-            </div>
+          <div v-if="historyWorkspaces.length" class="match-history-list">
+            <button
+              v-for="item in historyWorkspaces"
+              :key="item.id"
+              type="button"
+              class="match-history-item"
+              :class="{ 'match-history-item--active': item.id === workspace?.id }"
+              @click="emit('selectWorkspace', item)"
+            >
+              <span class="match-history-item-main">
+                <strong>{{ item.title || item.project.title || "未命名项目" }}</strong>
+                <span>
+                  {{ item.project.region || "地区待识别" }}
+                  ·
+                  {{ item.reasoning.fineReview ? "完整文件细匹配" : "公告资格粗匹配" }}
+                </span>
+              </span>
+              <span class="match-history-item-side">
+                <el-tag
+                  size="small"
+                  :type="item.reasoning.fineReview
+                    ? (item.reasoning.fineReview.hardBlockers.length ? 'danger' : 'success')
+                    : ((item.reasoning.eligibility?.shouldGetTenderDocument ?? item.reasoning.score >= 70) ? 'success' : 'warning')"
+                  effect="plain"
+                >
+                  {{ item.reasoning.fineReview?.score ?? item.reasoning.eligibility?.eligibilityScore ?? item.reasoning.score }}
+                </el-tag>
+                <el-icon><ChevronRight /></el-icon>
+              </span>
+            </button>
           </div>
-          <div v-if="materialsProfile?.qualifications?.length" class="profile-summary">
-            <div class="library-summary-title">
-              <el-icon><FileCheck2 /></el-icon>
-              <strong>已识别企业画像</strong>
-              <el-button :icon="Download" size="small" text type="primary" @click="exportReport">
-                导出报告
-              </el-button>
-            </div>
-            <p v-if="materialsProfile.company" class="profile-company">{{ materialsProfile.company }}</p>
-            <div class="catalog-meta">
-              <el-tag
-                v-for="q in materialsProfile.qualifications.slice(0, 6)"
-                :key="q"
-                size="small"
-                type="success"
-                effect="plain"
-              >
-                {{ q }}
-              </el-tag>
-            </div>
-            <p class="form-hint">
-              证书 {{ materialsProfile.certificates?.length || 0 }} 份
-              <template v-if="materialsProfile.certificates?.length">
-                · {{ materialsProfile.certificates.map((c) => c.name).join("、") }}
-              </template>
-            </p>
-            <p v-if="materialsProfile.service_regions?.length" class="form-hint">
-              服务区域：{{ materialsProfile.service_regions.join("、") }}
-            </p>
-          </div>
-          <el-empty v-else description="暂无可用的企业资料库" />
+          <el-empty v-else description="暂无历史匹配项目" />
         </el-card>
 
         <el-alert
-          title="评估结果会从总体评分、分项匹配、证据依据和风险建议几个维度呈现。"
+          title="点击历史项目即可查看已保存的匹配结果。"
           type="info"
           show-icon
           :closable="false"
@@ -289,16 +258,17 @@ function exportReport() {
       </el-col>
     </el-row>
 
-    <el-card v-if="workspace && inputKind === 'notice'" class="panel result-panel" shadow="never">
-      <template #header>
-        <div class="panel-header">
-          <div class="result-title">
-            <el-icon><FileCheck2 /></el-icon>
-            <span>匹配评估结果</span>
+    <div ref="resultArea">
+      <el-card v-if="workspace && inputKind === 'notice'" class="panel result-panel" shadow="never">
+        <template #header>
+          <div class="panel-header">
+            <div class="result-title">
+              <el-icon><FileCheck2 /></el-icon>
+              <span>匹配评估结果</span>
+            </div>
+            <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
           </div>
-          <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
-        </div>
-      </template>
+        </template>
 
       <div class="score-overview">
         <div class="score-ring">
@@ -439,26 +409,26 @@ function exportReport() {
           <p>{{ risk.detail }}</p>
         </el-card>
       </div>
-    </el-card>
+      </el-card>
 
-    <el-card v-if="workspace?.reasoning.fineReview && inputKind === 'tender_document'" class="panel result-panel" shadow="never">
-      <template #header>
-        <div class="panel-header">
-          <div class="result-title">
-            <el-icon><FileCheck2 /></el-icon>
-            <span>投标应答预审</span>
+      <el-card v-if="workspace?.reasoning.fineReview && inputKind === 'tender_document'" class="panel result-panel" shadow="never">
+        <template #header>
+          <div class="panel-header">
+            <div class="result-title">
+              <el-icon><FileCheck2 /></el-icon>
+              <span>投标应答预审</span>
+            </div>
+            <div class="catalog-actions">
+              <el-tag
+                :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
+                effect="light"
+              >
+                {{ workspace.reasoning.fineReview.recommendation }}
+              </el-tag>
+              <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
+            </div>
           </div>
-          <div class="catalog-actions">
-            <el-tag
-              :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
-              effect="light"
-            >
-              {{ workspace.reasoning.fineReview.recommendation }}
-            </el-tag>
-            <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
-          </div>
-        </div>
-      </template>
+        </template>
 
       <div class="score-overview">
         <div class="score-ring">
@@ -632,6 +602,7 @@ function exportReport() {
         class="qualification-empty"
         description="当前内容未识别到可展示的要求"
       />
-    </el-card>
+      </el-card>
+    </div>
   </div>
 </template>

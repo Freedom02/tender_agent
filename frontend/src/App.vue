@@ -3,6 +3,7 @@ import { onMounted } from "vue";
 import AppShell from "./app/AppShell.vue";
 import { useAppState } from "./app/app-state";
 import type { AppTab } from "./app/navigation";
+import type { CatalogItem, Workspace } from "./shared/types";
 import TenderMonitorPage from "./features/tender-monitor/TenderMonitorPage.vue";
 import FollowUpPage from "./features/tender-monitor/FollowUpPage.vue";
 import MatchingPage from "./features/tender-matching/MatchingPage.vue";
@@ -78,7 +79,7 @@ function pageSubtitle() {
   if (activeTab.value === "generator") return "预览并编辑标书草稿，生成文档后下载响应文件。";
   if (activeTab.value === "materials") return "集中管理企业资质、业绩、人员等投标资料，支持导入模板包或逐条维护。";
   if (selectedProject.value?.analysisPreview) return selectedProject.value.analysisPreview;
-  if (activeTab.value === "matching") return "输入招标文件并选择企业资料库，查看资格要求与企业资历的匹配结果。";
+  if (activeTab.value === "matching") return "输入招标文件开始评估，或从右侧历史项目查看已保存的匹配结果。";
   if (activeTab.value === "workspace") return "维护响应文件草稿并导出响应包。";
   return "从左侧选择一个项目，或进入匹配评估开始分析。";
 }
@@ -101,6 +102,23 @@ function backToWorkspace() {
 
 function updateDraft(value: string) {
   if (selectedWorkspace.value) selectedWorkspace.value.draft = value;
+}
+
+function enterMatching(item: CatalogItem) {
+  selectProject(item);
+  importForm.name = item.title || "";
+  importForm.text = item.analysisText || "";
+  if (item.workspaceId) {
+    activeTab.value = "matching";
+  } else {
+    analyzeProject(item.id);
+  }
+}
+
+function selectMatchingWorkspace(workspace: Workspace) {
+  selectedWorkspaceId.value = workspace.id;
+  selectedProjectId.value = workspace.projectId;
+  importKind.value = workspace.reasoning.fineReview ? "tender_document" : "notice";
 }
 
 onMounted(loadBootstrap);
@@ -135,24 +153,23 @@ onMounted(loadBootstrap);
       v-else-if="activeTab === 'follow-up'"
       :items="catalog.filter((item) => item.followUp)"
       @remove-follow-up="saveProjectFollowUp"
+      @enter-matching="enterMatching($event)"
     />
 
     <MatchingPage
       v-else-if="activeTab === 'matching'"
       :workspace="selectedWorkspace"
-      :libraries="libraries"
+      :workspaces="workspaces"
       :import-form="importForm"
       :import-file="importFile"
       :input-kind="importKind"
-      :selected-library-key="libraryForm.key"
-      :materials-profile="materialsProfile"
       :busy="busy"
       @evaluate="importDocument"
       @file-selected="importFile = $event"
       @update:input-kind="importKind = $event"
-      @update:selected-library-key="libraryForm.key = $event"
       @update-fine-status="updateFineReviewStatus($event.rowId, $event.status)"
       @open-workspace="openWorkspace"
+      @select-workspace="selectMatchingWorkspace"
     />
 
     <BidWorkspacePage

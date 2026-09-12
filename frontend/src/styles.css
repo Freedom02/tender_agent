@@ -651,6 +651,67 @@ body {
   font-size: 12px;
 }
 
+.match-history-list {
+  display: grid;
+  gap: 8px;
+  max-height: 430px;
+  overflow-y: auto;
+}
+
+.match-history-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.match-history-item:hover,
+.match-history-item--active {
+  border-color: rgba(var(--primary-rgb), 0.55);
+  background: rgba(var(--primary-rgb), 0.06);
+}
+
+.match-history-item--active {
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.match-history-item-main {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.match-history-item-main strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-history-item-main span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.match-history-item-side {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
 .profile-summary {
   margin-top: 12px;
   padding: 12px 14px;
