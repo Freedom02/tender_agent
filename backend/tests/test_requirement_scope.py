@@ -3,6 +3,10 @@ from __future__ import annotations
 import unittest
 
 from backend.app.tender_matching.document_fine_matching import (
+    _category_for,
+    _is_process_only_text,
+    _is_requirement,
+    _table_requirement_type,
     evaluate_tender_document,
     extract_tender_requirements,
     extract_tender_requirements_by_rule,
@@ -365,6 +369,22 @@ class RequirementScopeTests(unittest.TestCase):
             ],
         )
 
+    def test_cross_reference_decimal_is_not_treated_as_clause_marker(self) -> None:
+        result = extract_tender_requirements_by_rule(
+            "",
+            [
+                {
+                    "id": "SEG-CROSS-REF",
+                    "sourceLocator": "第9页",
+                    "text": "2.2接受联合体投标且投标人为联合体的，联合体中的各方均应按照本章第2.1条规定提交相应的全部资料。",
+                }
+            ],
+        )
+
+        self.assertEqual(len(result["requirements"]), 1)
+        self.assertIn("第2.1条规定", result["requirements"][0]["text"])
+        self.assertEqual(result["requirements"][0]["category"], "qualification")
+
     def test_rule_extraction_classifies_compliance_and_service_plan_requirements(self) -> None:
         result = extract_tender_requirements_by_rule(
             "",
@@ -386,6 +406,136 @@ class RequirementScopeTests(unittest.TestCase):
             [item["category"] for item in result["requirements"]],
             ["compliance", "service_plan"],
         )
+
+    def test_supplier_word_does_not_count_as_obligation_signal(self) -> None:
+        self.assertFalse(_is_requirement("供应商名称"))
+        self.assertTrue(_is_requirement("供应商应完成平台部署和培训服务。"))
+
+    def test_common_qualification_documents_are_classified_as_qualification(self) -> None:
+        for text in (
+            "投标人代表为单位授权的委托代理人，应提供本授权书。",
+            "投标人为自然人的，提供有效的自然人身份证件复印件。",
+            "投标人应提供依法缴纳税收的凭据复印件。",
+            "投标人应提供依法缴纳社会保障资金的凭据复印件。",
+            "联合体中的各方均应按照本章第2.1条规定提交相应的全部资料。",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_category_for(text), "qualification")
+
+        self.assertEqual(
+            _category_for("采购包、品目号、投标标的及数量应与采购标的一览表保持一致。"),
+            "document",
+        )
+
+    def test_process_only_fragments_are_filtered(self) -> None:
+        for text in (
+            "10.7-",
+            "10.9条第",
+            "第…条第",
+            "（1）、",
+            "1.",
+            "③根据招标文件第四章第一点资格审查的1.3“",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_process_only_text(text))
+
+    def test_table_types_use_headers_and_do_not_scan_late_account_fields(self) -> None:
+        self.assertEqual(
+            _table_requirement_type(
+                {
+                    "tableId": "TABLE-003",
+                    "rows": [
+                        {"text": "采购标的一览表"},
+                        {"text": "序号 | 标的名称 | 数量 | 计量单位 | 最高限价"},
+                    ],
+                }
+            ),
+            "pricing",
+        )
+        self.assertEqual(
+            _table_requirement_type(
+                {
+                    "tableId": "TABLE-021",
+                    "rows": [
+                        {"text": "合同信息表"},
+                        {"text": "甲方 | 乙方"},
+                        {"text": "开户银行 | 银行账号"},
+                    ],
+                }
+            ),
+            "contract",
+        )
+        self.assertEqual(
+            _table_requirement_type(
+                {
+                    "tableId": "TABLE-020",
+                    "rows": [
+                        {"text": "合同条款索引表"},
+                        {"text": "条款号 | 招标文件合同条款 | 投标响应"},
+                        {"text": "10.7 | 质量保证期 | 详见合同正文"},
+                    ],
+                }
+            ),
+            "document",
+        )
+
+    def test_account_and_contract_index_tables_keep_actions_not_field_names(self) -> None:
+        result = extract_tender_requirements(
+            "",
+            [
+                {
+                    "id": "SEG-ACCOUNT-HEADER",
+                    "sourceLocator": "TABLE-002第1行",
+                    "tableId": "TABLE-002",
+                    "text": "投标保证金账户 | 开户名称 | 开户银行 | 银行账号",
+                },
+                {
+                    "id": "SEG-ACCOUNT-FIELD",
+                    "sourceLocator": "TABLE-002第2行",
+                    "tableId": "TABLE-002",
+                    "text": "开户名称 | 某单位 | 开户银行 | 某银行 | 银行账号 | 123456",
+                },
+                {
+                    "id": "SEG-ACCOUNT-ACTION",
+                    "sourceLocator": "TABLE-002第3行",
+                    "tableId": "TABLE-002",
+                    "text": "投标人应按招标文件规定缴纳投标保证金 | 金额以招标文件为准",
+                },
+                {
+                    "id": "SEG-CONTRACT-INDEX",
+                    "sourceLocator": "TABLE-020第2行",
+                    "tableId": "TABLE-020",
+                    "text": "10.7 | 质量保证期 | 详见合同正文",
+                },
+            ],
+            {"enabled": False},
+            [],
+            [
+                {
+                    "id": "TABLE-002",
+                    "tableId": "TABLE-002",
+                    "rows": [
+                        {"text": "投标保证金账户 | 开户名称 | 开户银行 | 银行账号"},
+                        {"text": "开户名称 | 某单位 | 开户银行 | 某银行 | 银行账号 | 123456"},
+                        {"text": "投标人应按招标文件规定缴纳投标保证金 | 金额以招标文件为准"},
+                    ],
+                },
+                {
+                    "id": "TABLE-020",
+                    "tableId": "TABLE-020",
+                    "rows": [
+                        {"text": "合同条款索引表"},
+                        {"text": "条款号 | 招标文件合同条款 | 投标响应"},
+                        {"text": "10.7 | 质量保证期 | 详见合同正文"},
+                    ],
+                },
+            ],
+        )
+
+        texts = [item["text"] for item in result["requirements"]]
+        self.assertIn("投标人应按招标文件规定缴纳投标保证金 | 金额以招标文件为准", texts)
+        self.assertNotIn("开户名称 | 某单位 | 开户银行 | 某银行 | 银行账号 | 123456", texts)
+        self.assertNotIn("10.7 | 质量保证期 | 详见合同正文", texts)
 
     def test_compliance_and_service_plan_match_company_technical_records(self) -> None:
         company_knowledge = {

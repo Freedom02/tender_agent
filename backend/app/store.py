@@ -76,6 +76,16 @@ class Store:
         self.reminders = read_json(self.runtime_root / "reminders.json", [])
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
+        # 兼容旧版本工作区：补齐 fineReview 缺失字段，避免前端渲染崩溃。
+        for workspace in self.workspaces.values():
+            reasoning = workspace.get("reasoning") if isinstance(workspace, dict) else None
+            if not isinstance(reasoning, dict):
+                continue
+            fine_review = reasoning.get("fineReview")
+            if isinstance(fine_review, dict):
+                fine_review.setdefault("hardBlockers", [])
+                fine_review.setdefault("rejectionRisks", [])
+                fine_review.setdefault("unresolvedMandatory", [])
         self._refresh_company_from_m3()
         catalog_repaired = False
         for item in self.catalog:

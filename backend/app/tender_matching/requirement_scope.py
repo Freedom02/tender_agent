@@ -145,6 +145,8 @@ def _match_target_sections(target: str, sections: list[dict[str, Any]]) -> list[
     compact_target = _compact(target)
     if not compact_target:
         return []
+    normalized_target = re.sub(r"^(?:招标文件|采购文件|本文件|本项目)", "", target).strip(" ：:")
+    compact_normalized_target = _compact(normalized_target)
     target_number_refs = re.findall(r"第[一二三四五六七八九十百千万零〇两0-9]+(?:篇|章|节|部|部分|册|卷)", target)
     target_appendix_refs = re.findall(
         r"附件(?:[一二三四五六七八九十百千万零〇两0-9]+|[（(][一二三四五六七八九十百千万零〇两0-9]+[）)])?",
@@ -159,6 +161,11 @@ def _match_target_sections(target: str, sections: list[dict[str, Any]]) -> list[
         path = " ".join(str(item) for item in section.get("sectionPath", []) if str(item).strip())
         haystack = _compact(f"{heading} {path}")
         if compact_target and (compact_target in haystack or haystack in compact_target):
+            matches.append(section)
+            continue
+        if compact_normalized_target and (
+            compact_normalized_target in haystack or haystack in compact_normalized_target
+        ):
             matches.append(section)
             continue
         if target_number_refs and any(_compact(ref) in haystack for ref in target_number_refs):
@@ -178,10 +185,14 @@ def _match_target_tables(target: str, tables: list[dict[str, Any]]) -> list[dict
     compact_target = _compact(target)
     if not compact_target:
         return []
+    normalized_target = re.sub(r"^(?:招标文件|采购文件|本文件|本项目)", "", target).strip(" ：:")
+    compact_normalized_target = _compact(normalized_target)
     matches: list[dict[str, Any]] = []
     for table in tables:
         table_compact = _compact(_table_text(table))
-        if compact_target in table_compact:
+        if compact_target in table_compact or (
+            compact_normalized_target and compact_normalized_target in table_compact
+        ):
             matches.append(table)
             continue
         for terms in TABLE_TARGET_TERMS.values():
@@ -189,6 +200,19 @@ def _match_target_tables(target: str, tables: list[dict[str, Any]]) -> list[dict
                 matches.append(table)
                 break
     return matches
+
+
+def _section_is_requirement_candidate(section: dict[str, Any]) -> bool:
+    section_type = str(section.get("sectionType") or "")
+    if section_type in PRIMARY_SECTION_TYPES or section_type == "appendix":
+        return True
+    heading = _compact(section.get("heading"))
+    if any(_compact(term) in heading for terms in TABLE_TARGET_TERMS.values() for term in terms):
+        return True
+    return any(
+        _is_requirement_like(_safe_text(segment_text, 1200))
+        for segment_text in (section.get("texts") or [])
+    )
 
 
 def _extract_reference_target(raw_target: str) -> str:
@@ -230,8 +254,7 @@ def select_requirement_scope(
     unresolved: list[dict[str, Any]] = []
 
     for section in section_list:
-        section_type = str(section.get("sectionType") or "")
-        if section_type not in PRIMARY_SECTION_TYPES:
+        if not _section_is_requirement_candidate(section):
             continue
         section_id = _section_id(section)
         if section_id:
@@ -243,11 +266,14 @@ def select_requirement_scope(
 
     for table in table_list:
         table_type = _table_requirement_type(table)
+        table_id = _table_id(table)
+        if not table_id or not _table_text(table).strip():
+            continue
+        selected_table_ids.add(table_id)
         if table_type:
-            table_id = _table_id(table)
-            if table_id:
-                selected_table_ids.add(table_id)
-                table_reasons.setdefault(table_id, f"{TABLE_TARGET_TERMS[table_type][0]}表格")
+            table_reasons.setdefault(table_id, f"{TABLE_TARGET_TERMS[table_type][0]}表格")
+        else:
+            table_reasons.setdefault(table_id, "非空表格候选")
 
     selected_table_ids.update(_table_ids_from_segments(segment_list, selected_segment_ids))
 
@@ -281,6 +307,25 @@ def select_requirement_scope(
                 references.append(reference)
             else:
                 unresolved.append(reference)
+                source_id = _segment_id(segment)
+                if source_id:
+                    selected_segment_ids.add(source_id)
+                    segment_reasons.setdefault(source_id, "未解析引用来源")
+                if segment.get("tableId"):
+                    table_id = str(segment.get("tableId"))
+                    if any(_table_id(table) == table_id for table in table_list):
+                        selected_table_ids.add(table_id)
+                        table_reasons.setdefault(table_id, "未解析引用关联表格")
+                if index > 0:
+                    previous_id = _segment_id(segment_list[index - 1])
+                    if previous_id:
+                        selected_segment_ids.add(previous_id)
+                        segment_reasons.setdefault(previous_id, "未解析引用邻近内容")
+                if index + 1 < len(segment_list):
+                    next_id = _segment_id(segment_list[index + 1])
+                    if next_id:
+                        selected_segment_ids.add(next_id)
+                        segment_reasons.setdefault(next_id, "未解析引用邻近内容")
                 continue
 
             for section in matched_sections:
@@ -294,8 +339,12 @@ def select_requirement_scope(
             for table in matched_tables:
                 table_id = _table_id(table)
                 selected_table_ids.add(table_id)
-                table_reasons.setdefault(table_id, f"由{source_locator}引用")
-                table_reference_from.setdefault(table_id, source_locator)
+                table_reasons[table_id] = f"由{source_locator}引用"
+                if (
+                    table_id not in table_reference_from
+                    or not str(table_reference_from[table_id]).startswith("第")
+                ) and not source_locator.startswith("TABLE"):
+                    table_reference_from[table_id] = source_locator
 
     for segment in segment_list:
         if str(segment.get("tableId") or "") in selected_table_ids and _segment_id(segment):
@@ -350,7 +399,11 @@ def select_requirement_scope(
                 "reason": str(section.get("scopeReason") or "目标章节"),
                 "sourceLocator": _safe_text(section.get("startLocator"), 160),
                 "referenceFrom": section_reference_from.get(_section_id(section), ""),
-                "priority": "primary" if str(section.get("scopeReason")) == "目标章节" else "referenced",
+                "priority": (
+                    "referenced"
+                    if _section_id(section) in section_reference_from
+                    else "primary"
+                ),
             }
         )
     for table in selected_tables:
@@ -365,7 +418,7 @@ def select_requirement_scope(
                 "reason": str(table.get("scopeReason") or "目标表格"),
                 "sourceLocator": _safe_text((table.get("rows") or [{}])[0].get("sourceLocator") if table.get("rows") else "", 160),
                 "referenceFrom": table_reference_from.get(_table_id(table), ""),
-                "priority": "primary" if "引用" not in str(table.get("scopeReason")) else "referenced",
+                "priority": "referenced" if _table_id(table) in table_reference_from else "primary",
             }
         )
     for segment in selected_segments:

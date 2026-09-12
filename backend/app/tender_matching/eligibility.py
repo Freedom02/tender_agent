@@ -86,10 +86,22 @@ def _is_full_tender_document(text: str) -> bool:
     tender documents as normal boilerplate clauses, so we must not classify the
     whole document as a result notice based on body matches alone.
     """
-    head = re.sub(r"\s+", "", str(text)[:600])
-    return any(term in head for term in (
-        "招标文件", "公开招标文件", "竞争性磋商文件", "竞争性谈判文件", "询价通知书",
-    ))
+    head_lines = [
+        re.sub(r"\s+", "", line)
+        for line in str(text).splitlines()[:8]
+        if re.sub(r"\s+", "", line)
+    ]
+    return any(
+        re.search(rf"^(?:.*)?{re.escape(term)}(?:（.*）|\(.*\))?$", line, re.IGNORECASE)
+        for term in (
+            "公开招标文件",
+            "招标文件",
+            "竞争性磋商文件",
+            "竞争性谈判文件",
+            "询价通知书",
+        )
+        for line in head_lines[:4]
+    )
 
 
 def _ai_settings(ai: dict[str, Any]) -> tuple[str, str, str]:
@@ -145,6 +157,7 @@ def call_openai_compatible(
     *,
     max_tokens: int,
     temperature: float = 0,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call an OpenAI-compatible chat endpoint with safe, actionable failure messages."""
     if ai.get("enabled") is False:
@@ -168,6 +181,8 @@ def call_openai_compatible(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if response_format:
+        payload["response_format"] = response_format
     try:
         timeout_seconds = int(ai.get("timeoutSeconds", 120))
     except (TypeError, ValueError):
@@ -189,6 +204,13 @@ def call_openai_compatible(
                 raw_body = response.read()
         except error.HTTPError as exc:
             last_error = f"模型服务返回 HTTP {exc.code}"
+            # Some OpenAI-compatible gateways reject JSON Schema even though
+            # they support the rest of the chat-completions contract. Retry
+            # once without the optional format so older providers remain usable.
+            if exc.code == 400 and "response_format" in payload:
+                payload.pop("response_format", None)
+                response_format = None
+                continue
         except error.URLError as exc:
             reason = str(getattr(exc, "reason", "")).strip()
             detail = f"：{reason}" if reason else ""
@@ -719,7 +741,12 @@ def _requirement_group(category: str, text: str) -> str:
 
 def _is_eligibility_requirement(line: str, *, in_qualification_section: bool = False) -> bool:
     compact = _compact(line)
-    if not compact or _looks_like_basic_information(line) or _qualification_section_heading(line):
+    if (
+        not compact
+        or _looks_like_basic_information(line)
+        or (_looks_like_project_field_candidate(line) and "联合体" not in compact)
+        or _qualification_section_heading(line)
+    ):
         return False
     if any(
         term in compact
@@ -783,7 +810,12 @@ def _is_eligibility_requirement(line: str, *, in_qualification_section: bool = F
 
 def _is_standalone_eligibility_requirement(line: str) -> bool:
     compact = _compact(line)
-    if not compact or _looks_like_basic_information(line) or _qualification_section_heading(line):
+    if (
+        not compact
+        or _looks_like_basic_information(line)
+        or (_looks_like_project_field_candidate(line) and "联合体" not in compact)
+        or _qualification_section_heading(line)
+    ):
         return False
     if "联合体" in compact and any(term in compact for term in ("不接受", "不得", "否")):
         return True
@@ -828,36 +860,20 @@ def _section_allows_requirement_scan(section_type: str, line: str) -> bool:
 def _looks_like_project_field_candidate(line: str) -> bool:
     if any(_label_value(line, labels) for labels in PROJECT_FIELD_LABELS.values()):
         return True
-    return any(
-        validator(line)
-        for _, _, validator in (
-            (
-                "bidCopyRequirement",
-                ("投标文件份数", "响应文件份数", "正本", "副本"),
-                lambda value: bool(re.search(r"(?:正本|副本|投标文件|响应文件).{0,24}\d+\s*份", value)),
-            ),
-            (
-                "packagingRequirement",
-                ("封装", "密封", "封套", "装订"),
-                lambda value: any(term in value for term in ("投标文件", "响应文件", "正本", "副本")),
-            ),
-            (
-                "signatureSealRequirement",
-                ("签字盖章", "签章", "加盖公章", "法定代表人签字"),
-                lambda value: any(
-                    term in value for term in ("投标文件", "响应文件", "法定代表人", "授权代表", "投标人")
-                ),
-            ),
-            (
-                "warrantyRequirement",
-                ("质保期", "质量保证期", "保修期"),
-                lambda value: bool(
-                    re.search(
-                        r"(?:质保期|质量保证期|保修期).{0,30}(?:不少于|不低于|至少|为|：|:)?\s*\d+\s*(?:年|个月|月|日|天)",
-                        value,
-                    )
-                ),
-            ),
+    if re.search(r"(?:正本|副本|投标文件|响应文件).{0,24}\d+\s*份", line):
+        return True
+    if any(term in line for term in ("封装", "密封", "封套", "装订")) and any(
+        term in line for term in ("投标文件", "响应文件", "正本", "副本")
+    ):
+        return True
+    if any(term in line for term in ("签字盖章", "签章", "加盖公章", "法定代表人签字")) and any(
+        term in line for term in ("投标文件", "响应文件", "法定代表人", "授权代表")
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?:质保期|质量保证期|保修期).{0,30}(?:不少于|不低于|至少|为|：|:)?\s*\d+\s*(?:年|个月|月|日|天)",
+            line,
         )
     )
 

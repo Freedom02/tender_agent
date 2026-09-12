@@ -50,10 +50,11 @@ RESPONSE_TYPES = {
     "other": "manual_confirmation",
 }
 
-# 分类 -> 前端四大模块映射（人员、其他/流程类暂不展示，返回空串由前端过滤）
+# 分类 -> 前端三大模块映射。未知要求也保留在商务和服务模块，避免被静默隐藏。
 CATEGORY_MODULES = {
     "qualification": "资格审查要求",
     "compliance": "资格审查要求",
+    "personnel": "资格审查要求",
     "credit": "资格审查要求",
     "financial": "资格审查要求",
     "region": "资格审查要求",
@@ -65,6 +66,7 @@ CATEGORY_MODULES = {
     "performance": "商务和服务要求",
     "document": "商务和服务要求",
     "technical": "技术要求",
+    "other": "商务和服务要求",
 }
 
 COMPANY_EVIDENCE_NEEDS = {
@@ -155,6 +157,11 @@ def normalize_requirement(
         "clauseIndex": raw.get("clauseIndex"),
         "clauseCount": raw.get("clauseCount"),
         "sourceSegmentId": safe_text(raw.get("sourceSegmentId"), 120),
+        "sourceSegmentIds": [
+            safe_text(value, 120)
+            for value in (raw.get("sourceSegmentIds") or [])
+            if safe_text(value, 120)
+        ],
         "quantity": raw.get("quantity"),
         "timeLimit": safe_text(raw.get("timeLimit"), 160),
         "confidence": raw.get("confidence", 0),

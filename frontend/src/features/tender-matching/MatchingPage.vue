@@ -236,7 +236,7 @@ function onFileChange(event: Event) {
                 <el-tag
                   size="small"
                   :type="item.reasoning.fineReview
-                    ? (item.reasoning.fineReview.hardBlockers.length ? 'danger' : 'success')
+                    ? ((item.reasoning.fineReview.hardBlockers || []).length ? 'danger' : 'success')
                     : ((item.reasoning.eligibility?.shouldGetTenderDocument ?? item.reasoning.score >= 70) ? 'success' : 'warning')"
                   effect="plain"
                 >
@@ -420,7 +420,7 @@ function onFileChange(event: Event) {
             </div>
             <div class="catalog-actions">
               <el-tag
-                :type="workspace.reasoning.fineReview.hardBlockers.length ? 'danger' : 'warning'"
+                :type="(workspace.reasoning.fineReview.hardBlockers || []).length ? 'danger' : 'warning'"
                 effect="light"
               >
                 {{ workspace.reasoning.fineReview.recommendation }}
@@ -473,8 +473,8 @@ function onFileChange(event: Event) {
       </div>
 
       <el-alert
-        v-if="workspace.reasoning.fineReview.hardBlockers.length"
-        :title="`发现 ${workspace.reasoning.fineReview.hardBlockers.length} 条已确认不满足的否决性条款，已拦截参与建议。`"
+        v-if="(workspace.reasoning.fineReview.hardBlockers || []).length"
+        :title="`发现 ${(workspace.reasoning.fineReview.hardBlockers || []).length} 条已确认不满足的否决性条款，已拦截参与建议。`"
         type="error"
         show-icon
         :closable="false"
@@ -482,8 +482,8 @@ function onFileChange(event: Event) {
       />
 
       <el-alert
-        v-if="!workspace.reasoning.fineReview.hardBlockers.length && workspace.reasoning.fineReview.rejectionRisks?.length"
-        :title="`存在 ${workspace.reasoning.fineReview.rejectionRisks.length} 条否决性要求尚未闭环，必须人工核验后才能进入正式编制。`"
+        v-if="!(workspace.reasoning.fineReview.hardBlockers || []).length && (workspace.reasoning.fineReview.rejectionRisks || []).length"
+        :title="`存在 ${(workspace.reasoning.fineReview.rejectionRisks || []).length} 条否决性要求尚未闭环，必须人工核验后才能进入正式编制。`"
         type="warning"
         show-icon
         :closable="false"
@@ -491,8 +491,8 @@ function onFileChange(event: Event) {
       />
 
       <el-alert
-        v-if="workspace.reasoning.fineReview.unresolvedMandatory.length"
-        :title="`存在 ${workspace.reasoning.fineReview.unresolvedMandatory.length} 条待补材料或待澄清的强制要求，请先人工复核。`"
+        v-if="(workspace.reasoning.fineReview.unresolvedMandatory || []).length"
+        :title="`存在 ${(workspace.reasoning.fineReview.unresolvedMandatory || []).length} 条待补材料或待澄清的强制要求，请先人工复核。`"
         type="warning"
         show-icon
         :closable="false"
