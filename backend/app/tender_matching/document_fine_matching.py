@@ -10,6 +10,15 @@ from .eligibility import _is_gateway_timeout, call_openai_compatible
 from .requirement_scope import is_form_title, is_placeholder_row, select_requirement_scope
 
 
+# 单元格段落级拆解：招标文件的技术/资格要求常在单元格内以
+# 「一、… / （一）… / 1. 2. 3. / （1）…」多段落罗列，段落边界即条目边界。
+_CELL_SECTION_RE = re.compile(rf"^([一二三四五六七八九十百]+)[、.．]\s*(.*)$")
+_CELL_SUBSECTION_RE = re.compile(rf"^（([一二三四五六七八九十百]+)）\s*(.*)$")
+_CELL_ITEM_RE = re.compile(r"^(\d+)\s*[、.．)]\s*(.*)$")
+_CELL_ITEM_NOSEP_RE = re.compile(r"^(\d+)(?=[\u4e00-\u9fff])(.*)$")
+_CELL_SUBITEM_RE = re.compile(r"^（(\d+)）\s*(.*)$")
+
+
 ALLOWED_CATEGORIES = {
     "qualification",
     "performance",
@@ -128,10 +137,12 @@ def _source_locator(item: dict[str, Any], index: int) -> str:
 
 def _category_for(text: str) -> str:
     value = _compact(text)
-    if any(term in value for term in ("无效投标", "投标无效", "否决", "废标", "拒绝", "不予受理", "不得参加")):
+    if any(term in value for term in ("无效投标", "投标无效", "否决", "废标", "拒绝", "不予受理", "不得参加", "视为无效", "行为无效", "按无效")):
         return "rejection"
     if any(term in value for term in ("虚假材料", "拒收")):
         return "rejection"
+    if any(term in value for term in ("应表述为", "请填写", "填写“", "在相应的")):
+        return "document"
     if any(
         term in value
         for term in (
@@ -451,8 +462,8 @@ COMPOUND_MARKER_PATTERN = re.compile(
 )
 
 
-def _split_requirement_text(text: str) -> list[str]:
-    clean = _safe_text(text, 1200)
+def _split_requirement_text(text: str, max_length: int = 1200) -> list[str]:
+    clean = _safe_text(text, max_length)
     if not clean:
         return []
 
@@ -578,6 +589,7 @@ def _is_table_requirement_row(source: dict[str, Any], text: str) -> bool:
                     "交付",
                     "验收",
                     "期限",
+                    "日内",
                     "日历日",
                     "工作日",
                     "万元",
@@ -596,6 +608,151 @@ def _is_table_requirement_row(source: dict[str, Any], text: str) -> bool:
     ):
         return True
     return False
+
+
+def _table_cell_texts(source: dict[str, Any]) -> list[str]:
+    cells = source.get("cells")
+    if not isinstance(cells, list):
+        return []
+    # 技术指标单元格可能包含数千字和几十条编号要求，不能复用普通段落的短截断。
+    return [_safe_text(cell.get("text"), 20000) for cell in cells if isinstance(cell, dict)]
+
+
+def _requirement_cell_index(table_type: str) -> int | None:
+    """返回要求内容所在列的索引（cells 列表下标），无明确列布局时返回 None。"""
+    if table_type == "technical":
+        return 2
+    if table_type == "qualification":
+        return 2
+    if table_type in {"commercial", "acceptance", "rejection"}:
+        return 3
+    return None
+
+
+def _classify_cell_paragraph(text: str) -> tuple[str, str, str, str]:
+    """对单元格段落做层级分类，返回 (kind, num, title, tail)。
+
+    kind ∈ {大项, 子项, 要求, 子条目, 说明}；大项标题后「：」的内容存入 tail。
+    """
+    s = text.strip()
+    if not s:
+        return ("说明", "", "", "")
+    match = _CELL_SECTION_RE.match(s)
+    if match:
+        num, rest = match.group(1), match.group(2).strip()
+        title, tail = rest, ""
+        for sep in ("：", ":"):
+            if sep in rest:
+                title, tail = rest.split(sep, 1)
+                break
+        return ("大项", num, title.strip().strip("：:"), tail.strip().strip("：:"))
+    match = _CELL_SUBSECTION_RE.match(s)
+    if match:
+        return ("子项", match.group(1), match.group(2).strip(), "")
+    match = _CELL_ITEM_RE.match(s)
+    if match:
+        return ("要求", match.group(1), match.group(2).strip(), "")
+    match = _CELL_ITEM_NOSEP_RE.match(s)
+    if match:
+        return ("要求", match.group(1), match.group(2).strip(), "")
+    match = _CELL_SUBITEM_RE.match(s)
+    if match:
+        return ("子条目", match.group(1), match.group(2).strip(), "")
+    return ("说明", "", s, "")
+
+
+def _table_cell_paragraph_clauses(source: dict[str, Any]) -> list[str]:
+    """按单元格段落逐条拆解要求，保留原文编号与顺序。
+
+    招标文件的技术/资格要求常在单元格内以「一、… / 1. 2. 3.」多段落罗列，
+    段落边界即条目边界；逐段拆解可避免把整段长文本压成一条导致大量遗漏。
+    仅在要求单元格存在多个带编号段落时才启用，否则返回空列表由旧逻辑兜底。
+    """
+    cells = source.get("cells")
+    if not isinstance(cells, list) or not cells:
+        return []
+    table_type = str(source.get("tableRequirementType") or "")
+    req_index = _requirement_cell_index(table_type)
+    if req_index is None or req_index >= len(cells):
+        return []
+    req_cell = cells[req_index]
+    if not isinstance(req_cell, dict):
+        return []
+    paragraphs = req_cell.get("paragraphs")
+    if not isinstance(paragraphs, list) or len(paragraphs) < 3:
+        return []
+    numbered = 0
+    for paragraph in paragraphs:
+        if not isinstance(paragraph, dict):
+            continue
+        kind, _, _, _ = _classify_cell_paragraph(_safe_text(paragraph.get("text"), 4000))
+        if kind in {"要求", "子条目"}:
+            numbered += 1
+    if numbered < 3:
+        return []
+
+    clauses: list[str] = []
+    for paragraph in paragraphs:
+        if not isinstance(paragraph, dict):
+            continue
+        ptext = _safe_text(paragraph.get("text"), 4000)
+        if not ptext:
+            continue
+        kind, _num, _title, tail = _classify_cell_paragraph(ptext)
+        if kind == "大项":
+            # 标题尾随的“投标人须提供…截图”等属于实质要求，需保留。
+            if tail and _is_requirement(tail):
+                clauses.append(tail)
+            continue
+        if kind == "子项":
+            continue
+        if kind in {"要求", "子条目"}:
+            clauses.append(ptext)
+            continue
+        # 说明段：仅当含义务/要求信号或长度足够承载具体内容时保留，避免混入纯引导语。
+        if _is_requirement(ptext) or len(_compact(ptext)) >= 40:
+            clauses.append(ptext)
+    return clauses
+
+
+def _table_requirement_clauses(source: dict[str, Any], text: str) -> list[str]:
+    """将表格行按字段语义展开，避免把序号、响应列和要求混成一条。"""
+    paragraph_clauses = _table_cell_paragraph_clauses(source)
+    if paragraph_clauses:
+        return paragraph_clauses
+
+    cells = _table_cell_texts(source)
+    table_type = str(source.get("tableRequirementType") or "")
+    if not cells:
+        return _split_requirement_text(text)
+
+    # Word 表格常见列布局：序号、名称/类型、要求、单位、数量、响应。
+    if table_type == "qualification":
+        title = cells[1] if len(cells) > 1 else ""
+        body = "；".join(item for item in cells[2:] if item and not _is_response_cell(item))
+    elif table_type == "technical":
+        title = cells[1] if len(cells) > 1 else ""
+        body = cells[2] if len(cells) > 2 else (cells[-1] if cells else "")
+    elif table_type in {"commercial", "acceptance", "rejection"}:
+        title = cells[2] if len(cells) > 2 else (cells[1] if len(cells) > 1 else "")
+        body = cells[3] if len(cells) > 3 else (cells[-1] if cells else "")
+    else:
+        title = cells[1] if len(cells) > 1 else ""
+        body = next((item for item in reversed(cells[2:]) if item and not _is_response_cell(item)), "")
+
+    body = body.strip()
+    if not body:
+        body = next((item for item in reversed(cells) if item), "")
+    clauses = _split_requirement_text(body, max_length=20000)
+    prefix = title.strip(" ：:;")
+    if prefix and prefix not in body and len(clauses) > 0:
+        clauses = [f"{prefix}：{clause}" for clause in clauses]
+    return clauses
+
+
+def _is_response_cell(value: str) -> bool:
+    compact = _compact(value)
+    return compact in {"投标响应", "响应", "是否偏离", "偏离情况", "符合", "不符合"}
 
 
 def _table_requirement_type(table: dict[str, Any]) -> str:
@@ -809,7 +966,11 @@ def _requirement_from_segment(
         return []
     if source.get("tableId") and not table_requirement_row:
         return []
-    clauses = _split_requirement_text(text)
+    clauses = (
+        _table_requirement_clauses(source, text)
+        if source.get("tableId") and _table_cell_texts(source)
+        else _split_requirement_text(text)
+    )
     clauses = [
         clause
         for clause in clauses
@@ -1071,9 +1232,20 @@ def _merge_requirement_candidates(
         candidate_source = str(candidate.get("extractionSource") or "")
         if existing_source != candidate_source and {existing_source, candidate_source} == {"llm", "rule"}:
             matched["extractionSource"] = "llm+rule"
+            # 类目以规则路径判定为准（含表格类型上下文，比模型分类更稳定），
+            # 避免模型把“报价/开标/格式”等内容误归入“技术”等其它类目。
+            if candidate_source == "rule":
+                rule_category = candidate.get("category", "")
+                if rule_category and rule_category != matched.get("category"):
+                    matched["category"] = rule_category
         if candidate_source == "llm" and existing_source != "llm":
+            # 类目以规则路径判定为准（含表格类型上下文，比模型分类更稳定），
+            # 避免模型把“报价/开标/格式”等内容误归入“技术”等其它类目。
+            rule_category = matched.get("category", "")
             preserved = dict(candidate)
             preserved["extractionSource"] = "llm+rule"
+            if rule_category and rule_category != preserved.get("category"):
+                preserved["category"] = rule_category
             matched.clear()
             matched.update(preserved)
         all_source_ids = list(dict.fromkeys([
@@ -1102,9 +1274,52 @@ def _model_input_batches(
     max_chars: int = 6500,
 ) -> list[dict[str, Any]]:
     """按游标切分模型输入，保证每个非空片段只进入一个批次。"""
+    def display_line(segment: dict[str, Any], segment_id: str, locator: str, text: str) -> str:
+        cells = _table_cell_texts(segment)
+        if not segment.get("tableId") or not cells:
+            return f"[{segment_id} | {locator}] {text}"
+        table_type = str(segment.get("tableRequirementType") or "")
+        labels_by_type = {
+            "qualification": ["序号", "资格要求概况", "评审点具体描述"],
+            "technical": ["序号", "品目名称", "简要技术指标", "单位", "数量"],
+            "commercial": ["序号", "参数性质", "类型", "要求"],
+            "acceptance": ["序号", "参数性质", "类型", "要求"],
+            "rejection": ["序号", "参数性质", "类型", "要求"],
+        }
+        labels = labels_by_type.get(table_type, [])
+        # 要求单元格含多段落时逐段渲染，保留条目边界，避免整段长文本压成一条导致模型漏提/合并。
+        raw_cells = segment.get("cells")
+        if isinstance(raw_cells, list):
+            req_index = _requirement_cell_index(table_type)
+            if req_index is not None and req_index < len(raw_cells):
+                req_cell = raw_cells[req_index]
+                paragraphs = [
+                    _safe_text(p.get("text"), 4000)
+                    for p in (req_cell.get("paragraphs") or [])
+                    if isinstance(p, dict)
+                ]
+                paragraphs = [item for item in paragraphs if item]
+                if len(paragraphs) >= 3:
+                    lines: list[str] = []
+                    for index, cell in enumerate(raw_cells):
+                        cell_text = _safe_text(cell.get("text"), 20000) if isinstance(cell, dict) else ""
+                        label = labels[index] if index < len(labels) else f"第{index + 1}列"
+                        if index == req_index:
+                            for p_index, p_text in enumerate(paragraphs, start=1):
+                                lines.append(f"{label}[{p_index}]={p_text}")
+                        elif cell_text:
+                            lines.append(f"{label}={cell_text}")
+                    return f"[{segment_id} | {locator}] 表格字段：\n" + "\n".join(lines)
+        fields = "；".join(
+            f"{labels[index] if index < len(labels) else f'第{index + 1}列'}={value}"
+            for index, value in enumerate(cells) if value
+        )
+        return f"[{segment_id} | {locator}] 表格字段：{fields}\n原始行：{text}"
+
     candidates: list[dict[str, str]] = []
     for index, segment in enumerate(segments):
-        text = _safe_text(segment.get("text"), 1800)
+        text_limit = 20000 if segment.get("tableId") else 1800
+        text = _safe_text(segment.get("text"), text_limit)
         if not text:
             continue
         segment_id = str(segment.get("id") or f"SEG-FALLBACK-{index + 1:06d}")
@@ -1112,7 +1327,7 @@ def _model_input_batches(
         candidates.append(
             {
                 "id": segment_id,
-                "line": f"[{segment_id} | {locator}] {text}",
+                "line": display_line(segment, segment_id, locator, text),
             }
         )
     if not candidates:

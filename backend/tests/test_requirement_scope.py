@@ -6,6 +6,7 @@ from backend.app.tender_matching.document_fine_matching import (
     _category_for,
     _is_process_only_text,
     _is_requirement,
+    _model_input_batches,
     _table_requirement_type,
     evaluate_tender_document,
     extract_tender_requirements,
@@ -69,6 +70,7 @@ class RequirementScopeTests(unittest.TestCase):
                 "text": "具体要求详见附件九。",
             },
         ]
+
         self.sections = [
             {
                 "id": "SEC-QUAL",
@@ -108,6 +110,22 @@ class RequirementScopeTests(unittest.TestCase):
                 ],
             }
         ]
+
+    def test_model_input_batches_render_table_cells_as_labeled_fields(self) -> None:
+        batches = _model_input_batches([{
+            "id": "SEG-TECH-ROW", "sourceLocator": "TABLE-T第2行",
+            "tableId": "TABLE-T", "tableRequirementType": "technical",
+            "text": "1 | 平台 | 1. 支持导入数据。 | 套 | 1",
+            "cells": [{"text": "1"}, {"text": "平台"},
+                      {"text": "1. 支持导入数据。"}, {"text": "套"}, {"text": "1"}],
+        }])
+        self.assertEqual(len(batches), 1)
+        rendered = batches[0]["text"]
+        self.assertIn("序号=1", rendered)
+        self.assertIn("品目名称=平台", rendered)
+        self.assertIn("简要技术指标=1. 支持导入数据。", rendered)
+        self.assertIn("原始行：", rendered)
+        self.assertIn("SEG-TECH-ROW", rendered)
 
     def test_selects_requirement_sections_and_excludes_basic_project_information(self) -> None:
         result = select_requirement_scope(self.segments, self.sections, self.tables)
@@ -431,6 +449,54 @@ class RequirementScopeTests(unittest.TestCase):
                 "投标人须加盖公章",
             ],
         )
+
+    def test_rule_extraction_uses_qualification_table_columns_and_nested_clauses(self) -> None:
+        result = extract_tender_requirements_by_rule(
+            "",
+            [{
+                "id": "SEG-QUAL-ROW", "sourceLocator": "TABLE-Q第2行",
+                "tableId": "TABLE-Q", "tableRequirementType": "qualification",
+                "text": "1 | 单位授权书 | ①投标人应提供本授权书；②投标人代表应提交身份证明",
+                "cells": [{"text": "1"}, {"text": "单位授权书"},
+                          {"text": "①投标人应提供本授权书；②投标人代表应提交身份证明"}],
+            }],
+        )
+        self.assertEqual(len(result["requirements"]), 2)
+        self.assertTrue(all(item["category"] == "qualification" for item in result["requirements"]))
+        self.assertTrue(all("单位授权书" in item["text"] for item in result["requirements"]))
+        self.assertTrue(all(item["sourceLocator"] == "TABLE-Q第2行" for item in result["requirements"]))
+
+    def test_rule_extraction_splits_technical_table_indicators_with_product_context(self) -> None:
+        result = extract_tender_requirements_by_rule(
+            "",
+            [{
+                "id": "SEG-TECH-ROW", "sourceLocator": "TABLE-T第2行",
+                "tableId": "TABLE-T", "tableRequirementType": "technical",
+                "text": "1 | 平台（核心产品） | 1. 支持地图摆放器。2. 支持导入数据。3. 支持拖拽模型。 | 套 | 1",
+                "cells": [{"text": "1"}, {"text": "平台（核心产品）"},
+                          {"text": "1. 支持地图摆放器。2. 支持导入数据。3. 支持拖拽模型。"},
+                          {"text": "套"}, {"text": "1"}],
+            }],
+        )
+        self.assertEqual(len(result["requirements"]), 3)
+        self.assertTrue(all("平台" in item["text"] for item in result["requirements"]))
+        self.assertEqual([item["clauseIndex"] for item in result["requirements"]], [1, 2, 3])
+
+    def test_rule_extraction_uses_commercial_type_and_does_not_emit_star_or_quantity(self) -> None:
+        result = extract_tender_requirements_by_rule(
+            "",
+            [{
+                "id": "SEG-COM-ROW", "sourceLocator": "TABLE-C第2行",
+                "tableId": "TABLE-C", "tableRequirementType": "commercial",
+                "text": "1 | ★ | 交货时间 | 自合同签订之日起20日内完成",
+                "cells": [{"text": "1"}, {"text": "★"}, {"text": "交货时间"},
+                          {"text": "自合同签订之日起20日内完成"}],
+            }],
+        )
+        self.assertEqual(len(result["requirements"]), 1)
+        self.assertIn("交货时间", result["requirements"][0]["text"])
+        self.assertIn("20日", result["requirements"][0]["text"])
+        self.assertNotEqual(result["requirements"][0]["text"], "★")
 
     def test_cross_reference_decimal_is_not_treated_as_clause_marker(self) -> None:
         result = extract_tender_requirements_by_rule(
