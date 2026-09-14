@@ -9,7 +9,7 @@ from backend.app.tender_matching.contracts import (
     normalize_requirement,
     summarize_comparisons,
 )
-from backend.app.tender_matching.document_fine_matching import (
+from backend.app.tender_matching.document_matching import (
     _status_from_evidence as fine_status_from_evidence,
     summarize_fine_review,
     update_fine_review_status,

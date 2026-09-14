@@ -8,9 +8,11 @@ from backend.app.tender_matching.document_fine_matching import (
     _is_requirement,
     _model_input_batches,
     _table_requirement_type,
-    evaluate_tender_document,
     extract_tender_requirements,
     extract_tender_requirements_by_rule,
+)
+from backend.app.tender_matching.document_matching import (
+    evaluate_tender_document,
 )
 from backend.app.tender_matching.requirement_scope import (
     is_form_title,

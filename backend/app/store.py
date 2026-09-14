@@ -16,7 +16,7 @@ from .tender_matching.eligibility import (
     evaluate_announcement_eligibility,
     test_ai_connection,
 )
-from .tender_matching.document_fine_matching import evaluate_tender_document, update_fine_review_status
+from .tender_matching.document_matching import evaluate_tender_document, update_fine_review_status
 from .tender_matching.document_parser import parse_doc, parse_docx, parse_pdf, parse_plain_text, parse_xlsx
 from .tender_matching.document_structure import enrich_document_structure
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
