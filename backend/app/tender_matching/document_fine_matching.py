@@ -1438,15 +1438,36 @@ def extract_tender_requirements(
             if str(section.get("sectionId")) in set(llm_section_ids)
         ]
 
-    # 章节语义筛选与规则范围筛选取并集，避免模型选中章节后遗漏该章节
-    # 关联的参数表、联合体表、合同表等内容。
+    # 章节语义筛选优先：LLM 识别到目标章节时以其为主，仅补充规则识别出的“要求类”表格行，
+    # 不再与规则范围取并集，避免把评标办法、合同条款、格式模板等流程性内容灌回模型。
     section_segments = _segments_for_sections(segments, sections, llm_section_ids) if llm_section_ids else []
-    eligible_scope_segments = _eligible_scope_segments(scope["selectedSegments"], segments)
-    scoped_ids = {
-        str(segment.get("id"))
-        for segment in [*section_segments, *eligible_scope_segments]
-        if str(segment.get("id") or "") and _safe_text(segment.get("text"), 800)
-    }
+    if llm_section_ids:
+        requirement_table_types = {
+            "technical", "qualification", "commercial", "acceptance", "rejection",
+        }
+        requirement_table_ids = {
+            str(table.get("tableId") or table.get("id"))
+            for table in tables or []
+            if isinstance(table, dict)
+            and _table_requirement_type(table) in requirement_table_types
+        }
+        table_segments = [
+            segment
+            for segment in scope["selectedSegments"]
+            if segment.get("tableId") and str(segment.get("tableId")) in requirement_table_ids
+        ]
+        scoped_ids = {
+            str(segment.get("id"))
+            for segment in [*section_segments, *table_segments]
+            if str(segment.get("id") or "") and _safe_text(segment.get("text"), 800)
+        }
+    else:
+        eligible_scope_segments = _eligible_scope_segments(scope["selectedSegments"], segments)
+        scoped_ids = {
+            str(segment.get("id"))
+            for segment in eligible_scope_segments
+            if str(segment.get("id") or "") and _safe_text(segment.get("text"), 800)
+        }
     scoped_segments = [
         segment for segment in segments
         if str(segment.get("id") or "") in scoped_ids
