@@ -283,13 +283,16 @@ class Store:
         if not force and (now - self._m3_last_refresh) < M3_REFRESH_TTL_SECONDS:
             return
 
-        from .document_recognition.storage import FACT_LIST_KEYS, build_company_knowledge, build_profile
+        from .document_recognition.storage import FACT_LIST_KEYS, build_company_knowledge, build_eligibility_knowledge, build_profile
         from .m3.sync import build_m3_client, read_facts_from_m3
 
         try:
             facts = read_facts_from_m3(build_m3_client(self))
             self.company = build_profile(facts)
-            self.company_knowledge = build_company_knowledge(facts)
+            self.company_knowledge = {
+                **build_company_knowledge(facts),
+                **build_eligibility_knowledge(facts),
+            }
             counts: dict[str, int] = {"organization": 1 if facts.get("organization") else 0}
             for key in FACT_LIST_KEYS:
                 counts[key] = len(facts.get(key, []))

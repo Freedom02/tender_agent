@@ -1813,54 +1813,47 @@ def _matching_records(requirement: str, records: list[dict[str, Any]]) -> list[d
 
 
 def _evidence_for_records(records: list[dict[str, Any]], knowledge: dict[str, Any]) -> list[dict[str, Any]]:
-    evidence_map = {str(item.get("id")): item for item in _list_of_dicts(knowledge.get("evidences"))}
-    material_map = {str(item.get("id")): item for item in _list_of_dicts(knowledge.get("materials"))}
-    source_map = {str(item.get("id")): item for item in _list_of_dicts(knowledge.get("sourceFiles"))}
-    evidence_material_map: dict[str, str] = {}
-    for material_id, material in material_map.items():
-        for evidence_id in material.get("evidenceIds") or []:
-            evidence_material_map.setdefault(str(evidence_id), material_id)
-    result: list[dict[str, Any]] = []
+    """从候选对象自身证据字段（evidencePath）组装证据条目。
 
+    V0.4 证据文件夹化后，不再有 evidences/materials/sourceFiles 三层映射表；
+    每个 fact 直接挂 evidencePath（证据文件夹相对路径）+ evidenceUpdatedAt。
+    有证据路径 → sourceType="evidence"（供 normalize_evidence 判核验/过期），
+    无证据路径 → sourceType="knowledge_object"（仅对象关联）。
+    """
+    result: list[dict[str, Any]] = []
     for record in records:
-        evidence_ids = list(record.get("evidenceIds") or [])
-        for material_id in record.get("materialIds") or []:
-            material = material_map.get(str(material_id), {})
-            evidence_ids.extend(material.get("evidenceIds") or [])
-        resolved = [evidence_map.get(str(evidence_id)) for evidence_id in evidence_ids]
-        resolved = [item for item in resolved if item]
-        if not resolved:
+        if not isinstance(record, dict):
+            continue
+        record_id = str(record.get("id", ""))
+        name = str(record.get("name") or record_id or "")
+        status = str(record.get("status") or "资料已建模")
+        evidence_path = str(record.get("evidencePath") or "")
+        if evidence_path:
             result.append(
                 {
-                    "id": str(record.get("id", "")),
-                    "name": str(record.get("name", "")),
-                    "status": str(record.get("status", "资料已建模")),
+                    "id": record_id,
+                    "name": name,
+                    "status": status,
                     "level": str(record.get("evidenceLevel", "")),
-                    "sourceType": "knowledge_object",
-                    "materialId": str((record.get("materialIds") or [""])[0]),
+                    "sourceType": "evidence",
+                    "materialId": "",
                     "sourceFiles": [],
+                    "sourceLocator": evidence_path,
+                    "excerpt": "",
+                    "validFrom": str(record.get("validFrom", "")),
+                    "validUntil": str(record.get("validUntil", "")),
                 }
             )
-            continue
-        for evidence in resolved:
-            source_files = [
-                str(source_map.get(str(source_id), {}).get("name", source_id))
-                for source_id in evidence.get("sourceIds", [])
-            ]
+        else:
             result.append(
                 {
-                    "id": str(evidence.get("id", "")),
-                    "name": str(evidence.get("name", "")),
-                    "status": str(evidence.get("status", "")),
-                    "level": str(evidence.get("level", "")),
-                    "sourceType": "evidence",
-                    "materialId": evidence_material_map.get(str(evidence.get("id", "")), ""),
-                    "sourceFileIds": [str(source_id) for source_id in evidence.get("sourceIds", [])],
-                    "sourceFiles": source_files,
-                    "sourceLocator": str(evidence.get("locator", "")),
-                    "excerpt": str(evidence.get("excerpt", "")),
-                    "validFrom": str(evidence.get("validFrom", "")),
-                    "validUntil": str(evidence.get("validUntil", "")),
+                    "id": record_id,
+                    "name": name,
+                    "status": status,
+                    "level": str(record.get("evidenceLevel", "")),
+                    "sourceType": "knowledge_object",
+                    "materialId": "",
+                    "sourceFiles": [],
                 }
             )
     unique: dict[str, dict[str, Any]] = {}
@@ -1900,14 +1893,23 @@ def _status_from_evidence(
 def _candidate_records(category: str, text: str, knowledge: dict[str, Any]) -> list[dict[str, Any]]:
     qualifications = _list_of_dicts(knowledge.get("qualifications"))
     performances = _list_of_dicts(knowledge.get("projectReferences"))
+    personnel = _list_of_dicts(knowledge.get("personnel"))
+    financials = _list_of_dicts(knowledge.get("financialRecords"))
+    credentials = _list_of_dicts(knowledge.get("credentials"))
     products = _list_of_dicts(knowledge.get("products"))
     capabilities = _list_of_dicts(knowledge.get("capabilities"))
     scenarios = _list_of_dicts(knowledge.get("industryScenarios"))
     directions = _list_of_dicts(knowledge.get("businessDirections"))
     if category == "qualification":
-        return _matching_records(text, qualifications)
+        return _matching_records(text, [*qualifications, *credentials])
     if category == "performance":
         return _matching_records(text, [*performances, *scenarios, *products])
+    if category == "personnel":
+        return _matching_records(text, personnel)
+    if category == "financial":
+        return _matching_records(text, financials)
+    if category == "credit":
+        return _matching_records(text, [*credentials, *qualifications])
     if category == "technical":
         return _matching_records(text, [*products, *capabilities, *scenarios, *directions])
     return []

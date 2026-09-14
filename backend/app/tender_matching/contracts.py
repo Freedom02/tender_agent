@@ -82,7 +82,7 @@ COMPANY_EVIDENCE_NEEDS = {
     "supporting_material",
 }
 
-POSITIVE_VERIFICATION_TERMS = ("已核验", "核验通过", "当前有效", "已上传原件")
+POSITIVE_VERIFICATION_TERMS = ("已核验", "核验通过", "当前有效", "已上传原件", "有效")
 PENDING_TERMS = ("待核验", "待补", "待确认", "待上传", "来源已登记", "资料已建模", "已建模")
 HISTORICAL_TERMS = ("历史", "不能替代")
 INVALID_TERMS = ("过期", "失效", "作废", "已撤销")

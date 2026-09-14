@@ -245,6 +245,128 @@ def build_company_knowledge(facts: dict[str, Any]) -> dict[str, list[dict[str, A
     }
 
 
+def build_eligibility_knowledge(facts: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """把 8 类 M3 facts 投影成「资格匹配 / 标书精细匹配」消费的记录结构。
+
+    与 build_company_knowledge 的语义词表不同，这里产出的是带证据链的候选对象：
+    每行含 id / name / description（供 _record_terms 术语匹配）+ evidencePath /
+    status / validUntil（供 _evidence_for_records 组装证据）。
+
+    key 与匹配层 _candidate_records 的读法一一对应：
+      - qualifications      ← qualification_certificate
+      - projectReferences   ← performance_case
+      - personnel           ← staff_member
+      - financialRecords    ← financial_evidence
+      - credentials         ← credential
+      - products            ← technical_product（带证据，覆盖 build_company_knowledge 的词表版）
+      - capabilities        ← technical_parameter + 组织能力/业绩服务范围（带证据，覆盖词表版）
+    """
+    org = facts.get("organization") or {}
+
+    records = {
+        "qualifications": _fact_records(
+            facts, "qualification_certificate", "qualificationId", "qualificationName",
+            ("qualificationType", "certificateNo", "level", "scope", "issuer"),
+        ),
+        "projectReferences": _fact_records(
+            facts, "performance_case", "performanceId", "caseName",
+            ("customerName", "serviceScope", "region", "role", "acceptanceStatus"),
+        ),
+        "personnel": _fact_records(
+            facts, "staff_member", "staffId", "name",
+            ("role", "title", "professionalCertificates", "specialty", "resumeSummary"),
+        ),
+        "financialRecords": _fact_records(
+            facts, "financial_evidence", "financialEvidenceId", "evidenceType",
+            ("issuedBy", "creditLevel", "periodStart", "periodEnd"),
+        ),
+        "credentials": _fact_records(
+            facts, "credential", "credentialId", "credentialName",
+            ("credentialType", "registrationNo", "issuer", "owner", "standardNo"),
+        ),
+        "products": _fact_records(
+            facts, "technical_product", "productId", "productName",
+            ("productType", "category", "brand", "model", "description", "applicableScenario"),
+        ),
+    }
+
+    # capabilities = 技术参数（带证据）+ 组织能力清单 + 业绩服务范围（纯词表）
+    capabilities = _fact_records(
+        facts, "technical_parameter", "parameterId", "description", ()
+    )
+    capability_terms = _dedupe([
+        term
+        for value in (
+            org.get("capabilities"),
+            *(row.get("serviceScope", "") for row in facts.get("performance_case", []) if isinstance(row, dict)),
+        )
+        for term in _split_text(value)
+    ])
+    for term in capability_terms:
+        if any(cap.get("name") == term for cap in capabilities):
+            continue
+        capabilities.append(_term_record("capability", len(capabilities) + 1, term))
+    records["capabilities"] = capabilities
+
+    return records
+
+
+def _fact_records(
+    facts: dict[str, Any],
+    key: str,
+    id_field: str,
+    name_field: str,
+    description_fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """把某一类 fact 行投影成匹配层记录，补齐 id/name/description 与证据字段。"""
+    result: list[dict[str, Any]] = []
+    for row in facts.get(key, []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get(name_field) or "").strip()
+        if not name:
+            continue
+        description = _join_fields(row, description_fields)
+        result.append({
+            "id": str(row.get(id_field) or ""),
+            "name": name,
+            "description": description,
+            "aliases": str(row.get("aliases") or ""),
+            "industry": str(row.get("industry") or ""),
+            "category": str(row.get("category") or ""),
+            "factKey": key,
+            "evidencePath": str(row.get("evidencePath") or ""),
+            "evidenceUpdatedAt": str(row.get("evidenceUpdatedAt") or ""),
+            "status": str(row.get("verificationStatus") or row.get("status") or ""),
+            "validFrom": str(row.get("validFrom") or ""),
+            "validUntil": str(row.get("validUntil") or ""),
+        })
+    return result
+
+
+def _term_record(prefix: str, index: int, term: str) -> dict[str, Any]:
+    """纯词表记录（无事实主键/证据），与 _fact_records 产出保持同构。"""
+    return {
+        "id": f"{prefix}-{index}",
+        "name": term,
+        "description": "",
+        "aliases": "",
+        "industry": "",
+        "category": "",
+        "factKey": "",
+        "evidencePath": "",
+        "evidenceUpdatedAt": "",
+        "status": "",
+        "validFrom": "",
+        "validUntil": "",
+    }
+
+
+def _join_fields(row: dict[str, Any], fields: tuple[str, ...]) -> str:
+    parts = [str(row.get(f) or "").strip() for f in fields]
+    return "；".join(p for p in parts if p)
+
+
 # ============================================================
 # 工具函数
 # ============================================================
