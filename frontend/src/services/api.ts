@@ -6,6 +6,7 @@ import type {
   MaterialFact,
   MaterialProfile,
   MonitoringStatus,
+  MonitoringRunResult,
   OntologyMeta,
   OntologySummary,
   Workspace
@@ -108,14 +109,7 @@ export const api = {
     }),
   monitoringStatus: () => request<MonitoringStatus>("/api/monitoring/status"),
   runMonitoring: (siteId = "") =>
-    request<{
-      status: string;
-      addedCount: number;
-      matchedCount: number;
-      dedupedCount: number;
-      items: CatalogItem[];
-      monitoring: MonitoringStatus;
-    }>("/api/monitoring/run", {
+    request<MonitoringRunResult>("/api/monitoring/run", {
       method: "POST",
       body: JSON.stringify({ siteId })
     }),

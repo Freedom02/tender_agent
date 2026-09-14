@@ -17,10 +17,15 @@ from .tender_matching.eligibility import (
     test_ai_connection,
 )
 from .tender_matching.document_fine_matching import evaluate_tender_document, update_fine_review_status
-from .tender_matching.document_parser import parse_docx, parse_pdf, parse_plain_text, parse_xlsx
+from .tender_matching.document_parser import parse_doc, parse_docx, parse_pdf, parse_plain_text, parse_xlsx
 from .tender_matching.document_structure import enrich_document_structure
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
-from .tender_monitor.adapters import is_procurement_notice, repair_notice_fields, valid_time_value
+from .tender_monitor.adapters import (
+    is_procurement_notice,
+    normalize_notice_text,
+    repair_notice_fields,
+    valid_time_value,
+)
 
 
 def now_iso() -> str:
@@ -246,6 +251,9 @@ class Store:
                 "matchedCapabilities": match["matchedCapabilities"],
                 "matchedKeywords": match["matchedKeywords"],
                 "matchReasons": match["reasons"],
+                "matchEvidence": match["matchEvidence"],
+                "scoreBreakdown": match["scoreBreakdown"],
+                "scoreVersion": match["scoreVersion"],
                 "excludeReason": match["excludeReason"],
                 "nextStage": match["nextStage"],
                 "shouldAnalyze": match["shouldAnalyze"],
@@ -275,12 +283,13 @@ class Store:
         if not force and (now - self._m3_last_refresh) < M3_REFRESH_TTL_SECONDS:
             return
 
-        from .document_recognition.storage import FACT_LIST_KEYS, build_profile
+        from .document_recognition.storage import FACT_LIST_KEYS, build_company_knowledge, build_profile
         from .m3.sync import build_m3_client, read_facts_from_m3
 
         try:
             facts = read_facts_from_m3(build_m3_client(self))
             self.company = build_profile(facts)
+            self.company_knowledge = build_company_knowledge(facts)
             counts: dict[str, int] = {"organization": 1 if facts.get("organization") else 0}
             for key in FACT_LIST_KEYS:
                 counts[key] = len(facts.get(key, []))
@@ -324,7 +333,8 @@ class Store:
     def filtered_catalog(self, query: str = "", region: str = "", type: str = "", current_only: bool = False) -> list[dict[str, Any]]:
         valid_items = [
             item for item in self.catalog
-            if is_procurement_notice(
+            if item.get("dataOrigin") != "local_upload"
+            and is_procurement_notice(
                 str(item.get("title", "")),
                 str(item.get("analysisText", "")),
                 str(item.get("sourceUrl") or item.get("detailUrl") or ""),
@@ -468,7 +478,12 @@ class Store:
         parsed_file = self.extract_document_content(name, content, mime_type)
         text = parsed_file["text"].strip()
         if len(text) < 20:
-            raise ValueError("未能从该文件提取到足够文字，请上传可复制文字的 TXT / Markdown / PDF / DOCX / XLSX 文件")
+            if name.lower().endswith(".doc") or "msword" in mime_type.lower():
+                detail = parsed_file.get("warnings", ["未知解析错误"])[0]
+                raise ValueError(
+                    f"{detail} 请确认文件是未加密的旧版 DOC，或先用 Word 另存为 DOCX。"
+                )
+            raise ValueError("未能从该文件提取到足够文字，请上传可复制文字的 TXT / Markdown / PDF / DOC / DOCX / XLSX 文件")
         project_id = uid("local")
         source_dir = self.runtime_root / "projects" / project_id / "source"
         source_dir.mkdir(parents=True, exist_ok=True)
@@ -524,6 +539,8 @@ class Store:
 
     def extract_document_content(self, name: str, content: bytes, mime_type: str = "") -> dict[str, Any]:
         lower = name.lower()
+        if lower.endswith(".doc") or "msword" in mime_type.lower():
+            return enrich_document_structure(parse_doc(content))
         if lower.endswith(".docx") or "wordprocessingml" in mime_type:
             return enrich_document_structure(parse_docx(content))
         if lower.endswith(".pdf") or "pdf" in mime_type.lower():
@@ -541,6 +558,10 @@ class Store:
         return parse_docx(content)
 
     @staticmethod
+    def extract_document_content_from_doc(content: bytes) -> dict[str, Any]:
+        return parse_doc(content)
+
+    @staticmethod
     def extract_text_from_pdf(content: bytes) -> str:
         return Store.extract_document_content_from_pdf(content)["text"]
 
@@ -553,7 +574,12 @@ class Store:
         return parse_xlsx(content)
 
     def match_project(self, item: dict[str, Any]) -> dict[str, Any]:
-        text = str(item.get("analysisText", ""))
+        original_text = str(item.get("analysisText", ""))
+        text = original_text
+        if item.get("dataOrigin") in {"public_notice_crawl", "custom_site", "monitor_fixture"}:
+            text = normalize_notice_text(original_text)
+            if text != original_text:
+                item["analysisText"] = text[:12000]
         document = item.get("document") if isinstance(item.get("document"), dict) else {}
         source_file_id = str(document.get("id") or document.get("contentHash") or item.get("id") or "")
         result = evaluate_announcement_eligibility(
@@ -584,13 +610,14 @@ class Store:
         item = next((entry for entry in self.catalog if entry.get("id") == project_id), None)
         if not item:
             return None
+        previous_workspace = self.workspaces.get(item.get("workspaceId"))
         reasoning = self.match_project(item)
         workspace_id = item.get("workspaceId") or uid("workspace")
         item["workspaceId"] = workspace_id
         item["status"] = "已分析"
         item["score"] = reasoning["score"]
         item["decision"] = reasoning["decision"]
-        self.workspaces[workspace_id] = {
+        workspace = {
             "id": workspace_id,
             "workspaceId": workspace_id,
             "projectId": project_id,
@@ -600,9 +627,18 @@ class Store:
             "draft": self.build_draft(item, reasoning),
             "draftVersion": 1,
         }
+        if isinstance(previous_workspace, dict):
+            # Re-analysis refreshes extraction while preserving user-authored
+            # response text and the audit trail from the prior workspace.
+            if previous_workspace.get("draft"):
+                workspace["draft"] = previous_workspace["draft"]
+                workspace["draftVersion"] = int(previous_workspace.get("draftVersion", 1) or 1)
+            if previous_workspace.get("auditRecords"):
+                workspace["auditRecords"] = previous_workspace["auditRecords"]
+        self.workspaces[workspace_id] = workspace
         self.persist_catalog()
         self.persist_runtime()
-        return {"item": self.with_preview(item), "workspace": self.workspaces[workspace_id], "reasoning": reasoning}
+        return {"item": self.with_preview(item), "workspace": workspace, "reasoning": reasoning}
 
     def batch_match(self, project_ids: list[str]) -> dict[str, Any]:
         results = []

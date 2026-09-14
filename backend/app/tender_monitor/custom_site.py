@@ -8,6 +8,8 @@ from typing import Any
 from urllib import error, request
 from urllib.parse import urljoin, urlparse
 
+from .adapters import normalize_notice_text
+
 
 class CustomSiteError(RuntimeError):
     pass
@@ -38,6 +40,24 @@ class _Node:
 
     def text(self) -> str:
         return _clean_text(" ".join(child.text() if isinstance(child, _Node) else child for child in self.children))
+
+    def structured_text(self) -> str:
+        block_tags = {
+            "address", "article", "blockquote", "br", "dd", "div", "dl", "dt",
+            "h1", "h2", "h3", "h4", "h5", "h6", "li", "p", "pre", "section",
+            "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul", "ol",
+        }
+        parts: list[str] = []
+        for child in self.children:
+            if isinstance(child, _Node):
+                if child.tag in block_tags:
+                    parts.append("\n")
+                parts.append(child.structured_text())
+                if child.tag in block_tags:
+                    parts.append("\n")
+            else:
+                parts.append(str(child))
+        return "".join(parts)
 
 
 class _TreeParser(HTMLParser):
@@ -200,7 +220,7 @@ def _normalize(
         "source": str(site.get("name", "自定义监控网站")),
         "sourceUrl": link,
         "detailUrl": link,
-        "analysisText": _clean_text(content) or title_text,
+        "analysisText": normalize_notice_text(content) or title_text,
         "sourceKey": str(site["id"]),
         "dataOrigin": "custom_site",
     }
@@ -238,7 +258,7 @@ def _parse_html(site: dict[str, Any], html: str) -> list[dict[str, Any]]:
             date_node.text() if date_node else container.text(),
             region_node.text() if region_node else "",
             category_node.text() if category_node else "",
-            content_node.text() if content_node else container.text(),
+            content_node.structured_text() if content_node else container.structured_text(),
         )
         if item and item["sourceUrl"] not in seen:
             seen.add(item["sourceUrl"])

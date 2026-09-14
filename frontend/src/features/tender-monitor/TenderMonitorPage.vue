@@ -51,8 +51,14 @@ function displayTime(value?: string) {
           <el-col :xs="24" :md="4"><el-switch v-model="searchForm.currentOnly" active-text="仅当前" /></el-col>
         </el-row>
 
-        <el-table :data="catalog" height="560" highlight-current-row @row-click="emit('selectProject', $event)">
-          <el-table-column label="项目名称" min-width="340">
+        <el-table
+          class="tender-monitor-table"
+          :data="catalog"
+          height="560"
+          highlight-current-row
+          @row-click="emit('selectProject', $event)"
+        >
+          <el-table-column label="项目名称" width="300">
             <template #default="{ row }">
               <a
                 v-if="row.sourceUrl"
@@ -69,22 +75,45 @@ function displayTime(value?: string) {
               </button>
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="类型" width="120" />
-          <el-table-column label="相关性分" width="100">
+          <el-table-column prop="category" label="类型" width="100" />
+          <el-table-column label="相关性分" width="82">
             <template #default="{ row }">
-              <el-tag :type="row.relevanceScore >= 70 ? 'success' : row.relevanceScore >= 45 ? 'warning' : 'info'" effect="plain">
-                {{ row.relevanceScore ?? 0 }}
-              </el-tag>
+              <el-popover placement="top" width="360" trigger="hover">
+                <template #reference>
+                  <el-tag :type="row.relevanceScore >= 70 ? 'success' : row.relevanceScore >= 45 ? 'warning' : 'info'" effect="plain">
+                    {{ row.relevanceScore ?? 0 }}
+                  </el-tag>
+                </template>
+                <div class="score-popover">
+                  <div class="score-popover-title">相关性评分 {{ row.relevanceScore ?? 0 }} 分</div>
+                  <div v-if="row.scoreVersion" class="score-popover-version">规则：{{ row.scoreVersion }}</div>
+                  <div v-if="row.scoreBreakdown?.dimensions" class="score-popover-breakdown">
+                    <span>业务方向 {{ row.scoreBreakdown.dimensions.businessDirection?.points ?? 0 }}</span>
+                    <span>行业场景 {{ row.scoreBreakdown.dimensions.industryScenario?.points ?? 0 }}</span>
+                    <span>产品服务 {{ row.scoreBreakdown.dimensions.product?.points ?? 0 }}</span>
+                    <span>技术能力 {{ row.scoreBreakdown.dimensions.capability?.points ?? 0 }}</span>
+                    <span>搜索词 {{ row.scoreBreakdown.dimensions.configuredKeywords?.points ?? 0 }}</span>
+                  </div>
+                  <div v-if="row.matchReasons?.length" class="score-popover-section">
+                    <div v-for="reason in row.matchReasons" :key="reason">{{ reason }}</div>
+                  </div>
+                  <div v-if="row.matchEvidence?.length" class="score-popover-section">
+                    <div v-for="evidence in row.matchEvidence" :key="evidence">{{ evidence }}</div>
+                  </div>
+                  <div v-if="row.excludeReason" class="score-popover-warning">{{ row.excludeReason }}</div>
+                  <div v-if="row.nextStage" class="score-popover-stage">下一阶段：{{ row.nextStage }}</div>
+                </div>
+              </el-popover>
             </template>
           </el-table-column>
-          <el-table-column prop="region" label="地区" width="120" />
-          <el-table-column prop="publishedDate" label="发布日期" width="120" />
-          <el-table-column label="获取文件时间" min-width="180">
+          <el-table-column prop="region" label="地区" width="96" />
+          <el-table-column prop="publishedDate" label="发布日期" width="108" />
+          <el-table-column label="获取文件时间" width="172">
             <template #default="{ row }">
-              {{ displayTime(row.registrationPeriod || row.registrationDeadline) }}
+              {{ displayTime(row.registrationPeriod) }}
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="130">
+          <el-table-column label="状态" width="96">
             <template #default="{ row }">
               <el-button
                 size="small"
@@ -97,7 +126,7 @@ function displayTime(value?: string) {
               </el-button>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="110" fixed="right">
+          <el-table-column label="操作" width="96" fixed="right">
             <template #default="{ row }">
               <el-button
                 size="small"
@@ -115,3 +144,18 @@ function displayTime(value?: string) {
     </el-col>
   </el-row>
 </template>
+
+<style scoped>
+:deep(.tender-monitor-table .cell) {
+  padding-right: 6px;
+  padding-left: 6px;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+:deep(.tender-monitor-table .el-button--small) {
+  padding-right: 7px;
+  padding-left: 7px;
+}
+</style>

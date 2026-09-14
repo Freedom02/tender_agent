@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import date, timedelta
 from html.parser import HTMLParser
@@ -34,14 +35,27 @@ class _TextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.skip_depth = 0
+        self.block_tags = {
+            "address", "article", "aside", "blockquote", "br", "dd", "div",
+            "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+            "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li",
+            "main", "nav", "ol", "p", "pre", "section", "table", "tbody",
+            "td", "tfoot", "th", "thead", "tr", "ul",
+        }
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() in {"script", "style", "noscript"}:
             self.skip_depth += 1
+            return
+        if not self.skip_depth and tag.lower() in self.block_tags:
+            self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() in {"script", "style", "noscript"} and self.skip_depth:
             self.skip_depth -= 1
+            return
+        if not self.skip_depth and tag.lower() in self.block_tags:
+            self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self.skip_depth and data.strip():
@@ -51,7 +65,98 @@ class _TextParser(HTMLParser):
 def html_to_text(html: str) -> str:
     parser = _TextParser()
     parser.feed(html)
-    return clean_text(" ".join(parser.parts))
+    raw_text = "".join(parser.parts)
+    lines = [clean_text(line) for line in raw_text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+NOTICE_STRUCTURE_MARKERS = (
+    "项目基本情况", "项目概况", "采购项目用途", "采购需求", "采购内容",
+    "采购范围", "主要标的", "技术要求", "服务内容", "申请人的资格要求",
+    "投标人的资格要求", "供应商资格要求", "资格审查", "资格条件",
+    "获取招标文件", "获取采购文件", "招标文件的获取", "报名时间",
+    "提交投标文件截止时间", "投标文件截止时间", "投标文件递交",
+    "响应文件提交", "响应文件递交", "开标时间", "联系方式",
+    "采购人信息", "代理机构信息", "中标情况", "成交情况",
+)
+
+NOTICE_FIELD_MARKERS = (
+    "采购项目名称", "招标项目名称", "项目名称", "采购项目编号", "招标项目编号",
+    "项目编号", "采购编号", "招标编号", "采购方式", "招标方式",
+    "采购人名称", "招标人名称", "采购单位", "采购人", "招标人",
+    "采购代理机构名称", "招标代理机构名称", "代理机构名称",
+    "预算金额", "采购预算", "项目预算", "最高限价", "控制价",
+    "服务类型", "项目类型", "采购品目", "服务地点", "实施地点",
+    "交付地点", "建设地点", "项目地点", "交货地点", "合同履行期限",
+    "服务期限", "服务期", "供货期", "交货期", "投标截止时间",
+    "响应文件提交截止时间", "递交响应文件截止时间", "提交投标文件截止时间",
+    "开标时间", "开启时间", "获取招标文件时间", "获取采购文件时间",
+    "获取文件时间", "报名时间", "联合体投标",
+)
+
+
+def normalize_notice_text(value: Any) -> str:
+    """Keep notice paragraphs/tables readable and restore common lost boundaries.
+
+    Crawlers and custom selectors often return a visually structured page as one
+    text node. Matching relies on line/section boundaries, so recover boundaries
+    before the text reaches the extractor. This is intentionally conservative:
+    it only inserts breaks before known notice headings/field labels.
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00a0", " ").replace("\u200b", "")
+    if re.search(r"</?[A-Za-z][^>]*>", text):
+        text = html_to_text(text)
+
+    markers = sorted(
+        set(NOTICE_STRUCTURE_MARKERS + NOTICE_FIELD_MARKERS),
+        key=len,
+        reverse=True,
+    )
+    marker_pattern = "|".join(re.escape(marker) for marker in markers)
+    # Recover numbered fields that were concatenated with the preceding
+    # section/value. Do not match digits that are part of an identifier or
+    # date-like value.
+    text = re.sub(
+        r"(?<!^)(?<!\n)(?<![-A-Za-z0-9])"
+        r"(?=\d+(?:\.\d+)*[、.．)])",
+        "\n",
+        text,
+    )
+    # A label immediately following another value is the usual signature of a
+    # flattened list/table cell. Keep a real line start untouched.
+    text = re.sub(
+        rf"(?<!^)(?<!\n)(?<!\d[、.．)])(?<![一二三四五六七八九十百][、.．])"
+        rf"(?=(?:{marker_pattern})\s*[:：])",
+        "\n",
+        text,
+    )
+    text = re.sub(
+        r"(?<!^)(?<!\n)(?=(?:第[一二三四五六七八九十百]+[章节部分]|"
+        r"[一二三四五六七八九十]+[、.．]))",
+        "\n",
+        text,
+    )
+    # Some list pages concatenate a section heading and its first numbered
+    # field, for example ``一、项目基本情况1、项目编号``.
+    text = re.sub(
+        r"((?:第[一二三四五六七八九十百]+[章节部分]|"
+        r"[一二三四五六七八九十]+[、.．])[^。\n]{1,48}?)(?=\d+(?:\.\d+)*[、.．)])",
+        r"\1\n",
+        text,
+    )
+    text = re.sub(
+        r"([。；;])\s*(?=(?:\d+(?:\.\d+)*[、.．)]|[（(]\d+[)）]))",
+        r"\1\n",
+        text,
+    )
+
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.sub(r"[ \t\f\v]+", " ", raw_line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def fetch_url(url: str, timeout: int = 15) -> tuple[str, str]:
@@ -66,14 +171,62 @@ def fetch_url(url: str, timeout: int = 15) -> tuple[str, str]:
         with request.urlopen(req, timeout=timeout) as response:
             body = response.read(3 * 1024 * 1024)
             charset = response.headers.get_content_charset()
-            if charset:
-                return body.decode(charset, errors="replace"), response.headers.get_content_type()
-            text = body.decode("utf-8", errors="replace")
-            if text.count("\ufffd") > max(len(text) // 100, 20):
-                text = body.decode("gb18030", errors="replace")
+            # Some public-resource servers occasionally send an incorrect
+            # charset header. Prefer an explicit HTML meta charset, then use
+            # UTF-8 when it decodes cleanly; otherwise fall back to GB18030.
+            head = body[:8192].decode("ascii", errors="ignore").lower()
+            meta_match = re.search(
+                r"<meta[^>]+charset\s*=\s*[\"']?\s*([a-z0-9_-]+)",
+                head,
+                flags=re.IGNORECASE,
+            )
+            detected_charset = (meta_match.group(1) if meta_match else "").lower()
+            if detected_charset in {"utf-8", "utf8"}:
+                charset = "utf-8"
+            elif detected_charset in {"gbk", "gb2312", "gb18030"}:
+                charset = "gb18030"
+            if charset and charset.lower().replace("-", "") not in {"utf8"}:
+                text = body.decode(charset, errors="replace")
+            else:
+                text = body.decode("utf-8", errors="replace")
+                if "\ufffd" in text:
+                    gb_text = body.decode("gb18030", errors="replace")
+                    if gb_text.count("\ufffd") < text.count("\ufffd"):
+                        text = gb_text
             return text, response.headers.get_content_type()
     except (OSError, UnicodeError, error.URLError) as exc:
         raise MonitorAdapterError(f"访问网站失败：{exc}") from exc
+
+
+def fetch_form_json(
+    url: str,
+    form: dict[str, Any],
+    timeout: int = 15,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    request_headers = {
+        "User-Agent": "TenderAgent/2.0 (+public-notice-monitor)",
+        "Accept": "application/json,text/plain,*/*",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Pass-Token": "",
+    }
+    request_headers.update(headers or {})
+    body = parse.urlencode(
+        [(key, str(value)) for key, value in form.items() if value is not None]
+    ).encode("utf-8")
+    req = request.Request(url, data=body, headers=request_headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            raw = response.read(3 * 1024 * 1024)
+            charset = response.headers.get_content_charset() or "utf-8"
+            payload = json.loads(raw.decode(charset, errors="replace"))
+    except error.HTTPError as exc:
+        raise MonitorAdapterError(f"接口请求失败：HTTP {exc.code}") from exc
+    except (OSError, UnicodeError, ValueError, error.URLError) as exc:
+        raise MonitorAdapterError(f"访问接口失败：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise MonitorAdapterError("接口返回格式异常")
+    return payload
 
 
 def search_keywords(monitoring: dict[str, Any]) -> list[str]:
@@ -190,6 +343,11 @@ DATE_TIME_PATTERN = re.compile(
 )
 
 
+def normalize_time_text(text: str) -> str:
+    """Join layout/OCR-inserted spaces inside numeric date and time values."""
+    return re.sub(r"(?<=\d)\s+(?=\d)", "", clean_text(text))
+
+
 def _format_date_time(match: re.Match[str]) -> str:
     hour = int(match.group(5)) if match.group(5) else None
     minute = int(match.group(6) or 0) if hour is not None else None
@@ -204,7 +362,7 @@ def _format_date_time(match: re.Match[str]) -> str:
 
 
 def extract_labeled_time(text: str, labels: tuple[str, ...], max_chars: int = 260) -> str:
-    compact = clean_text(text)
+    compact = normalize_time_text(text)
     label_pattern = "|".join(re.escape(label) for label in labels)
     for label_match in re.finditer(rf"(?:{label_pattern})\s*[:：]?", compact):
         snippet = compact[label_match.end(): label_match.end() + max_chars]
@@ -223,19 +381,70 @@ def extract_labeled_time(text: str, labels: tuple[str, ...], max_chars: int = 26
     return ""
 
 
+DOCUMENT_TIME_LABELS = (
+    "获取招标文件时间", "获取采购文件时间", "获取文件时间",
+    "招标文件获取时间", "采购文件获取时间", "招标文件发售时间", "采购文件发售时间",
+    "报名时间", "发售时间",
+)
+
+
+def extract_registration_period(text: str) -> str:
+    """Extract the document-download/registration window from common notice layouts."""
+    value = extract_labeled_time(text, DOCUMENT_TIME_LABELS)
+    if value:
+        return value
+
+    compact = normalize_time_text(text)
+    # Many government notices use a section heading followed by ``1.时间：``
+    # instead of writing ``获取招标文件时间：``.  Do not start at the overview
+    # sentence ``获取招标文件，并于 ... 前递交投标文件`` because that date is the
+    # bid deadline, not the document-download window.
+    section_pattern = re.compile(
+        r"(?:获取招标文件|获取采购文件|获取文件|"
+        r"招标文件的获取|采购文件的获取|招标文件获取|采购文件获取|"
+        r"发售招标文件|发售采购文件|报名)"
+        r"[^。]{0,80}?(?:1[.、]\s*)?(?:时间|日期)\s*[:：]?",
+    )
+    for match in section_pattern.finditer(compact):
+        snippet = compact[match.end(): match.end() + 320]
+        date_matches = list(DATE_TIME_PATTERN.finditer(snippet))
+        if not date_matches:
+            continue
+        first = date_matches[0]
+        result = _format_date_time(first)
+        if len(date_matches) > 1:
+            between = snippet[first.end(): date_matches[1].start()]
+            if len(between) <= 20 and re.fullmatch(r"\s*(?:至|到|—|-|~)\s*", between):
+                result += f" 至 {_format_date_time(date_matches[1])}"
+        return result
+    return ""
+
+
 def extract_deadline(text: str) -> str:
     value = extract_labeled_time(
         text,
         (
-            "提交投标文件截止时间", "响应文件提交截止时间", "提交响应文件截止时间",
-            "投标文件提交截止时间", "响应文件递交截止时间", "投标截止时间",
-            "响应截止时间", "响应文件提交", "投标文件提交", "响应文件递交",
+            "提交投标文件截止时间", "递交投标文件截止时间", "响应文件提交截止时间",
+            "提交响应文件截止时间", "投标文件提交截止时间", "投标文件递交截止时间",
+            "响应文件递交截止时间", "响应文件提交的截止时间", "投标文件提交的截止时间",
+            "投标文件的递交截止时间", "响应文件的递交截止时间",
+            "投标截止时间", "响应截止时间", "响应文件提交", "投标文件提交", "响应文件递交",
+            "投标文件的递交", "响应文件的递交", "响应文件的提交",
             "开标时间", "开启时间",
         ),
     )
     if value:
         return value
-    compact = clean_text(text)
+    compact = normalize_time_text(text)
+    section_pattern = re.compile(
+        r"(?:投标文件的递交|投标文件递交|投标文件提交|响应文件的递交|响应文件递交|响应文件的提交|响应文件提交)"
+        r"[^。]{0,100}?(?:截止时间|截止日期|时间|日期)\s*[:：]?",
+    )
+    for match in section_pattern.finditer(compact):
+        snippet = compact[match.end(): match.end() + 320]
+        date_matches = list(DATE_TIME_PATTERN.finditer(snippet))
+        if date_matches:
+            return _format_date_time(date_matches[0])
     overview = re.search(
         rf"并于\s*({DATE_TIME_PATTERN.pattern})\s*(?:（[^）]*）)?\s*前(?:提交|递交)",
         compact,
@@ -293,7 +502,7 @@ def extract_links(html: str, base_url: str) -> list[tuple[str, str, str]]:
 def normalize_notice(site: dict[str, Any], title: str, url: str, published: str, summary: str = "") -> dict[str, Any]:
     source_key = str(site.get("id", "source"))
     source_name = str(site.get("name", source_key))
-    text = clean_text(f"{title} {summary}")
+    text = normalize_notice_text(f"{title}\n{summary}")
     published_date = normalize_date(published) or extract_published_date(text, url)
     return {
         "id": stable_id(source_key, url, title, published_date),
@@ -320,7 +529,28 @@ def enrich_detail(item: dict[str, Any]) -> dict[str, Any]:
         html, _ = fetch_url(url, timeout=12)
     except MonitorAdapterError:
         return item
-    text = html_to_text(html)
+    text = normalize_notice_text(html_to_text(html))
+
+    # The national platform's ``/a/`` page is a summary shell.  The actual
+    # announcement body is linked from it through a ``/b/`` page, where the
+    # document-download and bid-deadline sections are present.
+    body_match = re.search(
+        r"(?:https?://[^\"'\s]+)?(/information/deal/html/b/[^\"'\s<>]+\.html)",
+        html,
+        flags=re.IGNORECASE,
+    )
+    if body_match:
+        body_url = parse.urljoin(url, body_match.group(1).replace("&amp;", "&"))
+        if body_url != url:
+            try:
+                body_html, _ = fetch_url(body_url, timeout=12)
+                body_text = normalize_notice_text(html_to_text(body_html))
+                if len(body_text) > len(text):
+                    html = body_html
+                    text = body_text
+                    item["contentUrl"] = body_url
+            except MonitorAdapterError:
+                pass
     if len(text) > len(str(item.get("analysisText", ""))):
         item["analysisText"] = text[:12000]
     published_date = extract_published_date(text, url)
@@ -329,8 +559,10 @@ def enrich_detail(item: dict[str, Any]) -> dict[str, Any]:
     item["projectName"] = extract_project_name(text, str(item.get("title", "")))
     item["budget"] = item.get("budget") or extract_field(text, ("预算金额", "项目预算", "最高限价", "采购预算"), ("采购需求", "合同履行期限", "提交投标文件截止时间"))
     item["bidDeadline"] = extract_deadline(text)
-    item["registrationPeriod"] = extract_labeled_time(text, ("获取招标文件时间", "获取采购文件时间", "获取文件时间", "报名时间", "发售时间"))
-    item["registrationDeadline"] = extract_labeled_time(text, ("获取招标文件截止时间", "获取采购文件截止时间", "报名截止时间"))
+    item["registrationPeriod"] = extract_registration_period(text)
+    item["registrationDeadline"] = extract_labeled_time(
+        text, ("获取招标文件截止时间", "获取采购文件截止时间", "获取文件截止时间", "报名截止时间")
+    )
     buyer = extract_field(text, ("采购人", "招标人"), ("地址", "联系方式", "联系人"))
     if buyer:
         item["buyerName"] = buyer
@@ -343,7 +575,12 @@ def repair_notice_fields(item: dict[str, Any]) -> bool:
     if item.get("dataOrigin") not in {"public_notice_crawl", "custom_site", "monitor_fixture"}:
         return False
     changed = False
-    text = str(item.get("analysisText", ""))
+
+    original_text = str(item.get("analysisText", ""))
+    text = normalize_notice_text(original_text)
+    if text != original_text:
+        item["analysisText"] = text[:12000]
+        changed = True
     url = str(item.get("detailUrl") or item.get("sourceUrl") or "")
 
     project_name = extract_project_name(text, str(item.get("title", "")))
@@ -358,8 +595,10 @@ def repair_notice_fields(item: dict[str, Any]) -> bool:
 
     extracted = {
         "bidDeadline": extract_deadline(text),
-        "registrationPeriod": extract_labeled_time(text, ("获取招标文件时间", "获取采购文件时间", "获取文件时间", "报名时间", "发售时间")),
-        "registrationDeadline": extract_labeled_time(text, ("获取招标文件截止时间", "获取采购文件截止时间", "报名截止时间")),
+        "registrationPeriod": extract_registration_period(text),
+        "registrationDeadline": extract_labeled_time(
+            text, ("获取招标文件截止时间", "获取采购文件截止时间", "获取文件截止时间", "报名截止时间")
+        ),
     }
     for field, value in extracted.items():
         current = item.get(field, "")
@@ -418,41 +657,75 @@ class CcgpAdapter(TenderSourceAdapter):
 
 
 class GgzyAdapter(TenderSourceAdapter):
+    API_URL = "https://www.ggzy.gov.cn/information/pubTradingInfo/getTradList"
+    BASE_URL = "https://www.ggzy.gov.cn"
+
     def fetch(self, site: dict[str, Any], monitoring: dict[str, Any]) -> list[dict[str, Any]]:
         start, end = date_window(monitoring)
         max_pages = max(int(monitoring.get("maxPagesPerKeyword", 2) or 2), 1)
         items: list[dict[str, Any]] = []
         seen: set[str] = set()
+        base_url = str(site.get("url") or self.BASE_URL).rstrip("/")
         for keyword in search_keywords(monitoring):
             for page in range(1, max_pages + 1):
-                params = {
-                    "TIMEBEGIN_SHOW": start.isoformat(),
-                    "TIMEEND_SHOW": end.isoformat(),
+                form = {
                     "SOURCE_TYPE": "1",
-                    "DEAL_TIME": "02",
-                    "DEAL_CLASSIFY": "00",
-                    "DEAL_STAGE": "0100",
-                    "DEAL_PROVINCE": "0",
-                    "DEAL_CITY": "0",
-                    "DEAL_PLATFORM": "0",
-                    "BID_PLATFORM": "0",
-                    "DEAL_TRADE": "0",
-                    "isShowAll": "1",
-                    "PAGENUMBER": str(page),
+                    "DEAL_TIME": "06",
+                    "TIMEBEGIN": start.isoformat(),
+                    "TIMEEND": end.isoformat(),
+                    "PAGENUMBER": page,
                     "FINDTXT": keyword,
                 }
-                url = f"https://deal.ggzy.gov.cn/ds/deal/dealList_find.jsp?{parse.urlencode(params)}"
-                html, _ = fetch_url(url)
-                for href, title, block in extract_links(html, url):
-                    if "ggzy.gov.cn" not in href:
+                payload = fetch_form_json(self.API_URL, form)
+                code = payload.get("code")
+                if code != 200:
+                    message = clean_text(payload.get("message")) or f"业务状态码 {code}"
+                    raise MonitorAdapterError(f"官方平台返回失败：{message}")
+                data = payload.get("data")
+                records = data.get("records", []) if isinstance(data, dict) else []
+                if not isinstance(records, list):
+                    raise MonitorAdapterError("官方平台返回的公告列表格式异常")
+                for record in records:
+                    if not isinstance(record, dict):
                         continue
-                    block_text = html_to_text(block)
-                    if not is_procurement_notice(title, block_text, href):
+                    title = clean_text(record.get("title"))
+                    relative_url = clean_text(record.get("url"))
+                    if not title or not relative_url:
                         continue
-                    item = normalize_notice(site, title, href, extract_published_date(block_text, href), block_text)
+                    href = parse.urljoin(base_url + "/", relative_url)
+                    parsed_href = parse.urlsplit(href)
+                    if (
+                        "ggzy.gov.cn" not in parsed_href.netloc.lower()
+                        or not parsed_href.path.startswith("/information/deal/html/")
+                    ):
+                        continue
+                    summary_parts = [
+                        record.get("provinceText"),
+                        record.get("cityText"),
+                        record.get("transactionSourcesPlatformText"),
+                        record.get("businessTypeText"),
+                        record.get("industryTypeText"),
+                        record.get("informationTypeText"),
+                    ]
+                    summary = clean_text(" ".join(
+                        clean_text(part) for part in summary_parts if clean_text(part)
+                    ))
+                    if not is_procurement_notice(title, summary, href):
+                        continue
+                    item = normalize_notice(
+                        site,
+                        title,
+                        href,
+                        clean_text(record.get("publishTime")),
+                        summary,
+                    )
                     if href not in seen:
                         seen.add(href)
-                        items.append(enrich_detail(item) if monitoring.get("fetchDetails", True) else item)
+                        items.append(
+                            enrich_detail(item)
+                            if monitoring.get("fetchDetails", True)
+                            else item
+                        )
         return items
 
 

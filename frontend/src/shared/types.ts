@@ -20,6 +20,9 @@ export interface CatalogItem {
   matchedCapabilities?: string[];
   matchedKeywords?: string[];
   matchReasons?: string[];
+  matchEvidence?: string[];
+  scoreBreakdown?: RelevanceScoreBreakdown;
+  scoreVersion?: string;
   excludeReason?: string;
   nextStage?: string;
   shouldAnalyze?: boolean;
@@ -52,6 +55,32 @@ export interface CatalogItem {
   downloadUrl?: string;
 }
 
+export interface RelevanceScoreComponent {
+  points: number;
+  maxPoints: number;
+  matched?: string[];
+  terms?: string[];
+  evidence?: string[];
+}
+
+export interface RelevanceScoreBreakdown {
+  version: string;
+  total?: number;
+  dimensions?: {
+    businessDirection?: RelevanceScoreComponent;
+    industryScenario?: RelevanceScoreComponent;
+    product?: RelevanceScoreComponent;
+    capability?: RelevanceScoreComponent;
+    configuredKeywords?: RelevanceScoreComponent;
+  };
+  configuredKeywords?: RelevanceScoreComponent;
+  hardFilters?: {
+    exclude?: { passed: boolean; hits?: string[] };
+    region?: { passed: boolean; target?: string; matchedText?: string };
+    procurementType?: { passed: boolean; target?: string[] };
+  };
+}
+
 export interface MonitorSite {
   id: string;
   name: string;
@@ -78,6 +107,29 @@ export interface MonitoringStatus {
     lastFetchedAt: string;
     nextFetchedAt: string;
   };
+}
+
+export interface MonitorRunSite {
+  siteId: string;
+  name: string;
+  success: boolean;
+  status: string;
+  error?: string;
+  count: number;
+  matchedCount: number;
+  addedCount: number;
+  dedupedCount: number;
+}
+
+export interface MonitoringRunResult {
+  status: string;
+  addedCount: number;
+  matchedCount: number;
+  dedupedCount: number;
+  collectedCount: number;
+  items: CatalogItem[];
+  sites: MonitorRunSite[];
+  monitoring: MonitoringStatus;
 }
 
 export interface ReasoningRow {
@@ -152,9 +204,24 @@ export interface ReasoningResult {
   decision: string;
   summary?: MatchSummary;
   project?: Record<string, string>;
+  procurementNeeds?: Array<{
+    id: string;
+    category: string;
+    text: string;
+    section?: string;
+    sourceLocator?: string;
+    status?: "已关联" | "待关联" | string;
+    matchedObjectIds?: string[];
+    matchedObjects?: Array<{ id?: string; name?: string; category?: string }>;
+    evidenceItems?: ReasoningRow["evidenceItems"];
+    confidence?: number;
+  }>;
   relevance?: {
     score: number;
     reasons?: string[];
+    matchEvidence?: string[];
+    scoreBreakdown?: RelevanceScoreBreakdown;
+    scoreVersion?: string;
     nextStage?: string;
   };
   extraction?: {

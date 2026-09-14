@@ -31,7 +31,7 @@ const fineStatusValues = ["满足", "部分满足", "不满足", "待补材料",
 const fileName = computed(() => props.importFile?.name || "");
 const auditRecords = computed(() => props.workspace?.auditRecords || []);
 const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
-const historyWorkspaces = computed(() => props.workspaces);
+const historyWorkspaces = computed(() => [...props.workspaces].reverse());
 const fineStatusOptions = computed(() => {
   const statusCounts = props.workspace?.reasoning.fineReview?.statusCounts || {};
   return ["全部状态", ...Object.keys(statusCounts)];
@@ -77,6 +77,7 @@ const projectInfoLabels: Record<string, string> = {
   noticeType: "公告类型",
   tenderNoticeDate: "招标 / 采购公告发布日期",
   noticeDate: "公告日期",
+  registrationPeriod: "获取文件 / 报名时间",
   budgetAmount: "预算金额",
   maxPrice: "最高限价",
   serviceType: "项目类型",
@@ -98,12 +99,21 @@ const projectInfoLabels: Record<string, string> = {
   agencyContact: "代理机构联系人",
   agencyPhone: "代理机构联系电话"
 };
+const procurementNeedLabels: Record<string, string> = {
+  scope: "采购范围",
+  deliverable: "交付内容",
+  technical: "技术需求",
+  service: "服务内容",
+  quantity: "采购数量",
+  other: "采购需求"
+};
 const projectInfoItems = computed(() => {
   const project = props.workspace?.reasoning.project || {};
   return Object.entries(projectInfoLabels)
     .map(([key, label]) => ({ key, label, value: String(project[key] || "").trim() }))
     .filter((item) => item.value);
 });
+const procurementNeeds = computed(() => props.workspace?.reasoning.procurementNeeds || []);
 
 function summaryItems(summary: MatchSummary | null) {
   if (!summary) return [];
@@ -173,13 +183,13 @@ function onFileChange(event: Event) {
             ref="fileInput"
             class="hidden-file-input"
             type="file"
-            accept=".pdf,.docx,.xlsx,.txt,.md"
+            accept=".pdf,.doc,.docx,.xlsx,.txt,.md"
             @change="onFileChange"
           />
           <button class="upload-dropzone" type="button" @click="chooseFile">
             <el-icon :size="24"><Upload /></el-icon>
             <span>{{ fileName || (inputKind === "tender_document" ? "点击选择完整招标文件" : "点击选择招标公告") }}</span>
-            <small>PDF、DOCX、XLSX、TXT、Markdown</small>
+            <small>PDF、DOC、DOCX、XLSX、TXT、Markdown</small>
           </button>
 
           <el-input
@@ -321,6 +331,35 @@ function onFileChange(event: Event) {
           <div v-for="item in projectInfoItems" :key="item.key" class="project-info-item">
             <span>{{ item.label }}</span>
             <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="procurementNeeds.length" class="project-info-section mt-12">
+        <div class="section-heading">
+          <strong>采购需求提取</strong>
+          <span>采购内容单独提取，不参与资格准入评分</span>
+        </div>
+        <div class="procurement-needs-list">
+          <div v-for="need in procurementNeeds" :key="need.id" class="procurement-need-item">
+            <div class="requirement-item-head">
+              <el-tag size="small" effect="plain">
+                {{ procurementNeedLabels[need.category] || "采购需求" }}
+              </el-tag>
+              <el-tag
+                size="small"
+                :type="need.status === '已关联' ? 'success' : 'warning'"
+                effect="plain"
+              >
+                {{ need.status || "待关联" }}
+              </el-tag>
+              <span v-if="need.sourceLocator" class="requirement-locator">{{ need.sourceLocator }}</span>
+            </div>
+            <div class="requirement-text">{{ need.text }}</div>
+            <div v-if="need.matchedObjects?.length" class="requirement-meta">
+              企业本体关联：
+              {{ need.matchedObjects.map((item) => item.name || item.id).filter(Boolean).join("、") }}
+            </div>
           </div>
         </div>
       </div>

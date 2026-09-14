@@ -374,6 +374,45 @@ body {
   text-align: left;
 }
 
+.score-popover {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.score-popover-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.score-popover-version {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.score-popover-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+  margin-top: 8px;
+}
+
+.score-popover-section {
+  border-top: 1px solid var(--border-color);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+
+.score-popover-warning {
+  color: var(--danger);
+  margin-top: 8px;
+}
+
+.score-popover-stage {
+  color: var(--text-secondary);
+  margin-top: 8px;
+}
+
 .project-item-title {
   display: flex;
   justify-content: space-between;
@@ -830,6 +869,15 @@ body {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.procurement-needs-list {
+  border-top: 1px solid var(--border-color);
+}
+
+.procurement-need-item {
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--border-color);
 }
 
 .module-block {

@@ -7,7 +7,7 @@ from typing import Any
 
 from .contracts import build_comparison, normalize_evidence, normalize_requirement, summarize_comparisons
 from .eligibility import _is_gateway_timeout, call_openai_compatible
-from .requirement_scope import select_requirement_scope
+from .requirement_scope import is_form_title, is_placeholder_row, select_requirement_scope
 
 
 ALLOWED_CATEGORIES = {
@@ -481,6 +481,8 @@ def _is_template_placeholder(text: str) -> bool:
     value = _compact(text)
     if not value:
         return True
+    if is_form_title(text) or is_placeholder_row(text):
+        return True
     if any(
         phrase in value
         for phrase in (
@@ -742,6 +744,8 @@ def _is_non_requirement_scope_text(text: str) -> bool:
     compact = _compact(value)
     if not value:
         return True
+    if is_form_title(value) or is_placeholder_row(value):
+        return True
     if any(_compact(term) in compact for term in NON_REQUIREMENT_SCOPE_TERMS):
         return True
     return False
@@ -793,6 +797,9 @@ def _requirement_from_segment(
     section: str,
 ) -> list[dict[str, Any]]:
     text = _safe_text(source.get("text"), 1200)
+    table_requirement_row = bool(
+        source.get("tableId") and _is_table_requirement_row(source, text)
+    )
     if (
         _is_table_header_row(source, text)
         or _is_process_only_text(text)
@@ -800,7 +807,7 @@ def _requirement_from_segment(
         or _is_incomplete_requirement_label(text)
     ):
         return []
-    if source.get("tableId") and not _is_table_requirement_row(source, text):
+    if source.get("tableId") and not table_requirement_row:
         return []
     clauses = _split_requirement_text(text)
     clauses = [
@@ -810,7 +817,7 @@ def _requirement_from_segment(
         and not _is_template_placeholder(clause)
         and not _is_incomplete_requirement_label(clause)
     ]
-    if not _is_requirement(text):
+    if not _is_requirement(text) and not table_requirement_row:
         clauses = [clause for clause in clauses if _is_requirement(clause)]
     if not clauses:
         return []

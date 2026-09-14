@@ -11,7 +11,11 @@ from backend.app.tender_matching.document_fine_matching import (
     extract_tender_requirements,
     extract_tender_requirements_by_rule,
 )
-from backend.app.tender_matching.requirement_scope import select_requirement_scope
+from backend.app.tender_matching.requirement_scope import (
+    is_form_title,
+    is_placeholder_row,
+    select_requirement_scope,
+)
 
 
 class RequirementScopeTests(unittest.TestCase):
@@ -186,6 +190,65 @@ class RequirementScopeTests(unittest.TestCase):
             ["SEG-002"],
         )
         self.assertIn("未识别到明确招标条件章节", result["warnings"][0])
+
+    def test_form_titles_and_multi_field_placeholder_rows_are_not_requirements(self) -> None:
+        placeholder = "国别：______ 品牌：______ 规格型号：______"
+        form_title = "②技术和服务要求响应表"
+
+        self.assertTrue(is_placeholder_row(placeholder))
+        self.assertTrue(is_form_title(form_title))
+
+        result = extract_tender_requirements(
+            "",
+            [
+                {
+                    "id": "SEG-TECH",
+                    "sourceLocator": "第33项",
+                    "text": "第五章 技术要求",
+                },
+                {"id": "SEG-034", "sourceLocator": "第34项", "text": placeholder},
+                {"id": "SEG-035", "sourceLocator": "第35项", "text": form_title},
+                {
+                    "id": "SEG-036",
+                    "sourceLocator": "第36项",
+                    "tableId": "TABLE-TECH",
+                    "tableRequirementType": "technical",
+                    "text": "数字孪生平台 | 1. 楼层、房间、设备及设施孪生。",
+                },
+            ],
+            {"enabled": False},
+            sections=[
+                {
+                    "id": "SEC-TECH",
+                    "sectionId": "SEC-TECH",
+                    "sectionType": "technical",
+                    "heading": "第五章 技术要求",
+                    "sectionPath": ["第五章 技术要求"],
+                    "segmentIds": ["SEG-TECH", "SEG-034", "SEG-035", "SEG-036"],
+                }
+            ],
+            tables=[
+                {
+                    "id": "TABLE-TECH",
+                    "tableId": "TABLE-TECH",
+                    "rows": [
+                        {
+                            "sourceLocator": "第32项",
+                            "text": "技术参数 | 投标响应 | 是否偏离",
+                        },
+                        {
+                            "sourceLocator": "第36项",
+                            "text": "数字孪生平台 | 1. 楼层、房间、设备及设施孪生。",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        texts = [item["text"] for item in result["requirements"]]
+        self.assertNotIn(placeholder, texts)
+        self.assertNotIn(form_title, texts)
+        self.assertTrue(any("楼层、房间、设备及设施孪生" in text for text in texts))
 
     def test_fine_extraction_consumes_scope_instead_of_basic_project_text(self) -> None:
         result = extract_tender_requirements(

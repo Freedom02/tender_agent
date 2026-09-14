@@ -16,6 +16,8 @@ from backend.app.tender_matching.document_fine_matching import (
 )
 from backend.app.tender_matching.eligibility import (
     _status_from_evidence as announcement_status_from_evidence,
+    _normalize_model_extraction,
+    build_announcement_model_input,
     evaluate_announcement_eligibility,
     extract_announcement_requirements,
     extract_requirements_by_rule,
@@ -174,8 +176,164 @@ class MatchingContractTests(unittest.TestCase):
         self.assertIn("项目编号：CS-2026-088", user_content)
         self.assertIn("投标人须具有有效的营业执照", user_content)
         self.assertIn("开标时间：2026年10月12日 09:30", user_content)
-        self.assertNotIn("平台部署、数据接入、可视化建模", user_content)
+        self.assertIn("平台部署、数据接入、可视化建模", user_content)
         self.assertEqual(extraction["extractionMethod"], "llm+rule")
+
+    def test_model_input_preserves_qualification_and_procurement_sections(self) -> None:
+        text = """一、项目基本情况
+项目名称：园区数字化平台建设项目
+项目说明：""" + ("本项目包含大量背景说明和建设目标。 " * 80) + """
+二、采购需求
+采购范围：建设园区三维可视化底座；支持数据接入和指标治理。
+三、资格审查
+资格审查表
+序号 | 审查因素 | 审查标准
+1 | 主体资格 | 投标人须具有有效营业执照
+"""
+        model_input = build_announcement_model_input(text, limit=520)
+
+        self.assertIn("采购范围：建设园区三维可视化底座", model_input)
+        self.assertIn("投标人须具有有效营业执照", model_input)
+
+    def test_mixed_announcement_separates_procurement_rows_from_qualification_rows(self) -> None:
+        text = """一、项目基本情况
+本项目建设园区三维可视化底座，提供数据接入和指标治理服务。
+二、采购标的一览表
+序号 | 货物名称 | 数量 | 技术参数
+1 | 三维可视化平台 | 1套 | 支持数据接入
+三、资格审查
+资格审查表
+序号 | 审查因素 | 审查标准
+1 | 主体资格 | 投标人须具有有效营业执照
+"""
+        extraction = extract_requirements_by_rule(text)
+        need_texts = [item["text"] for item in extraction["procurementNeeds"]]
+        requirement_texts = [item["text"] for item in extraction["requirements"]]
+
+        self.assertTrue(any("园区三维可视化底座" in item for item in need_texts))
+        self.assertTrue(any("三维可视化平台" in item and "支持数据接入" in item for item in need_texts))
+        self.assertTrue(any("有效营业执照" in item for item in requirement_texts))
+        self.assertFalse(any("审查因素" in item or "货物名称" in item for item in need_texts))
+        self.assertFalse(any("三维可视化平台" in item for item in requirement_texts))
+
+    def test_model_normalization_drops_cross_classified_items(self) -> None:
+        normalized = _normalize_model_extraction(
+            {
+                "project": {},
+                "procurementNeeds": [
+                    {"text": "投标人须具有有效营业执照", "category": "qualification"},
+                    {"text": "建设园区三维可视化平台并支持数据接入", "category": "technical"},
+                ],
+                "requirements": [
+                    {"text": "建设园区三维可视化平台并支持数据接入", "category": "technical"},
+                    {"text": "投标人须具有有效营业执照", "category": "qualification"},
+                ],
+                "warnings": [],
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            [item["text"] for item in normalized["procurementNeeds"]],
+            ["建设园区三维可视化平台并支持数据接入"],
+        )
+        self.assertEqual(
+            [item["text"] for item in normalized["requirements"]],
+            ["投标人须具有有效营业执照"],
+        )
+
+    def test_rule_extraction_returns_procurement_needs_separately(self) -> None:
+        text = """某市平台建设公开招标公告
+一、项目基本情况
+项目名称：
+城市运行管理平台建设项目
+项目编号：NEED-2026-001
+二、采购内容及技术要求
+采购范围：完成数据接入、指标治理和三维可视化驾驶舱建设；
+供应商应提供系统部署、培训和一年运维服务。
+三、申请人的资格要求
+1. 投标人须具有有效的营业执照。
+四、获取招标文件
+时间：
+2026年9月11日至2026年9月18日
+五、响应文件提交
+截止时间：2026年10月12日09点30分
+"""
+        extraction = extract_requirements_by_rule(text)
+
+        self.assertEqual(extraction["project"]["projectName"], "城市运行管理平台建设项目")
+        self.assertEqual(
+            extraction["project"]["registrationPeriod"],
+            "2026年9月11日至2026年9月18日",
+        )
+        need_texts = [item["text"] for item in extraction["procurementNeeds"]]
+        self.assertTrue(any("数据接入" in item for item in need_texts))
+        self.assertTrue(any("系统部署" in item for item in need_texts))
+        self.assertEqual(len(extraction["requirements"]), 1)
+        self.assertNotIn("数据接入", extraction["requirements"][0]["text"])
+
+    def test_flattened_heading_values_are_extracted_into_matching_fields(self) -> None:
+        text = (
+            "\u4e00\u3001\u9879\u76ee\u57fa\u672c\u60c5\u51b5\n"
+            "1\u3001\u9879\u76ee\u7f16\u53f7\uff1aCS-2026-001\n"
+            "2\u3001\u9879\u76ee\u540d\u79f0\uff1a\u57ce\u5e02\u8fd0\u884c\u5e73\u53f0\u9879\u76ee\n"
+            "\u4e8c\u3001\u91c7\u8d2d\u9700\u6c42\uff1a\u5e73\u53f0\u5efa\u8bbe\u3001\u6570\u636e\u63a5\u5165\u53ca\u57f9\u8bad\n"
+            "\u4e09\u3001\u7533\u8bf7\u4eba\u7684\u8d44\u683c\u8981\u6c42\n"
+            "1\u3001\u6295\u6807\u4eba\u987b\u5177\u6709\u6709\u6548\u7684\u8425\u4e1a\u6267\u7167\u3002\n"
+            "\u56db\u3001\u83b7\u53d6\u62db\u6807\u6587\u4ef6\u65f6\u95f4\uff1a2026\u5e749\u67081\u65e5\u81f32026\u5e749\u67088\u65e5\n"
+            "\u4e94\u3001\u6295\u6807\u622a\u6b62\u65f6\u95f4\uff1a2026\u5e749\u670820\u65e59\u65f630\u5206"
+        )
+
+        sections = split_announcement_sections(text)
+        self.assertEqual(
+            [section["type"] for section in sections],
+            ["basic", "needs", "qualification", "procurement", "bid_opening"],
+        )
+        self.assertEqual(
+            sections[1]["lines"][0]["text"],
+            "\u5e73\u53f0\u5efa\u8bbe\u3001\u6570\u636e\u63a5\u5165\u53ca\u57f9\u8bad",
+        )
+
+        extraction = extract_requirements_by_rule(text)
+        project = extraction["project"]
+        self.assertEqual(project["projectCode"], "CS-2026-001")
+        self.assertEqual(project["projectName"], "\u57ce\u5e02\u8fd0\u884c\u5e73\u53f0\u9879\u76ee")
+        self.assertEqual(
+            project["registrationPeriod"],
+            "2026\u5e749\u67081\u65e5\u81f32026\u5e749\u67088\u65e5",
+        )
+        self.assertEqual(project["bidDeadline"], "2026\u5e749\u670820\u65e59\u65f630\u5206")
+        self.assertTrue(
+            any("\u5e73\u53f0\u5efa\u8bbe" in item["text"] for item in extraction["procurementNeeds"])
+        )
+        self.assertTrue(
+            any("\u6709\u6548\u7684\u8425\u4e1a\u6267\u7167" in item["text"] for item in extraction["requirements"])
+        )
+
+    def test_announcement_evaluation_returns_procurement_associations_without_scoring_them(self) -> None:
+        text = """一、项目基本情况
+项目名称：数字孪生平台项目
+采购需求：建设数字孪生平台并提供数据治理服务。
+二、申请人的资格要求
+1. 投标人须具有有效的营业执照。
+"""
+        knowledge = {
+            "products": [{"id": "PROD-001", "name": "数字孪生平台"}],
+            "capabilities": [{"id": "CAP-001", "name": "数据治理"}],
+            "qualifications": [],
+        }
+        result = evaluate_announcement_eligibility(
+            text,
+            knowledge,
+            {},
+            {"enabled": False},
+            "FILE-NEED",
+        )
+
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertTrue(result["procurementNeeds"])
+        self.assertEqual(result["procurementNeeds"][0]["status"], "已关联")
+        self.assertIn("PROD-001", result["procurementNeeds"][0]["matchedObjectIds"])
 
     def test_successful_model_extraction_is_cached_for_same_notice_and_model(self) -> None:
         text = """一、项目基本情况

@@ -3,8 +3,10 @@ from __future__ import annotations
 import unittest
 import zipfile
 from io import BytesIO
+from pathlib import Path
 
-from backend.app.tender_matching.document_parser import parse_docx, parse_plain_text
+from backend.app.store import Store
+from backend.app.tender_matching.document_parser import parse_doc, parse_docx, parse_plain_text
 
 
 def _docx_with_body(body: str, *, header: str = "", footer: str = "") -> bytes:
@@ -82,6 +84,42 @@ class DocumentParserTests(unittest.TestCase):
         self.assertEqual(parsed["segments"][1]["order"], 1)
         self.assertEqual(parsed["segments"][2]["order"], 2)
         self.assertEqual(parsed["segments"][3]["order"], 3)
+
+    def test_legacy_doc_is_not_decoded_as_plain_utf8(self) -> None:
+        sample = next(
+            (
+                path
+                for path in (Path(__file__).parents[1] / ".." / "runtime").rglob("*.doc")
+            ),
+            None,
+        )
+        if sample is None:
+            self.skipTest("没有可用于回归测试的旧版 DOC 样本")
+
+        parsed = parse_doc(sample.read_bytes())
+
+        self.assertEqual(parsed["parseMethod"], "legacy_doc_structured")
+        self.assertGreater(len(parsed["text"]), 1000)
+        self.assertGreater(sum("\u4e00" <= char <= "\u9fff" for char in parsed["text"]), 100)
+        self.assertNotIn("\ufffd", parsed["text"])
+        self.assertEqual(parsed["segments"], parsed["units"])
+
+    def test_legacy_doc_parse_failure_returns_empty_result_instead_of_garbled_text(self) -> None:
+        parsed = parse_doc(b"not a legacy word document")
+
+        self.assertEqual(parsed["parseMethod"], "legacy_doc_failed")
+        self.assertEqual(parsed["text"], "")
+        self.assertEqual(parsed["segments"], [])
+        self.assertTrue(parsed["warnings"])
+
+        store = Store.__new__(Store)
+        routed = store.extract_document_content(
+            "broken.doc",
+            b"not a legacy word document",
+            "application/msword",
+        )
+        self.assertEqual(routed["parseMethod"], "legacy_doc_failed")
+        self.assertEqual(routed["text"], "")
 
 
 if __name__ == "__main__":

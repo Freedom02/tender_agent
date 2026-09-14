@@ -36,7 +36,25 @@ CATEGORY_LABELS = {
     "other": "其他要求",
 }
 
-EXTRACTION_CACHE_VERSION = "announcement-extraction-v1"
+PROCUREMENT_NEED_CATEGORIES = {
+    "scope",
+    "deliverable",
+    "technical",
+    "service",
+    "quantity",
+    "other",
+}
+
+PROCUREMENT_NEED_LABELS = {
+    "scope": "采购范围",
+    "deliverable": "交付内容",
+    "technical": "技术需求",
+    "service": "服务内容",
+    "quantity": "采购数量",
+    "other": "采购需求",
+}
+
+EXTRACTION_CACHE_VERSION = "announcement-extraction-v2"
 EXTRACTION_CACHE_MAX_SIZE = 64
 _ANNOUNCEMENT_EXTRACTION_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -281,6 +299,19 @@ def _category_for(text: str) -> str:
         return "personnel"
     if any(term in value for term in ("类似项目", "类似业绩", "项目业绩", "合同业绩", "案例")):
         return "performance"
+    if any(
+        term in value
+        for term in (
+            "政府采购法",
+            "独立承担民事责任",
+            "依法缴纳税收",
+            "缴纳社会保障资金",
+            "社会保障资金",
+            "中小企业",
+            "小微企业",
+        )
+    ):
+        return "qualification"
     if any(term in value for term in ("服务地点", "注册地", "属地", "地域", "本地")):
         return "region"
     if "联合体" in value:
@@ -307,6 +338,24 @@ def _category_for(text: str) -> str:
     return "other"
 
 
+def _procurement_need_category(text: str) -> str:
+    value = _compact(text)
+    if (
+        any(term in value for term in ("数量", "采购量", "采购规模", "数量及规格", "人次"))
+        or bool(re.search(r"\d+(?:\.\d+)?\s*(?:套|台|件|项|人次|吨|平方米|公里)", value))
+    ):
+        return "quantity"
+    if any(term in value for term in ("交付", "交货", "成果", "交付物", "验收", "建设完成", "提交报告")):
+        return "deliverable"
+    if any(term in value for term in ("技术", "功能", "性能", "参数", "配置", "接口", "数据", "平台", "系统", "指标")):
+        return "technical"
+    if any(term in value for term in ("服务", "运维", "培训", "实施", "驻场", "售后", "质保", "咨询")):
+        return "service"
+    if any(term in value for term in ("范围", "采购内容", "主要标的", "标的名称", "项目内容", "建设内容")):
+        return "scope"
+    return "other"
+
+
 def _required_count(text: str) -> int | None:
     result = re.search(r"(?:不少于|至少|不低于|具有)\s*(\d+)\s*(?:个|项|名|人)", text)
     return int(result.group(1)) if result else None
@@ -320,9 +369,19 @@ PROJECT_FIELD_LABELS: dict[str, tuple[str, ...]] = {
     "procurementMethod": ("采购方式", "招标方式"),
     "tenderNoticeDate": ("招标公告发布日期", "采购公告发布日期"),
     "noticeDate": ("公告发布日期", "公告时间"),
+    "registrationPeriod": (
+        "获取招标文件时间",
+        "获取采购文件时间",
+        "获取文件时间",
+        "招标文件获取时间",
+        "采购文件获取时间",
+        "报名时间",
+        "报名期限",
+        "发售时间",
+    ),
     "budgetAmount": ("采购预算", "预算金额", "项目预算"),
     "maxPrice": ("最高限价", "控制价", "招标控制价"),
-    "serviceType": ("服务类型", "项目类型", "采购内容", "采购品目"),
+    "serviceType": ("服务类型", "项目类型", "采购品目"),
     "serviceLocation": ("服务地点", "实施地点", "交付地点", "建设地点", "项目地点", "交货地点"),
     "bidDeadline": ("投标截止时间", "响应文件提交截止时间", "递交响应文件截止时间", "提交投标文件截止时间", "截止时间"),
     "openingTime": ("开标时间", "开启时间", "响应文件开启时间"),
@@ -379,7 +438,7 @@ CONTACT_FIELD_LABELS = {
         "agencyPhone": ("联系方式", "联系电话", "项目联系电话"),
     },
 }
-DEFAULT_PROJECT_FIELD_SECTION_PRIORITY = ("basic", "other", "procurement", "bid_opening", "contact", "result")
+DEFAULT_PROJECT_FIELD_SECTION_PRIORITY = ("basic", "needs", "other", "procurement", "bid_opening", "contact", "result")
 PROJECT_FIELD_SECTION_PRIORITY: dict[str, tuple[str, ...]] = {
     "bidDeadline": ("bid_opening", "basic", "other", "procurement", "result"),
     "openingTime": ("bid_opening", "basic", "other", "procurement", "result"),
@@ -387,7 +446,8 @@ PROJECT_FIELD_SECTION_PRIORITY: dict[str, tuple[str, ...]] = {
     "openingLocation": ("bid_opening", "basic", "other", "procurement", "result"),
     "tendererName": ("basic", "contact", "other", "result"),
     "agencyName": ("basic", "contact", "other", "result"),
-    "jointVentureRequirement": ("basic", "qualification", "other", "result"),
+    "jointVentureRequirement": ("basic", "qualification", "needs", "other", "result"),
+    "registrationPeriod": ("procurement", "basic", "needs", "other", "bid_opening", "result"),
 }
 TOP_LEVEL_HEADING = re.compile(r"^(?:第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.．])")
 NUMBERED_PREFIX = r"(?:\s*(?:\d+(?:\.\d+)+\s+|\d+(?:\.\d+)*[、.．、)]|[一二三四五六七八九十]+[、.．]|[（(]\d+[)）])\s*)?"
@@ -398,15 +458,49 @@ SECTION_HEADING_TERMS: dict[str, tuple[str, ...]] = {
         "采购项目基本情况",
         "招标项目基本情况",
         "采购项目用途",
+        "项目用途",
+    ),
+    "needs": (
         "采购需求",
+        "采购内容",
+        "采购内容及技术要求",
+        "简要技术要求",
+        "采购范围",
+        "主要标的",
+        "采购标的",
+        "采购标的一览表",
+        "货物需求及技术规格",
+        "技术规格及要求",
+        "采购数量及技术参数",
+        "功能需求",
+        "服务需求",
+        "商务技术需求",
+        "项目需求",
+        "技术服务要求",
+        "技术和服务要求",
+        "服务内容",
+        "建设内容",
+        "实施内容",
+        "项目内容",
     ),
     "qualification": (
         "申请人的资格要求",
         "投标人的资格要求",
+        "投标人资格",
         "供应商资格要求",
+        "供应商资格",
         "供应商的资格要求",
         "供应商的资格条件",
         "投标人资格条件",
+        "资格要求",
+        "资格条件",
+        "资格审查",
+        "报名资格",
+        "报名条件",
+        "供应商条件",
+        "投标资格",
+        "响应供应商资格",
+        "响应供应商资格要求",
         "资格审查要求",
         "合格投标人",
         "特定资格要求",
@@ -419,6 +513,11 @@ SECTION_HEADING_TERMS: dict[str, tuple[str, ...]] = {
         "招标文件的获取",
         "采购文件的获取",
         "报名及招标文件",
+        "采购文件获取",
+        "招标文件获取",
+        "采购文件领取",
+        "文件领取",
+        "购买招标文件",
     ),
     "bid_opening": (
         "提交投标文件截止时间",
@@ -428,6 +527,13 @@ SECTION_HEADING_TERMS: dict[str, tuple[str, ...]] = {
         "开标时间和地点",
         "开标时间",
         "投标截止时间",
+        "响应文件递交",
+        "递交响应文件",
+        "递交响应文件截止时间",
+        "提交响应文件截止时间",
+        "投标文件递交",
+        "响应文件递交时间",
+        "报价文件提交",
     ),
     "contact": (
         "对本次招标提出询问",
@@ -465,6 +571,10 @@ def _clean_lines(text: str) -> list[tuple[int, str]]:
 
 def _section_type_for_heading(line: str) -> str:
     compact = _compact(line)
+    # Mixed headings such as “采购项目用途、数量、简要技术要求” are
+    # procurement content, not merely project metadata.
+    if any(term in compact for term in SECTION_HEADING_TERMS["needs"]):
+        return "needs"
     for section_type, terms in SECTION_HEADING_TERMS.items():
         if any(term in compact for term in terms):
             return section_type
@@ -473,11 +583,24 @@ def _section_type_for_heading(line: str) -> str:
 
 def _is_announcement_section_heading(line: str) -> bool:
     compact = _compact(line)
+    if TOP_LEVEL_HEADING.match(line) and _section_type_for_heading(line) != "other":
+        return True
     if "：" in line or ":" in line:
         field_labels = tuple(label for labels in PROJECT_FIELD_LABELS.values() for label in labels)
         label_pattern = "|".join(re.escape(label) for label in sorted(field_labels, key=len, reverse=True))
         if re.match(rf"^{NUMBERED_PREFIX}(?:{label_pattern})\s*[:：]", line):
             return False
+        if TOP_LEVEL_HEADING.match(line) and any(
+            term in compact for terms in SECTION_HEADING_TERMS.values() for term in terms
+        ):
+            return True
+        heading_value = re.split(r"[:：]", line, maxsplit=1)[1].strip() if re.search(r"[:：]", line) else ""
+        if (
+            any(term in compact for terms in SECTION_HEADING_TERMS.values() for term in terms)
+            and len(compact) <= 48
+            and len(_compact(heading_value)) <= 2
+        ):
+            return True
     if TOP_LEVEL_HEADING.match(line):
         return True
     if "：" in line or ":" in line:
@@ -489,6 +612,18 @@ def _is_announcement_section_heading(line: str) -> bool:
     )
 
 
+def _split_section_heading_content(line: str) -> tuple[str, str]:
+    """Separate a flattened section heading from its first body value."""
+    match = re.match(
+        r"^(?P<prefix>(?:第[一二三四五六七八九十百]+[章节部分]|"
+        r"[一二三四五六七八九十]+[、.．])\s*.*?[:\uFF1A])(?P<value>.*)$",
+        line,
+    )
+    if not match:
+        return line, ""
+    return match.group("prefix").strip(), match.group("value").strip()
+
+
 def split_announcement_sections(text: str) -> list[dict[str, Any]]:
     lines = _clean_lines(text)
     sections: list[dict[str, Any]] = []
@@ -498,13 +633,18 @@ def split_announcement_sections(text: str) -> list[dict[str, Any]]:
         if _is_announcement_section_heading(line):
             if current is not None:
                 sections.append(current)
+            heading, heading_value = _split_section_heading_content(line)
             current = {
-                "type": _section_type_for_heading(line),
-                "heading": line,
+                "type": _section_type_for_heading(heading),
+                "heading": heading,
                 "startLine": line_number,
                 "endLine": line_number,
-                "lines": [],
-                "text": "",
+                "lines": (
+                    [{"lineNumber": line_number, "text": heading_value}]
+                    if heading_value
+                    else []
+                ),
+                "text": heading_value,
             }
             continue
 
@@ -528,8 +668,69 @@ def split_announcement_sections(text: str) -> list[dict[str, Any]]:
 
 def _label_value(line: str, labels: tuple[str, ...]) -> str:
     label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
-    result = re.match(rf"^{NUMBERED_PREFIX}(?:{label_pattern})\s*[:：]\s*(.+)$", line)
+    result = re.match(rf"^{NUMBERED_PREFIX}(?:{label_pattern})(?=\s*(?:[:：]|$))\s*(?:[:：]\s*)?(.+)$", line)
     return _safe_text(result.group(1), 360) if result else ""
+
+
+def _label_prefix_match(line: str, labels: tuple[str, ...]) -> re.Match[str] | None:
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    return re.match(rf"^{NUMBERED_PREFIX}(?:{label_pattern})(?=\s*(?:[:：]|$))\s*(?:[:：]\s*)?(.*)$", line)
+
+
+def _field_value_from_lines(
+    lines: list[dict[str, Any]],
+    labels: tuple[str, ...],
+    *,
+    max_following_lines: int = 2,
+) -> str:
+    for index, item in enumerate(lines):
+        if not isinstance(item, dict):
+            continue
+        line = str(item.get("text") or "")
+        match = _label_prefix_match(line, labels)
+        if not match:
+            continue
+        value = _safe_text(match.group(1), 360)
+        if value:
+            return value
+        following: list[str] = []
+        for next_item in lines[index + 1 : index + 1 + max_following_lines]:
+            if not isinstance(next_item, dict):
+                continue
+            next_line = _safe_text(next_item.get("text"), 360)
+            if not next_line:
+                continue
+            if _is_announcement_section_heading(next_line):
+                break
+            if any(
+                _label_prefix_match(next_line, candidate_labels)
+                for candidate_labels in PROJECT_FIELD_LABELS.values()
+            ):
+                break
+            following.append(next_line)
+        if following:
+            return _safe_text(" ".join(following), 360)
+    return ""
+
+
+def _field_value_from_section_heading(
+    section: dict[str, Any],
+    labels: tuple[str, ...],
+) -> str:
+    heading = str(section.get("heading") or "")
+    match = _label_prefix_match(heading, labels)
+    if not match:
+        return ""
+    value = _safe_text(match.group(1), 360)
+    if value:
+        return value
+    for item in section.get("lines", []):
+        if not isinstance(item, dict):
+            continue
+        value = _safe_text(item.get("text"), 360)
+        if value:
+            return value
+    return ""
 
 
 def _first_matching_line(
@@ -540,6 +741,19 @@ def _first_matching_line(
     for _, line in lines:
         if any(term in line for term in terms) and (validator is None or validator(line)):
             return line
+    return ""
+
+
+def _infer_project_name(text: str) -> str:
+    for _, line in _clean_lines(text)[:12]:
+        clean = re.sub(r"^(?:关于|有关|\s*)", "", line).strip()
+        clean = re.sub(
+            r"(?:公开招标|竞争性磋商|竞争性谈判|询价|单一来源|采购|招标)?(?:公告|文件)$",
+            "",
+            clean,
+        ).strip(" ：:-")
+        if len(clean) >= 6 and any(term in clean for term in ("项目", "平台", "系统", "服务", "采购", "建设")):
+            return _safe_text(clean, 180)
     return ""
 
 
@@ -608,10 +822,35 @@ def extract_project_fields(text: str) -> dict[str, str]:
 
     for key, labels in PROJECT_FIELD_LABELS.items():
         section_types = PROJECT_FIELD_SECTION_PRIORITY.get(key, DEFAULT_PROJECT_FIELD_SECTION_PRIORITY)
-        for _, line in _ordered_section_lines(sections, section_types):
-            value = _label_value(line, labels)
+        for section_type in section_types:
+            for section in sections:
+                if section.get("type") != section_type:
+                    continue
+                value = _field_value_from_lines(section.get("lines", []), labels)
+                if not value:
+                    value = _field_value_from_section_heading(section, labels)
+                if value:
+                    result[key] = value
+                    break
+            if result[key]:
+                break
+
+    if not result.get("projectName"):
+        result["projectName"] = _infer_project_name(text)
+
+    # Government notices often use a generic “时间” label inside the
+    # document-acquisition section. It is not safe to treat every “时间”
+    # line as a registration period, so scope it to that section only.
+    if not result.get("registrationPeriod"):
+        for section in sections:
+            if section.get("type") != "procurement":
+                continue
+            value = _field_value_from_lines(
+                section.get("lines", []),
+                ("获取时间", "文件获取时间", "报名时间", "时间"),
+            )
             if value:
-                result[key] = value
+                result["registrationPeriod"] = value
                 break
 
     for section in sections:
@@ -718,6 +957,105 @@ def _qualification_section_heading(line: str) -> bool:
             "资格审查要求",
             "合格投标人",
             "特定资格要求",
+            "基本资格条件",
+            "资格审查表",
+            "资格条件表",
+        )
+    )
+
+
+def _looks_like_table_header(line: str) -> bool:
+    """识别公告中的资格审查表、采购清单表头，避免表头被当成条款。"""
+    compact = _compact(line)
+    if not compact:
+        return False
+    header_terms = (
+        "序号",
+        "审查因素",
+        "审查标准",
+        "审查内容",
+        "资格条件",
+        "货物名称",
+        "采购标的",
+        "品目名称",
+        "数量",
+        "单位",
+        "技术参数",
+        "技术要求",
+        "投标响应",
+        "是否偏离",
+        "备注",
+    )
+    matched = sum(term in compact for term in header_terms)
+    has_column_boundary = bool(re.search(r"[|｜\t]", line))
+    if has_column_boundary and matched >= 2:
+        return True
+    return compact.startswith("序号") and matched >= 2
+
+
+def _has_qualification_signal(line: str) -> bool:
+    """判断文本是否包含可核验的投标人资格信号，而不是泛化的供应商动作。"""
+    compact = _compact(line)
+    if not compact:
+        return False
+    signal_terms = (
+        "资格",
+        "资质",
+        "证书",
+        "认证",
+        "许可证",
+        "营业执照",
+        "法定代表人",
+        "授权委托书",
+        "授权书",
+        "身份证明",
+        "独立承担民事责任",
+        "业绩",
+        "项目经理",
+        "项目负责人",
+        "技术负责人",
+        "财务报告",
+        "审计报告",
+        "财务报表",
+        "资信证明",
+        "信用中国",
+        "信用记录",
+        "失信",
+        "重大违法",
+        "政府采购法第二十二条",
+        "依法缴纳税收",
+        "社会保障资金",
+        "社保",
+        "纳税",
+        "中小企业",
+        "小微企业",
+        "联合体",
+        "自然人",
+    )
+    return any(term in compact for term in signal_terms) or (
+        "政府采购法" in compact and "第二十二条" in compact
+    )
+
+
+def _has_requirement_action(line: str) -> bool:
+    compact = _compact(line)
+    return any(
+        term in compact
+        for term in (
+            "须",
+            "应",
+            "具有",
+            "提供",
+            "不得",
+            "不接受",
+            "满足",
+            "符合",
+            "无重大违法记录",
+            "无不良信用记录",
+            "不存在",
+            "未被",
+            "要求",
+            "需",
         )
     )
 
@@ -746,6 +1084,7 @@ def _is_eligibility_requirement(line: str, *, in_qualification_section: bool = F
         or _looks_like_basic_information(line)
         or (_looks_like_project_field_candidate(line) and "联合体" not in compact)
         or _qualification_section_heading(line)
+        or _looks_like_table_header(line)
     ):
         return False
     if any(
@@ -762,50 +1101,11 @@ def _is_eligibility_requirement(line: str, *, in_qualification_section: bool = F
         )
     ):
         return False
-    qualification_terms = (
-        "投标人",
-        "供应商",
-        "申请人",
-        "资格",
-        "资质",
-        "证书",
-        "许可证",
-        "业绩",
-        "项目经理",
-        "项目负责人",
-        "技术负责人",
-        "财务报告",
-        "审计报告",
-        "资信证明",
-        "信用中国",
-        "失信",
-        "重大违法",
-        "联合体",
-        "政府采购法第二十二条",
-        "面向中小企业",
-    )
-    if in_qualification_section:
-        return len(compact) >= 5
     if "联合体" in compact and any(term in compact for term in ("不接受", "不得", "否")):
         return True
-    return any(term in compact for term in qualification_terms) and any(
-        term in compact
-        for term in (
-            "须",
-            "应",
-            "具有",
-            "提供",
-            "不得",
-            "不接受",
-            "满足",
-            "符合",
-            "无重大违法记录",
-            "无不良信用记录",
-            "不存在",
-            "未被",
-            "要求",
-        )
-    )
+    if in_qualification_section:
+        return _has_qualification_signal(line) and _has_requirement_action(line)
+    return _has_qualification_signal(line) and _has_requirement_action(line)
 
 
 def _is_standalone_eligibility_requirement(line: str) -> bool:
@@ -852,7 +1152,7 @@ def _is_standalone_eligibility_requirement(line: str) -> bool:
 def _section_allows_requirement_scan(section_type: str, line: str) -> bool:
     if section_type == "qualification":
         return True
-    if section_type in {"procurement", "bid_opening", "contact", "result"}:
+    if section_type in {"needs", "procurement", "bid_opening", "contact", "result"}:
         return False
     return _is_standalone_eligibility_requirement(line)
 
@@ -888,17 +1188,21 @@ def _model_lines_for_section(section: dict[str, Any]) -> list[tuple[int, str]]:
         line = str(item.get("text") or "")
         if section_type == "qualification":
             result.append((line_number, line))
+        elif section_type == "needs":
+            result.append((line_number, line))
         elif section_type in {"bid_opening", "contact"}:
             result.append((line_number, line))
         elif section_type in {"basic", "other"} and (
-            _looks_like_project_field_candidate(line) or _is_standalone_eligibility_requirement(line)
+            _looks_like_project_field_candidate(line)
+            or _is_standalone_eligibility_requirement(line)
+            or any(term in _compact(line) for term in ("采购需求", "采购内容", "采购范围", "项目概况", "主要标的"))
         ):
             result.append((line_number, line))
     return result
 
 
 def build_announcement_model_input(text: str, *, limit: int = 3600) -> str:
-    chunks: list[str] = []
+    chunks_by_type: dict[str, list[str]] = {}
     for section in split_announcement_sections(text):
         lines = _model_lines_for_section(section)
         if not lines:
@@ -908,10 +1212,39 @@ def build_announcement_model_input(text: str, *, limit: int = 3600) -> str:
         start_line = min(line_number for line_number, _ in lines)
         end_line = max(line_number for line_number, _ in lines)
         body = "\n".join(f"L{line_number}: {line}" for line_number, line in lines)
-        chunks.append(f"[{section_type} | {heading} | L{start_line}-L{end_line}]\n{body}")
-    if not chunks:
+        chunks_by_type.setdefault(section_type, []).append(
+            f"[{section_type} | {heading} | L{start_line}-L{end_line}]\n{body}"
+        )
+    if not chunks_by_type:
         return _trim_model_input(text, limit)
-    return _trim_model_input("\n\n".join(chunks), limit)
+
+    # Allocate the context window by semantic section. A single long
+    # introductory section must not evict the qualification or procurement
+    # sections from the model input.
+    priority = ("qualification", "needs", "basic", "bid_opening", "procurement", "other")
+    weights = {
+        "qualification": 3.0,
+        "needs": 3.0,
+        "basic": 2.0,
+        "bid_opening": 1.5,
+        "procurement": 1.0,
+        "other": 0.5,
+    }
+    active_types = [section_type for section_type in priority if section_type in chunks_by_type]
+    total_weight = sum(weights.get(section_type, 1.0) for section_type in active_types) or 1.0
+    remaining_limit = max(1, int(limit))
+    remaining_weight = total_weight
+    chunks: list[str] = []
+    for index, section_type in enumerate(active_types):
+        payload = "\n\n".join(chunks_by_type[section_type])
+        if index == len(active_types) - 1:
+            budget = remaining_limit
+        else:
+            budget = max(1, int(remaining_limit * weights.get(section_type, 1.0) / remaining_weight))
+        chunks.append(_trim_model_input(payload, budget))
+        remaining_limit = max(1, remaining_limit - budget)
+        remaining_weight = max(0.0, remaining_weight - weights.get(section_type, 1.0))
+    return "\n\n".join(chunks)
 
 
 def _result_notice_warning(notice_type: str) -> str:
@@ -929,15 +1262,199 @@ def _split_requirement_line(line: str) -> list[str]:
     return parts or [cleaned]
 
 
+def _split_procurement_line(line: str) -> list[str]:
+    """按公告常见的分号或表格列拆开采购需求，保留可追溯的原文信息。"""
+    cleaned = re.sub(rf"^{NUMBERED_PREFIX}", "", line).strip().rstrip("；;").strip()
+    if "|" in cleaned or "｜" in cleaned:
+        columns = [
+            _safe_text(part, 1000).strip()
+            for part in re.split(r"[|｜]", cleaned)
+            if _safe_text(part, 1000).strip()
+        ]
+        if columns and re.fullmatch(r"\d+(?:\.\d+)?", columns[0]):
+            columns = columns[1:]
+        if columns:
+            return ["；".join(columns)]
+    return [
+        _safe_text(part, 1000).rstrip("；;").strip()
+        for part in re.split(r"[；;]+", cleaned)
+        if _safe_text(part, 1000)
+    ] or [cleaned]
+
+
+def _clean_procurement_item(text: str) -> str:
+    labels = (
+        "采购需求",
+        "采购内容",
+        "采购范围",
+        "主要标的",
+        "采购标的",
+        "项目概况",
+        "服务内容",
+        "技术要求",
+        "建设内容",
+        "实施内容",
+    )
+    match = _label_prefix_match(text, labels)
+    return _safe_text(match.group(1), 1200) if match else _safe_text(text, 1200)
+
+
+def _looks_like_procurement_need(line: str) -> bool:
+    compact = _compact(line)
+    if (
+        not compact
+        or _qualification_section_heading(line)
+        or _looks_like_table_header(line)
+        or _is_eligibility_requirement(line)
+    ):
+        return False
+    if any(
+        term in compact
+        for term in (
+            "采购人信息",
+            "代理机构信息",
+            "联系方式",
+            "项目联系人",
+            "评审专家",
+            "获取招标文件",
+            "获取采购文件",
+            "购买招标文件",
+            "文件领取",
+            "报名时间",
+            "截止时间",
+            "开标时间",
+            "提交投标文件",
+            "递交响应文件",
+        )
+    ):
+        return False
+    if _looks_like_project_field_candidate(line) and not any(
+        term in compact for term in ("采购需求", "采购内容", "采购范围", "主要标的", "项目概况", "服务内容", "技术要求")
+    ):
+        return False
+    if any(
+        term in compact
+        for term in (
+            "采购需求",
+            "采购内容",
+            "采购范围",
+            "主要标的",
+            "项目概况",
+            "服务内容",
+            "技术要求",
+            "建设内容",
+            "实施内容",
+            "项目内容",
+            "技术参数",
+            "货物名称",
+            "功能",
+            "平台",
+            "系统",
+            "数据",
+            "服务",
+            "交付",
+            "成果",
+        )
+    ):
+        return len(compact) >= 4
+    return any(term in compact for term in ("本项目", "建设", "开发", "实施", "提供")) and len(compact) >= 8
+
+
+def _procurement_need_items(sections: list[dict[str, Any]], project: dict[str, str]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_item(text: str, section: str, line_number: int, category: str | None = None) -> None:
+        clean = _clean_procurement_item(text).rstrip("；;").strip()
+        if not clean:
+            return
+        if (
+            _looks_like_table_header(clean)
+            or _is_eligibility_requirement(clean)
+            or any(
+                term in _compact(clean)
+                for term in (
+                    "获取招标文件",
+                    "获取采购文件",
+                    "购买招标文件",
+                    "文件领取",
+                    "提交投标文件",
+                    "递交响应文件",
+                    "开标时间",
+                    "联系方式",
+                )
+            )
+        ):
+            return
+        key = _compact(clean)
+        if not key or key in seen or len(items) >= 48:
+            return
+        seen.add(key)
+        need_category = category or _procurement_need_category(clean)
+        items.append(
+            {
+                "id": f"need-{len(items) + 1:03d}",
+                "category": need_category if need_category in PROCUREMENT_NEED_CATEGORIES else "other",
+                "text": clean,
+                "section": section or "采购需求",
+                "sourceLocator": f"第{line_number}行" if line_number else "",
+                "mandatory": False,
+                "confidence": 0.86 if section else 0.66,
+            }
+        )
+
+    for section in sections:
+        section_type = str(section.get("type") or "")
+        if section_type not in {"needs", "basic"}:
+            continue
+        heading = str(section.get("heading") or "采购需求")
+        for item in section.get("lines", []):
+            if not isinstance(item, dict):
+                continue
+            line = str(item.get("text") or "")
+            line_number = int(item.get("lineNumber") or 0)
+            if not _looks_like_procurement_need(line):
+                continue
+            if section_type == "basic":
+                # Basic sections may contain a single labeled procurement field;
+                # keep only its value instead of copying the field label twice.
+                matched = _label_prefix_match(
+                    line,
+                    (
+                        "采购需求", "采购内容", "采购范围", "主要标的", "采购标的",
+                        "项目概况", "服务内容", "技术要求", "建设内容", "实施内容",
+                    ),
+                )
+                if not matched:
+                    if _looks_like_procurement_need(line):
+                        for clause in _split_procurement_line(line):
+                            add_item(clause, heading, line_number)
+                    continue
+                value = _safe_text(matched.group(1), 1200)
+                if value:
+                    for clause in _split_procurement_line(value):
+                        add_item(clause, heading, line_number)
+            else:
+                for clause in _split_procurement_line(line):
+                    add_item(clause, heading, line_number)
+
+    # A structured serviceType is often the only procurement clue in short notices.
+    if not items and project.get("serviceType"):
+        add_item(project["serviceType"], "项目基本情况", 0, "scope")
+    return items
+
+
 def extract_requirements_by_rule(text: str) -> dict[str, Any]:
     sections = split_announcement_sections(text)
     project = extract_project_fields(text)
     if project.get("noticeType") in RESULT_NOTICE_TYPES and not _is_full_tender_document(text):
         return {
             "project": project,
+            "procurementNeeds": [],
             "requirements": [],
             "warnings": [_result_notice_warning(str(project.get("noticeType", "")))],
         }
+    procurement_needs = _procurement_need_items(sections, project)
 
     requirements: list[dict[str, Any]] = []
 
@@ -984,6 +1501,7 @@ def extract_requirements_by_rule(text: str) -> dict[str, Any]:
         warnings.append("未识别到明确资格准入条款，请确认粘贴的是招标公告正文而不是中标、结果或新闻页面。")
     return {
         "project": project,
+        "procurementNeeds": procurement_needs,
         "requirements": requirements,
         "warnings": warnings,
     }
@@ -1044,6 +1562,39 @@ def _normalize_model_extraction(value: dict[str, Any]) -> dict[str, Any] | None:
             }
         )
 
+    procurement_needs: list[dict[str, Any]] = []
+    raw_needs = value.get("procurementNeeds")
+    if isinstance(raw_needs, list):
+        for raw in raw_needs[:48]:
+            if not isinstance(raw, dict):
+                continue
+            need_text = _clean_procurement_item(raw.get("text") or raw.get("requirement"))
+            if not need_text:
+                continue
+            # The model occasionally echoes a qualification row into the
+            # procurement array. Drop it here before merging with rules.
+            if not _looks_like_procurement_need(need_text):
+                continue
+            category = str(raw.get("category") or _procurement_need_category(need_text)).lower()
+            if category not in PROCUREMENT_NEED_CATEGORIES:
+                category = _procurement_need_category(need_text)
+            confidence = raw.get("confidence", 0.7)
+            try:
+                confidence = min(max(float(confidence), 0), 1)
+            except (TypeError, ValueError):
+                confidence = 0.7
+            procurement_needs.append(
+                {
+                    "id": str(raw.get("id") or f"llm-need-{len(procurement_needs) + 1:03d}"),
+                    "category": category,
+                    "text": need_text,
+                    "section": _safe_text(raw.get("section") or "采购需求", 120),
+                    "sourceLocator": _safe_text(raw.get("sourceLocator"), 120),
+                    "mandatory": bool(raw.get("mandatory", False)),
+                    "confidence": confidence,
+                }
+            )
+
     project = value.get("project") if isinstance(value.get("project"), dict) else {}
     return {
         "project": {
@@ -1051,6 +1602,7 @@ def _normalize_model_extraction(value: dict[str, Any]) -> dict[str, Any] | None:
             for key in (*PROJECT_FIELD_KEYS, "noticeType", "tendererAddress", "tendererContact", "tendererPhone", "agencyAddress", "agencyContact", "agencyPhone")
             if _safe_text(project.get(key), 180)
         },
+        "procurementNeeds": procurement_needs,
         "requirements": requirements,
         "warnings": [
             warning
@@ -1065,11 +1617,40 @@ def _merge_project_fields(rule_project: dict[str, str], model_project: dict[str,
     merged = dict(rule_project)
     compact_source = _compact(source_text)
     for key, value in model_project.items():
-        if merged.get(key) or not value:
+        if not value:
             continue
-        if _compact(value) in compact_source:
+        current = _compact(merged.get(key))
+        candidate = _compact(value)
+        # Prefer a rule value only when it is a meaningful, source-backed field.
+        # A model value may repair a bad one-line rule capture or a multiline field.
+        if current and len(current) >= 4 and candidate not in compact_source:
+            continue
+        if candidate in compact_source or not current or len(current) < 4:
             merged[key] = value
     return merged
+
+
+def _merge_procurement_needs(
+    rule_needs: list[dict[str, Any]],
+    model_needs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for need in [*rule_needs, *model_needs]:
+        text = _safe_text(need.get("text"), 1200)
+        key = _compact(text)
+        if not key or key in seen:
+            continue
+        if not _looks_like_procurement_need(text):
+            continue
+        if any(key in existing or existing in key for existing in seen if min(len(existing), len(key)) >= 16):
+            continue
+        seen.add(key)
+        category = str(need.get("category") or _procurement_need_category(text)).lower()
+        if category not in PROCUREMENT_NEED_CATEGORIES:
+            category = _procurement_need_category(text)
+        merged.append({**need, "id": f"need-{len(merged) + 1:03d}", "category": category, "text": text})
+    return merged[:48]
 
 
 def _merge_requirements(
@@ -1081,6 +1662,8 @@ def _merge_requirements(
     for requirement in [*rule_requirements, *model_requirements]:
         key = _compact(requirement.get("text"))
         if not key or key in seen:
+            continue
+        if not _is_eligibility_requirement(str(requirement.get("text") or ""), in_qualification_section=True):
             continue
         if any(key in existing or existing in key for existing in seen if min(len(existing), len(key)) >= 12):
             continue
@@ -1108,18 +1691,21 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
 
     prompt = (
         "你是招投标公告结构化抽取助手。必须把项目基础信息与资格准入条款严格分开。"
-        "project 只放基础信息；requirements 只放投标人/供应商资格准入条件，不得放项目名称、编号、预算、采购范围、时间地点或联系方式。"
+        "project 只放基础信息；procurementNeeds 只放采购范围、主要标的、技术参数、服务内容、交付成果和数量；requirements 只放投标人/供应商资格准入条件。"
+        "采购需求绝不能塞进 requirements，资格条件也不能塞进 procurementNeeds。"
         "只提取原文明确写出的内容，不得推断企业是否满足。"
         "输出严格 JSON，不使用 Markdown。JSON 格式为："
         '{"project":{"projectName":"","projectCode":"","tendererName":"","agencyName":"","procurementMethod":"","noticeType":"",'
         '"tenderNoticeDate":"","noticeDate":"","budgetAmount":"","maxPrice":"","serviceType":"","serviceLocation":"","bidDeadline":"","openingTime":"",'
         '"bidLocation":"","openingLocation":"","projectDuration":"","warrantyRequirement":"","bidCopyRequirement":"",'
-        '"packagingRequirement":"","signatureSealRequirement":"","jointVentureRequirement":""},'
+        '"packagingRequirement":"","signatureSealRequirement":"","jointVentureRequirement":"","registrationPeriod":""},'
+        '"procurementNeeds":[{"id":"need-001","category":"scope|deliverable|technical|service|quantity|other",'
+        '"section":"采购需求","sourceLocator":"原文位置","text":"原始采购需求","mandatory":false,"confidence":0.0}],'
         '"requirements":[{"id":"req-001","category":"qualification|performance|personnel|financial|region|credit|rejection|technical|other",'
         '"section":"资格条件","sourceLocator":"原文位置","requirementGroup":"enterprise_qualification|personnel_qualification|'
         'project_performance|financial_condition|credit_condition|consortium_condition",'
         '"text":"原始资格要求","mandatory":true,"isRejection":false,"quantity":null,"timeLimit":"","confidence":0.0}],"warnings":[]}'
-        "。企业资质、人员资质、业绩、财务和信用要求应分别分类；每条 requirement 只保留一个可核验资格条件。"
+        "。企业资质、人员资质、业绩、财务和信用要求应分别分类；每条 requirement 只保留一个可核验资格条件。采购需求按原文拆成独立、可追溯的条目。"
         "warnings 仅用于公告类型不适合资格判断、正文疑似截断或原文存在冲突，不要为普通基础字段缺失生成警告。"
     )
     model_text = build_announcement_model_input(text, limit=3600)
@@ -1153,6 +1739,10 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
         normalized = _normalize_model_extraction(_json_from_model(result["content"]) or {})
         if normalized:
             merged_project = _merge_project_fields(rule_result["project"], normalized["project"], text)
+            merged_procurement_needs = _merge_procurement_needs(
+                rule_result.get("procurementNeeds", []),
+                normalized.get("procurementNeeds", []),
+            )
             merged_requirements = _merge_requirements(
                 rule_result["requirements"],
                 normalized["requirements"],
@@ -1160,6 +1750,7 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
             return _remember_announcement_extraction(cache_key, {
                 **normalized,
                 "project": merged_project,
+                "procurementNeeds": merged_procurement_needs,
                 "requirements": merged_requirements,
                 "warnings": list(dict.fromkeys([*rule_result["warnings"], *normalized["warnings"]])),
                 "extractionMethod": "llm+rule",
@@ -1322,6 +1913,53 @@ def _candidate_records(category: str, text: str, knowledge: dict[str, Any]) -> l
     return []
 
 
+def _procurement_candidate_records(text: str, knowledge: dict[str, Any]) -> list[dict[str, Any]]:
+    records = [
+        *_list_of_dicts(knowledge.get("products")),
+        *_list_of_dicts(knowledge.get("capabilities")),
+        *_list_of_dicts(knowledge.get("industryScenarios")),
+        *_list_of_dicts(knowledge.get("businessDirections")),
+    ]
+    normalized_text = _compact(text)
+    matched: list[dict[str, Any]] = []
+    for record in records:
+        terms = [
+            term for term in _record_terms(record)
+            if len(term) >= 4 and term not in {"平台", "系统", "服务", "项目", "数据", "技术"}
+        ]
+        if any(term in normalized_text for term in terms):
+            matched.append(record)
+    return matched
+
+
+def _evaluate_procurement_needs(
+    needs: list[dict[str, Any]],
+    company_knowledge: dict[str, Any],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for need in needs:
+        text = _safe_text(need.get("text"), 1200)
+        matched = _procurement_candidate_records(text, company_knowledge)
+        evidences = _evidence_for_records(matched, company_knowledge)
+        result.append(
+            {
+                **need,
+                "status": "已关联" if matched else "待关联",
+                "matchedObjectIds": [str(item.get("id", "")) for item in matched if item.get("id")],
+                "matchedObjects": [
+                    {
+                        "id": str(item.get("id", "")),
+                        "name": str(item.get("name") or item.get("id") or ""),
+                        "category": str(item.get("category", "")),
+                    }
+                    for item in matched[:6]
+                ],
+                "evidenceItems": [normalize_evidence(item) for item in evidences],
+            }
+        )
+    return result
+
+
 def _score_for_status(status: str) -> int:
     return {
         "满足": 100,
@@ -1341,6 +1979,10 @@ def evaluate_announcement_eligibility(
     source_file_id: str = "",
 ) -> dict[str, Any]:
     extraction = extract_announcement_requirements(text, ai)
+    procurement_needs = _evaluate_procurement_needs(
+        extraction.get("procurementNeeds", []),
+        company_knowledge,
+    )
     rows: list[dict[str, Any]] = []
     hard_blockers: list[dict[str, Any]] = []
     weights = {
@@ -1495,6 +2137,7 @@ def evaluate_announcement_eligibility(
         "decision": decision,
         "summary": summary,
         "project": extraction["project"],
+        "procurementNeeds": procurement_needs,
         "extraction": {
             "method": extraction["extractionMethod"],
             "modelUsed": extraction["modelUsed"],

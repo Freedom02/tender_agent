@@ -11,6 +11,7 @@ import type {
   LibrarySummary,
   MaterialProfile,
   MonitoringStatus,
+  MonitorRunSite,
   Workspace
 } from "../shared/types";
 
@@ -61,7 +62,10 @@ export function useAppState() {
   });
 
   const selectedProject = computed(
-    () => catalog.value.find((item) => item.id === selectedProjectId.value) || null
+    () =>
+      catalog.value.find((item) => item.id === selectedProjectId.value) ||
+      selectedWorkspace.value?.project ||
+      null
   );
   const selectedWorkspace = computed(
     () => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) || null
@@ -176,7 +180,7 @@ export function useAppState() {
       }
       const existing = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (existing >= 0) workspaces.value[existing] = result.workspace;
-      else workspaces.value.unshift(result.workspace);
+      else workspaces.value.push(result.workspace);
       selectedWorkspaceId.value = result.workspace.id;
       importKind.value = result.workspace.reasoning?.fineReview ? "tender_document" : "notice";
       activeTab.value = "matching";
@@ -289,7 +293,6 @@ export function useAppState() {
         payload.name = file.name;
       }
       const result = await api.importDocument(payload);
-      catalog.value.unshift(result.item);
       selectedProjectId.value = result.item.id;
       importForm.name = "";
       importForm.text = "";
@@ -325,7 +328,7 @@ export function useAppState() {
       const result = await api.updateFineReviewStatus(selectedWorkspace.value.id, rowId, status);
       const index = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (index >= 0) workspaces.value[index] = result.workspace;
-      else workspaces.value.unshift(result.workspace);
+      else workspaces.value.push(result.workspace);
       selectedWorkspaceId.value = result.workspace.id;
       ElMessage.success("人工匹配结论已保存");
     } catch (error) {
@@ -395,7 +398,26 @@ export function useAppState() {
         });
       }
       await loadBootstrap();
-      ElMessage.success(`抓取完成：匹配 ${result.matchedCount} 条，新增 ${result.addedCount} 条`);
+      const failedSites = (result.sites || []).filter((site: MonitorRunSite) => !site.success);
+      const failedSummary = failedSites
+        .map((site) => `${site.name}：${site.error || site.status}`)
+        .join("；");
+      if (result.status === "抓取失败") {
+        ElMessage.error(failedSummary || "所有启用的监控网站均抓取失败，请检查网络或网站配置");
+      } else if (failedSites.length) {
+        ElMessage.warning(
+          `${result.status}：抓取到 ${result.collectedCount || 0} 条，匹配 ${result.matchedCount} 条` +
+          (failedSummary ? `；失败站点：${failedSummary}` : "")
+        );
+      } else if (result.status === "抓取完成但未获取到公告") {
+        ElMessage.warning("抓取完成，但监控网站未返回公告，请检查关键词、时间范围或网站解析规则");
+      } else if (result.status === "抓取完成但没有匹配公告") {
+        ElMessage.warning(
+          `抓取完成：获取 ${result.collectedCount} 条公告，但没有符合当前企业画像的项目`
+        );
+      } else {
+        ElMessage.success(`抓取完成：匹配 ${result.matchedCount} 条，新增 ${result.addedCount} 条`);
+      }
     } catch (error) {
       ElMessage.error((error as Error).message);
     } finally {

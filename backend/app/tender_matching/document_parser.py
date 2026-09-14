@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import struct
 import zipfile
 from io import BytesIO
 from typing import Any
@@ -346,6 +347,109 @@ def parse_docx(content: bytes) -> dict[str, Any]:
             "tableCount": len(tables),
         },
         "parseMethod": "docx_xml_structured",
+        "warnings": warnings,
+    }
+
+
+def _legacy_doc_empty_result(warnings: list[str]) -> dict[str, Any]:
+    return {
+        "text": "",
+        "segments": [],
+        "units": [],
+        "tables": [],
+        "metadata": {},
+        "parseMethod": "legacy_doc_failed",
+        "warnings": warnings,
+    }
+
+
+def _pad_legacy_doc_to_sector_boundary(content: bytes) -> tuple[bytes, bool]:
+    """Pad a truncated OLE tail without changing the document payload.
+
+    Some government procurement sites append a short tail to an old .doc file
+    or omit the final padding bytes of the last OLE sector.  The document can
+    still be read safely when that missing sector padding is restored with
+    zeroes.  We only do this for a valid OLE header and never for arbitrary
+    binary/text uploads.
+    """
+    if len(content) < 32 or content[:8] != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return content, False
+    try:
+        sector_shift = struct.unpack_from("<H", content, 0x1E)[0]
+    except struct.error:
+        return content, False
+    if sector_shift not in {9, 12}:
+        return content, False
+    sector_size = 1 << sector_shift
+    remainder = len(content) % sector_size
+    if remainder == 0:
+        return content, False
+    return content + (b"\x00" * (sector_size - remainder)), True
+
+
+def parse_doc(content: bytes) -> dict[str, Any]:
+    """Parse a binary Word 97-2003 document into the common text structure.
+
+    A legacy .doc is an OLE compound binary file, not UTF-8 text.  Keeping a
+    separate parser is important: falling through to ``parse_plain_text``
+    produces apparently valid but unusable mojibake and pollutes matching.
+    """
+    try:
+        from legacy_doc import extract_text
+    except Exception:
+        return _legacy_doc_empty_result([
+            "未安装旧版 DOC 解析依赖，请安装 legacy-doc 后重试。",
+        ])
+
+    padded_content, padded = _pad_legacy_doc_to_sector_boundary(content)
+    warnings: list[str] = []
+    if padded:
+        warnings.append("检测到 DOC 文件尾部不是完整 OLE 扇区，已补齐后解析。")
+
+    try:
+        extraction = extract_text(padded_content)
+    except Exception as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        return _legacy_doc_empty_result([
+            f"旧版 DOC 文件解析失败：{detail}。请用 Word 打开后另存为 DOCX，再重新上传。",
+            *warnings,
+        ])
+
+    text = str(getattr(extraction, "text", "") or "").strip()
+    if not text:
+        return _legacy_doc_empty_result([
+            "旧版 DOC 未提取到正文文字，请用 Word 打开后另存为 DOCX，再重新上传。",
+            *warnings,
+        ])
+
+    segments: list[dict[str, Any]] = []
+    for index, line in enumerate(text.splitlines(), start=1):
+        value = _clean_text(line)
+        if not value:
+            continue
+        record = {
+            "id": f"SEG-{len(segments) + 1:06d}",
+            "sourceLocator": f"第{index}段",
+            "text": value,
+            "contentType": "paragraph",
+            "order": len(segments),
+            "paragraphIndex": index,
+            "style": {},
+        }
+        segments.append(record)
+
+    extraction_warnings = getattr(extraction, "warnings", ()) or ()
+    warnings.extend(str(item) for item in extraction_warnings if str(item).strip())
+    metadata = dict(getattr(extraction, "metadata", {}) or {})
+    metadata["paragraphCount"] = len(segments)
+    metadata["paddedToSectorBoundary"] = padded
+    return {
+        "text": "\n".join(item["text"] for item in segments),
+        "segments": segments,
+        "units": segments.copy(),
+        "tables": [],
+        "metadata": metadata,
+        "parseMethod": "legacy_doc_structured",
         "warnings": warnings,
     }
 

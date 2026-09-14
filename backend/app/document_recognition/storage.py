@@ -185,6 +185,66 @@ def build_profile(facts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_company_knowledge(facts: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Build the discovery vocabulary from the M3 enterprise facts.
+
+    The qualification and evidence facts remain available to later matching
+    stages. This projection is specifically for opportunity discovery and
+    keeps business scope, scenarios, products and capabilities separate.
+    """
+    org = facts.get("organization") or {}
+
+    def split_values(*values: Any) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            result.extend(_split_text(value))
+        return _dedupe(result)
+
+    def named_rows(prefix: str, values: list[str], description: str = "") -> list[dict[str, Any]]:
+        return [
+            {"id": f"{prefix}-{index}", "name": value, "description": description}
+            for index, value in enumerate(values, start=1)
+        ]
+
+    direction_values = split_values(
+        org.get("serviceScope"),
+        org.get("productScope"),
+    )
+    scenario_values = split_values(
+        org.get("industryScope"),
+        *(row.get("industry", "") for row in facts.get("performance_case", []) if isinstance(row, dict)),
+        *(row.get("applicableScenario", "") for row in facts.get("technical_product", []) if isinstance(row, dict)),
+    )
+    capability_values = split_values(
+        org.get("capabilities"),
+        *(row.get("serviceScope", "") for row in facts.get("performance_case", []) if isinstance(row, dict)),
+        *(row.get("description", "") for row in facts.get("technical_parameter", []) if isinstance(row, dict)),
+    )
+
+    products: list[dict[str, Any]] = []
+    for row in facts.get("technical_product", []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("productName") or "").strip()
+        if not name:
+            continue
+        products.append({
+            "id": str(row.get("productId") or f"product-{len(products) + 1}"),
+            "name": name,
+            "aliases": row.get("aliases", ""),
+            "description": row.get("description", ""),
+            "category": row.get("category", ""),
+            "applicableScenario": row.get("applicableScenario", ""),
+        })
+
+    return {
+        "businessDirections": named_rows("direction", direction_values),
+        "industryScenarios": named_rows("scenario", scenario_values),
+        "products": products,
+        "capabilities": named_rows("capability", capability_values),
+    }
+
+
 # ============================================================
 # 工具函数
 # ============================================================

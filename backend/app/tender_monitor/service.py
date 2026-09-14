@@ -139,14 +139,37 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
     config = ensure_config(store.config)
     monitoring = config["monitoring"]
     if not monitoring.get("enabled", True):
-        return {"status": "监控已暂停", "addedCount": 0, "matchedCount": 0, "dedupedCount": 0, "items": []}
+        return {
+            "status": "监控已暂停",
+            "addedCount": 0,
+            "matchedCount": 0,
+            "dedupedCount": 0,
+            "collectedCount": 0,
+            "items": [],
+            "sites": [],
+            "monitoring": monitoring_status(store),
+        }
 
     sites = monitoring["sites"]
     targets = [site for site in sites if site.get("enabled") and (not site_id or site["id"] == site_id)]
     if site_id and not targets:
-        return {"status": "监控网站未启用", "addedCount": 0, "matchedCount": 0, "dedupedCount": 0, "items": []}
+        return {
+            "status": "监控网站未启用",
+            "addedCount": 0,
+            "matchedCount": 0,
+            "dedupedCount": 0,
+            "collectedCount": 0,
+            "items": [],
+            "sites": [],
+            "monitoring": monitoring_status(store),
+        }
 
     existing_keys = _existing_keys(store)
+    existing_items_by_key = {
+        _dedupe_key(item): item
+        for item in store.catalog
+        if _dedupe_key(item)
+    }
     added: list[dict[str, Any]] = []
     matched_count = 0
     deduped_count = 0
@@ -162,9 +185,21 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
         try:
             candidates = _candidate_notices(store, site)
         except (CustomSiteError, MonitorAdapterError) as exc:
-            site["status"] = f"抓取失败：{str(exc)[:80]}"
+            detail = str(exc).strip() or "未知错误"
+            site["status"] = f"抓取失败：{detail[:80]}"
             site["latest"] = fetched_at[:16].replace("T", " ")
-            site_results.append({"siteId": site["id"], "name": site["name"], "status": site["status"], "count": 0})
+            site["next"] = _next_time(frequency)
+            site_results.append({
+                "siteId": site["id"],
+                "name": site["name"],
+                "success": False,
+                "status": site["status"],
+                "error": detail[:240],
+                "count": 0,
+                "matchedCount": 0,
+                "addedCount": 0,
+                "dedupedCount": 0,
+            })
             continue
         collected_count += len(candidates)
         for candidate in candidates:
@@ -183,6 +218,31 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
             if key in existing_keys:
                 deduped_count += 1
                 site_deduped_count += 1
+                # A previous crawl may have stored only the national-platform
+                # summary page.  The current candidate can now contain the
+                # linked body page and its extracted time fields; merge those
+                # newly discovered values into the existing project instead
+                # of leaving the UI at “待核验” forever.
+                existing_item = existing_items_by_key.get(key)
+                if existing_item is not None:
+                    updated = False
+                    for field in (
+                        "contentUrl", "registrationPeriod", "registrationDeadline",
+                        "bidDeadline", "budget", "buyerName", "projectName",
+                    ):
+                        value = candidate.get(field)
+                        if value and not existing_item.get(field):
+                            existing_item[field] = value
+                            updated = True
+                    candidate_text = str(candidate.get("analysisText") or "")
+                    if len(candidate_text) > len(str(existing_item.get("analysisText") or "")):
+                        existing_item["analysisText"] = candidate_text[:12000]
+                        updated = True
+                    if updated:
+                        existing_item["crawlMeta"] = {
+                            **(existing_item.get("crawlMeta") or {}),
+                            "detailEnrichedAt": fetched_at,
+                        }
                 continue
             item = {
                 **candidate,
@@ -195,6 +255,9 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
                 "matchedCapabilities": match["matchedCapabilities"],
                 "matchedKeywords": match["matchedKeywords"],
                 "matchReasons": match["reasons"],
+                "matchEvidence": match["matchEvidence"],
+                "scoreBreakdown": match["scoreBreakdown"],
+                "scoreVersion": match["scoreVersion"],
                 "excludeReason": match["excludeReason"],
                 "nextStage": match["nextStage"],
                 "shouldAnalyze": match["shouldAnalyze"],
@@ -224,6 +287,7 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
             }
             store.catalog.insert(0, item)
             existing_keys.add(key)
+            existing_items_by_key[key] = item
             added.append(item)
             site_added_count += 1
 
@@ -233,6 +297,7 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
         site_results.append({
             "siteId": site["id"],
             "name": site["name"],
+            "success": True,
             "status": site["status"],
             "count": len(candidates),
             "matchedCount": site_matched_count,
@@ -251,8 +316,21 @@ def run_monitoring(store: "Store", site_id: str = "") -> dict[str, Any]:
     store.persist_catalog()
     store.persist_runtime()
 
+    failed_sites = [site for site in site_results if not site.get("success", False)]
+    successful_sites = [site for site in site_results if site.get("success", False)]
+    if failed_sites and successful_sites:
+        status = "部分站点抓取完成"
+    elif failed_sites:
+        status = "抓取失败"
+    elif collected_count == 0:
+        status = "抓取完成但未获取到公告"
+    elif matched_count == 0:
+        status = "抓取完成但没有匹配公告"
+    else:
+        status = "抓取完成"
+
     return {
-        "status": "抓取完成",
+        "status": status,
         "addedCount": len(added),
         "matchedCount": matched_count,
         "dedupedCount": deduped_count,
@@ -284,7 +362,8 @@ def test_monitor_site(site: dict[str, Any]) -> dict[str, Any]:
 def search_catalog(store: "Store", payload: dict[str, Any]) -> dict[str, Any]:
     valid_items = [
         item for item in store.catalog
-        if is_procurement_notice(
+        if item.get("dataOrigin") != "local_upload"
+        and is_procurement_notice(
             str(item.get("title", "")),
             str(item.get("analysisText", "")),
             str(item.get("sourceUrl") or item.get("detailUrl") or ""),

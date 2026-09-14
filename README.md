@@ -143,6 +143,7 @@ AI / 监控 / 通知等本机密钥统一放 `agent-config.json`（参考 `.env.
 
 ## 文档索引
 
+- [项目现状与功能链路](docs/PROJECT_STATUS.md)：当前版本各功能的输入、处理、输出、数据落点、已解决问题和技术边界
 - [开发文档](docs/DEVELOPMENT_GUIDE.md)：启动、接口、数据流、三层匹配架构与分阶段计划
 - [项目文件清单](docs/PROJECT_FILE_CATALOG.md)：目录、逐文件职责与修改边界
 - [本体设计](docs/ontology/00_总览与命名空间.md)：命名空间、8 类 8 关系、跨簇衔接

@@ -24,8 +24,8 @@ const emit = defineEmits<{
       </div>
     </template>
 
-    <el-table v-if="items.length" :data="items" stripe>
-      <el-table-column label="项目名称" min-width="320">
+    <el-table v-if="items.length" class="follow-up-table" :data="items" stripe>
+      <el-table-column label="项目名称" width="300">
         <template #default="{ row }">
           <a
             v-if="row.sourceUrl"
@@ -40,19 +40,19 @@ const emit = defineEmits<{
           <span v-else class="project-link project-link-disabled">{{ row.title }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="category" label="类型" width="150" />
-      <el-table-column prop="region" label="地区" min-width="170" />
-      <el-table-column label="报名时间" min-width="220">
+      <el-table-column prop="category" label="类型" width="108" />
+      <el-table-column prop="region" label="地区" width="100" />
+      <el-table-column label="获取文件时间" width="188">
         <template #default="{ row }">
-          {{ row.registrationPeriod || row.registrationDeadline || "待核验" }}
+          {{ row.registrationPeriod || "待核验" }}
         </template>
       </el-table-column>
-      <el-table-column label="响应文件截止时间" min-width="220" class-name="deadline-col">
+      <el-table-column label="响应文件截止时间" width="188" class-name="deadline-col">
         <template #default="{ row }">
           {{ row.bidDeadline || "待核验" }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
+      <el-table-column label="操作" width="112" fixed="right">
         <template #default="{ row }">
           <div class="action-stack">
             <el-button size="small" :icon="Flag" type="success" plain @click="emit('removeFollowUp', row)">取消跟进</el-button>
@@ -67,8 +67,21 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
-:deep(.deadline-col .cell) {
-  padding-left: 24px !important;
+:deep(.tender-monitor-table .cell),
+:deep(.follow-up-table .cell) {
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+:deep(.follow-up-table .cell),
+:deep(.tender-monitor-table .cell) {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+:deep(.follow-up-table .deadline-col .cell) {
+  padding-left: 6px !important;
 }
 
 .action-stack {
@@ -79,5 +92,7 @@ const emit = defineEmits<{
 }
 .action-stack :deep(.el-button) {
   margin-left: 0 !important;
+  padding-right: 6px;
+  padding-left: 6px;
 }
 </style>

@@ -104,15 +104,13 @@ function updateDraft(value: string) {
   if (selectedWorkspace.value) selectedWorkspace.value.draft = value;
 }
 
-function enterMatching(item: CatalogItem) {
+async function enterMatching(item: CatalogItem) {
   selectProject(item);
   importForm.name = item.title || "";
   importForm.text = item.analysisText || "";
-  if (item.workspaceId) {
-    activeTab.value = "matching";
-  } else {
-    analyzeProject(item.id);
-  }
+  await analyzeProject(item.id);
+  const refreshed = catalog.value.find((entry) => entry.id === item.id);
+  if (refreshed?.analysisText) importForm.text = refreshed.analysisText;
 }
 
 function selectMatchingWorkspace(workspace: Workspace) {
