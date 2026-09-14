@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 
 from backend.app.document_recognition.storage import build_company_knowledge, build_eligibility_knowledge
-from backend.app.tender_matching.document_fine_matching import _candidate_records as fine_candidate_records
-from backend.app.tender_matching.document_fine_matching import _evidence_for_records as fine_evidence
+from backend.app.tender_matching.document_matching import _candidate_records as fine_candidate_records
+from backend.app.tender_matching.document_matching import _evidence_for_records as fine_evidence
 from backend.app.tender_matching.eligibility import _candidate_records as ann_candidate_records
 from backend.app.tender_matching.eligibility import _evidence_for_records as ann_evidence
 
