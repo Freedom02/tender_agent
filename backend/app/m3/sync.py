@@ -119,16 +119,31 @@ def _row_to_camel(class_snake: str, row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def read_facts_from_m3(m3: M3Client) -> dict[str, Any]:
-    """从 M3 读取 8 类事实，转回 CamelCase（供 profile/export 等消费方使用）。
+def read_facts_from_m3(m3: M3Client, keys: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """从 M3 读取 facts，转回 CamelCase（供 profile/export/匹配等消费方使用）。
 
     list_objects 内部会自动登录；M3 不可用时抛 M3Error，由调用方决定兜底。
+
+    keys 用于按需指定读取哪几类，避免每次都全量拉 8 条 MQL：
+      - None（默认）→ 读全部 8 类（organization + 7 个事实类），等价旧行为；
+      - ("qualification_certificate", "performance_case") → 只读 organization + 这两类。
+    organization 总是读取（单对象、开销极小），故始终返回该键。
     """
     facts: dict[str, Any] = {"organization": None}
     orgs = m3.list_objects("organization", limit=1)
     if orgs:
         facts["organization"] = _row_to_camel("organization", orgs[0])
-    for key in FACT_LIST_KEYS:
+
+    target = FACT_LIST_KEYS if keys is None else ((keys,) if isinstance(keys, str) else tuple(keys))
+    invalid = [key for key in target if key != "organization" and key not in FACT_LIST_KEYS]
+    if invalid:
+        raise ValueError(
+            f"未知的 fact 类别：{', '.join(sorted(set(invalid)))}；"
+            f"可用值：organization, {', '.join(FACT_LIST_KEYS)}"
+        )
+    for key in target:
+        if key == "organization":
+            continue
         facts[key] = [_row_to_camel(key, r) for r in m3.list_objects(key, limit=100000)]
     return facts
 

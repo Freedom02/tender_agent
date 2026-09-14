@@ -606,29 +606,17 @@ class RequirementScopeTests(unittest.TestCase):
                 {
                     "id": "PRD-THINGJS",
                     "name": "ThingJS 平台",
-                    "evidenceIds": ["EVD-THINGJS"],
-                    "status": "资料已建模",
+                    "evidencePath": "libraries/company/证明材料/技术产品/1/",
+                    "status": "待核验",
                 }
             ],
             "capabilities": [
                 {
                     "id": "CAP-DELIVERY",
                     "name": "项目实施方案与培训方案交付",
-                    "evidenceIds": ["EVD-DELIVERY"],
+                    "evidencePath": "",
                     "status": "资料已建模",
                 }
-            ],
-            "evidences": [
-                {
-                    "id": "EVD-THINGJS",
-                    "name": "ThingJS 平台检验证明",
-                    "status": "待核验原件",
-                },
-                {
-                    "id": "EVD-DELIVERY",
-                    "name": "实施与培训交付材料",
-                    "status": "待核验",
-                },
             ],
         }
         result = evaluate_tender_document(
@@ -656,6 +644,10 @@ class RequirementScopeTests(unittest.TestCase):
         self.assertEqual(rows_by_category["service_plan"]["kind"], "服务方案要求")
         self.assertEqual(rows_by_category["service_plan"]["evidenceNeed"], "service_plan_reference")
         self.assertEqual(rows_by_category["service_plan"]["matchedObjectIds"], ["CAP-DELIVERY"])
+        # 证据从 fact 自身 evidencePath 派生，带证据路径的对象应为 evidence 型证据。
+        self.assertTrue(
+            any(item["sourceType"] == "evidence" for item in rows_by_category["compliance"]["evidenceItems"])
+        )
 
 
 if __name__ == "__main__":

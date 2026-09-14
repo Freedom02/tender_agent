@@ -608,6 +608,19 @@ class MatchingContractTests(unittest.TestCase):
         self.assertFalse(evidence["isVerified"])
         self.assertFalse(evidence["isExpired"])
 
+    def test_valid_status_is_verified(self) -> None:
+        """Excel「状态」列填「有效」应判为已核验→满足。"""
+        evidence = normalize_evidence(
+            {
+                "id": "EVD-003",
+                "name": "ISO27001认证",
+                "status": "有效",
+                "sourceType": "evidence",
+            }
+        )
+        self.assertTrue(evidence["isVerified"])
+        self.assertFalse(evidence["isExpired"])
+
     def test_current_verified_evidence_wins_over_expired_history(self) -> None:
         matched = [{"id": "QUAL-001"}]
         evidences = [
