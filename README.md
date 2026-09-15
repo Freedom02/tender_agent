@@ -176,6 +176,7 @@ AI / 监控 / 通知 / M3 等本机密钥统一放 `agent-config.json`（参考 
 ## 文档索引
 
 - [项目现状与功能链路](docs/PROJECT_STATUS.md)：当前版本各功能的输入、处理、输出、数据落点与边界
+- [开发计划与待办](docs/开发计划与待办.md)：待办事项与长期路线图
 - [开发指南](docs/DEVELOPMENT_GUIDE.md)：启动、接口、数据流与配置
 - [项目文件清单](docs/PROJECT_FILE_CATALOG.md)：目录、逐文件职责与修改边界
 - [API 清单](docs/API_INTERFACES.md)：全部 HTTP 接口
