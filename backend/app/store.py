@@ -43,9 +43,13 @@ def read_json(path: Path, fallback: Any) -> Any:
         return fallback
 
 
-def write_json(path: Path, value: Any) -> None:
+def write_json(path: Path, value: Any, *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")) if compact
+        else json.dumps(value, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 # M3 画像刷新缓存时长（秒）：避免每次 bootstrap 都打 8 条 MQL 拖慢首屏。
@@ -217,7 +221,7 @@ class Store:
         self.persist_catalog()
 
     def persist_catalog(self) -> None:
-        write_json(self.catalog_path, self.catalog)
+        write_json(self.catalog_path, self.catalog, compact=True)
 
     def persist_libraries(self) -> None:
         write_json(self.libraries_path, self.libraries)
@@ -225,7 +229,7 @@ class Store:
     def persist_runtime(self) -> None:
         write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
         write_json(self.runtime_root / "automation-runs.json", self.runs[-50:])
-        write_json(self.workspaces_path, self.workspaces)
+        write_json(self.workspaces_path, self.workspaces, compact=True)
 
     @staticmethod
     def current_time() -> str:

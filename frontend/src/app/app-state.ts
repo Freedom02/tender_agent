@@ -169,8 +169,8 @@ export function useAppState() {
     }
   }
 
-  async function analyzeProject(projectId = selectedProjectId.value) {
-    if (!projectId) return;
+  async function analyzeProject(projectId = selectedProjectId.value, navigate = true) {
+    if (!projectId) return null;
     busy.value = true;
     try {
       const result = await api.analyze(projectId);
@@ -183,10 +183,14 @@ export function useAppState() {
       else workspaces.value.push(result.workspace);
       selectedWorkspaceId.value = result.workspace.id;
       importKind.value = result.workspace.reasoning?.fineReview ? "tender_document" : "notice";
-      activeTab.value = "matching";
-      ElMessage.success("匹配分析完成");
+      if (navigate) {
+        activeTab.value = "matching";
+        ElMessage.success("匹配分析完成");
+      }
+      return result.workspace;
     } catch (error) {
       ElMessage.error((error as Error).message);
+      return null;
     } finally {
       busy.value = false;
     }
@@ -234,6 +238,10 @@ export function useAppState() {
       const index = catalog.value.findIndex((item) => item.id === project.id);
       if (index >= 0) catalog.value[index] = { ...catalog.value[index], ...result.item };
       ElMessage.success(project.followUp ? "已取消跟进" : "已设置跟进");
+      // 跟进时自动后台预审，进入跟进页即可直接查看结果
+      if (!project.followUp) {
+        void analyzeProject(project.id, false);
+      }
     } catch (error) {
       ElMessage.error((error as Error).message);
     }

@@ -274,7 +274,7 @@ function onFileChange(event: Event) {
           <div class="panel-header">
             <div class="result-title">
               <el-icon><FileCheck2 /></el-icon>
-              <span>匹配评估结果</span>
+              <span>公告预审结果</span>
             </div>
             <el-button type="primary" plain @click="emit('openWorkspace')">进入标书工作台</el-button>
           </div>

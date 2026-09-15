@@ -592,8 +592,33 @@ def _table_cell_texts(source: dict[str, Any]) -> list[str]:
     return [_safe_text(cell.get("text"), 20000) for cell in cells if isinstance(cell, dict)]
 
 
-def _requirement_cell_index(table_type: str) -> int | None:
-    """返回要求内容所在列的索引（cells 列表下标），无明确列布局时返回 None。"""
+_REQUIREMENT_CELL_HEADERS = (
+    "技术参数",
+    "简要技术指标",
+    "技术指标",
+    "技术要求",
+    "技术需求",
+    "技术规格",
+    "性能参数",
+    "参数或功能",
+    "主要技术指标",
+    "招标要求",
+    "检查内容",
+    "资格要求",
+)
+
+
+def _requirement_cell_index(table_type: str, header_cells: list[str] | None = None) -> int | None:
+    """返回要求内容所在列的索引（cells 列表下标），无明确列布局时返回 None。
+
+    优先按表头关键词动态定位，兼容「序号|品目名称|简要技术指标|单位|数量」与
+    「序号|产品名称|参数类别|技术参数」等不同列布局；找不到时回退到按表格类型的固定布局。
+    """
+    if header_cells:
+        for index, cell in enumerate(header_cells):
+            compact = _compact(cell)
+            if compact and any(term in compact for term in _REQUIREMENT_CELL_HEADERS):
+                return index
     if table_type == "technical":
         return 2
     if table_type == "qualification":
@@ -646,7 +671,9 @@ def _table_cell_paragraph_clauses(source: dict[str, Any]) -> list[str]:
     if not isinstance(cells, list) or not cells:
         return []
     table_type = str(source.get("tableRequirementType") or "")
-    req_index = _requirement_cell_index(table_type)
+    req_index = source.get("tableRequirementCellIndex")
+    if req_index is None:
+        req_index = _requirement_cell_index(table_type)
     if req_index is None or req_index >= len(cells):
         return []
     req_cell = cells[req_index]
@@ -700,16 +727,21 @@ def _table_requirement_clauses(source: dict[str, Any], text: str) -> list[str]:
     if not cells:
         return _split_requirement_text(text)
 
+    # 优先使用按表头定位到的要求列，其次回退到按表格类型的固定列布局。
+    req_index = source.get("tableRequirementCellIndex")
+    if req_index is None:
+        req_index = _requirement_cell_index(table_type)
+
     # Word 表格常见列布局：序号、名称/类型、要求、单位、数量、响应。
     if table_type == "qualification":
         title = cells[1] if len(cells) > 1 else ""
         body = "；".join(item for item in cells[2:] if item and not _is_response_cell(item))
     elif table_type == "technical":
         title = cells[1] if len(cells) > 1 else ""
-        body = cells[2] if len(cells) > 2 else (cells[-1] if cells else "")
+        body = cells[req_index] if req_index is not None and req_index < len(cells) else (cells[-1] if cells else "")
     elif table_type in {"commercial", "acceptance", "rejection"}:
         title = cells[2] if len(cells) > 2 else (cells[1] if len(cells) > 1 else "")
-        body = cells[3] if len(cells) > 3 else (cells[-1] if cells else "")
+        body = cells[req_index] if req_index is not None and req_index < len(cells) else (cells[-1] if cells else "")
     else:
         title = cells[1] if len(cells) > 1 else ""
         body = next((item for item in reversed(cells[2:]) if item and not _is_response_cell(item)), "")
@@ -717,6 +749,10 @@ def _table_requirement_clauses(source: dict[str, Any], text: str) -> list[str]:
     body = body.strip()
     if not body:
         body = next((item for item in reversed(cells) if item), "")
+    # 单元格内若只是「一、…/（一）…」章节标题、未附带具体要求，则不算作要求。
+    kind, _num, _title, tail = _classify_cell_paragraph(body)
+    if kind in {"大项", "子项"} and not tail:
+        return []
     clauses = _split_requirement_text(body, max_length=20000)
     prefix = title.strip(" ：:;")
     if prefix and prefix not in body and len(clauses) > 0:
@@ -783,22 +819,46 @@ def _table_requirement_type(table: dict[str, Any]) -> str:
     return ""
 
 
+def _table_header_cells(table: dict[str, Any]) -> list[str]:
+    rows = table.get("rows") or []
+    if not rows or not isinstance(rows[0], dict):
+        return []
+    cells = rows[0].get("cells") or []
+    return [_safe_text(cell.get("text"), 80) for cell in cells if isinstance(cell, dict)]
+
+
 def _annotate_table_context(
     segments: list[dict[str, Any]],
     tables: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
+    table_list = [
+        table for table in tables or []
+        if isinstance(table, dict) and str(table.get("tableId") or table.get("id") or "")
+    ]
     table_types = {
         str(table.get("tableId") or table.get("id")): _table_requirement_type(table)
-        for table in tables or []
-        if isinstance(table, dict) and str(table.get("tableId") or table.get("id") or "")
+        for table in table_list
+    }
+    table_indexes = {
+        str(table.get("tableId") or table.get("id")): _requirement_cell_index(
+            _table_requirement_type(table), _table_header_cells(table)
+        )
+        for table in table_list
     }
     annotated: list[dict[str, Any]] = []
     for segment in segments:
         if not segment.get("tableId"):
             annotated.append(segment)
             continue
-        table_type = table_types.get(str(segment.get("tableId")), "")
-        annotated.append({**segment, "tableRequirementType": table_type})
+        table_id = str(segment.get("tableId"))
+        table_type = table_types.get(table_id, "")
+        annotated.append(
+            {
+                **segment,
+                "tableRequirementType": table_type,
+                "tableRequirementCellIndex": table_indexes.get(table_id),
+            }
+        )
     return annotated
 
 
@@ -1264,7 +1324,9 @@ def _model_input_batches(
         # 要求单元格含多段落时逐段渲染，保留条目边界，避免整段长文本压成一条导致模型漏提/合并。
         raw_cells = segment.get("cells")
         if isinstance(raw_cells, list):
-            req_index = _requirement_cell_index(table_type)
+            req_index = segment.get("tableRequirementCellIndex")
+            if req_index is None:
+                req_index = _requirement_cell_index(table_type)
             if req_index is not None and req_index < len(raw_cells):
                 req_cell = raw_cells[req_index]
                 paragraphs = [

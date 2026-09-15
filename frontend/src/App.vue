@@ -104,13 +104,14 @@ function updateDraft(value: string) {
   if (selectedWorkspace.value) selectedWorkspace.value.draft = value;
 }
 
-async function enterMatching(item: CatalogItem) {
+function preReview(item: CatalogItem) {
   selectProject(item);
   importForm.name = item.title || "";
   importForm.text = item.analysisText || "";
-  await analyzeProject(item.id);
-  const refreshed = catalog.value.find((entry) => entry.id === item.id);
-  if (refreshed?.analysisText) importForm.text = refreshed.analysisText;
+  // 已分析则抽屉直接展示结果；未分析则后台预审（不跳转页面）
+  if (!item.workspaceId) {
+    void analyzeProject(item.id, false);
+  }
 }
 
 function selectMatchingWorkspace(workspace: Workspace) {
@@ -150,8 +151,10 @@ onMounted(loadBootstrap);
     <FollowUpPage
       v-else-if="activeTab === 'follow-up'"
       :items="catalog.filter((item) => item.followUp)"
+      :workspaces="workspaces"
+      :busy="busy"
       @remove-follow-up="saveProjectFollowUp"
-      @enter-matching="enterMatching($event)"
+      @pre-review="preReview($event)"
     />
 
     <MatchingPage
