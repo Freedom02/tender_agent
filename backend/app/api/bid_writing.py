@@ -12,6 +12,14 @@ class BidModePayload(BaseModel):
     mode: str = "open"
 
 
+class PlanPayload(BaseModel):
+    plan: list[dict[str, Any]]
+
+
+class SectionContentPayload(BaseModel):
+    content: str = ""
+
+
 def create_router(store: Any) -> APIRouter:
     router = APIRouter()
 
@@ -27,6 +35,27 @@ def create_router(store: Any) -> APIRouter:
         result = store.generate_bid_document(workspace_id, payload.mode)
         if not result:
             raise HTTPException(status_code=404, detail="工作区不存在")
+        return result
+
+    @router.put("/api/workspaces/{workspace_id}/bid-document/plan")
+    def save_bid_plan(workspace_id: str, payload: PlanPayload) -> dict[str, Any]:
+        result = store.save_bid_plan(workspace_id, payload.plan)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区不存在")
+        return result
+
+    @router.post("/api/workspaces/{workspace_id}/bid-document/sections/{section_id}/generate")
+    def generate_bid_section(workspace_id: str, section_id: str) -> dict[str, Any]:
+        result = store.generate_bid_section(workspace_id, section_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区或章节不存在")
+        return result
+
+    @router.put("/api/workspaces/{workspace_id}/bid-document/sections/{section_id}")
+    def save_bid_section(workspace_id: str, section_id: str, payload: SectionContentPayload) -> dict[str, Any]:
+        result = store.save_bid_section(workspace_id, section_id, payload.content)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区或章节不存在")
         return result
 
     @router.post("/api/workspaces/{workspace_id}/bid-document/export")

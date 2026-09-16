@@ -475,6 +475,80 @@ def _respond_generic_section(
 # 对外入口
 # ---------------------------------------------------------------------------
 
+def _generate_section_body(
+    section: dict,
+    rows: list[dict],
+    knowledge_index: dict,
+    knowledge: dict,
+    project_context: str,
+    company_context: str,
+    ai: dict | None,
+) -> dict:
+    section_id = str(section.get("sectionId") or "").strip()
+    title = str(section.get("title") or "").strip() or section_id
+    requirement_ids = _requirement_ids(section)
+
+    parts: list[str] = [f"## {title}"]
+    source_refs: list[dict[str, Any]] = []
+    used_fallback = False
+    produced = False
+
+    if requirement_ids:
+        for requirement_id in requirement_ids:
+            row = _row_by_id(rows, requirement_id)
+            if row is None:
+                parts.append(
+                    f"#### 响应：{requirement_id}\n\n"
+                    f"> {_MISSING_PLACEHOLDER} 未在 fineReview.rows 中找到该要求原文，需人工补充。"
+                )
+                continue
+            produced = True
+            block, refs, fallback_used = _respond_requirement(
+                requirement_id, row, knowledge_index, ai
+            )
+            parts.append(block)
+            source_refs.extend(refs)
+            used_fallback = used_fallback or fallback_used
+    else:
+        block, refs, fallback_used, generated = _respond_generic_section(
+            section_id, title, project_context, company_context, knowledge, ai
+        )
+        parts.append(block)
+        source_refs.extend(refs)
+        used_fallback = used_fallback or fallback_used
+        produced = generated
+
+    content = "\n\n".join(part for part in parts if part)
+    if used_fallback:
+        content += f"\n\n{_FALLBACK_NOTE}"
+
+    return {
+        "content": content,
+        "sourceRefs": _dedupe_source_refs(source_refs),
+        "status": "generated" if produced else "missing",
+    }
+
+
+def generate_technical_section(
+    section: dict,
+    fine_review: dict,
+    project: dict,
+    company: dict,
+    knowledge: dict,
+    ai: dict | None,
+) -> dict:
+    """生成单个技术章节正文。返回 {content, sourceRefs, status}。"""
+    if not isinstance(section, dict):
+        return {}
+    rows = _rows(fine_review)
+    knowledge_index = _index_knowledge(knowledge)
+    project_context = _project_context(project)
+    company_context = _company_context(company)
+    return _generate_section_body(
+        section, rows, knowledge_index, knowledge, project_context, company_context, ai
+    )
+
+
 def generate_technical_sections(
     plan: list[dict],
     fine_review: dict,
@@ -508,47 +582,8 @@ def generate_technical_sections(
         section_id = str(section.get("sectionId") or "").strip()
         if not section_id:
             continue
-        title = str(section.get("title") or "").strip() or section_id
-        requirement_ids = _requirement_ids(section)
-
-        parts: list[str] = [f"## {title}"]
-        source_refs: list[dict[str, Any]] = []
-        used_fallback = False
-        produced = False
-
-        if requirement_ids:
-            for requirement_id in requirement_ids:
-                row = _row_by_id(rows, requirement_id)
-                if row is None:
-                    parts.append(
-                        f"#### 响应：{requirement_id}\n\n"
-                        f"> {_MISSING_PLACEHOLDER} 未在 fineReview.rows 中找到该要求原文，需人工补充。"
-                    )
-                    continue
-                produced = True
-                block, refs, fallback_used = _respond_requirement(
-                    requirement_id, row, knowledge_index, ai
-                )
-                parts.append(block)
-                source_refs.extend(refs)
-                used_fallback = used_fallback or fallback_used
-        else:
-            block, refs, fallback_used, generated = _respond_generic_section(
-                section_id, title, project_context, company_context, knowledge, ai
-            )
-            parts.append(block)
-            source_refs.extend(refs)
-            used_fallback = used_fallback or fallback_used
-            produced = generated
-
-        content = "\n\n".join(part for part in parts if part)
-        if used_fallback:
-            content += f"\n\n{_FALLBACK_NOTE}"
-
-        result[section_id] = {
-            "content": content,
-            "sourceRefs": _dedupe_source_refs(source_refs),
-            "status": "generated" if produced else "missing",
-        }
+        result[section_id] = _generate_section_body(
+            section, rows, knowledge_index, knowledge, project_context, company_context, ai
+        )
 
     return result

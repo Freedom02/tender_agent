@@ -831,7 +831,118 @@ class Store:
         self.persist_runtime()
         return {"bidDocument": bid_doc, "workspace": workspace}
 
+    def _fill_bid_section(
+        self,
+        section: dict[str, Any],
+        project: dict[str, Any],
+        organization: dict[str, Any],
+        commercial: dict[str, Any],
+        technical: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按 source/kind 填充单个章节（模板复用 / 报价占位 / 商务/技术生成）。"""
+        from .bid_writing.template_reuse import fill_section_template
+
+        section_id = section.get("sectionId", "")
+        if section.get("source") == "copied_template":
+            try:
+                filled = fill_section_template(section, project, organization, self.company)
+            except Exception:
+                filled = {}
+            if filled:
+                section["content"] = str(filled.get("content", ""))
+                section["blanksToFill"] = filled.get("blanksToFill") or []
+                section["status"] = filled.get("status", "generated")
+            return section
+        if section_id == "p-01":
+            if not section.get("content"):
+                section["content"] = "# 开标一览表\n\n【需人工填写：投标报价】"
+                section["status"] = "missing"
+            return section
+        merged = commercial.get(section_id) or technical.get(section_id)
+        if merged:
+            section["content"] = str(merged.get("content", ""))
+            section["sourceRefs"] = merged.get("sourceRefs") or []
+            section["status"] = merged.get("status", "generated")
+        return section
+
+    def save_bid_plan(self, workspace_id: str, plan: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """保存用户编辑后的章节目录。"""
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+        if isinstance(plan, list):
+            bid_doc["plan"] = plan
+        bid_doc["status"] = "planned"
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {"bidDocument": bid_doc, "workspace": workspace}
+
+    def generate_bid_section(self, workspace_id: str, section_id: str) -> dict[str, Any] | None:
+        """按章节生成内容（一键自动撰写单章）。"""
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+        section = next((s for s in bid_doc.get("plan", []) if s.get("sectionId") == section_id), None)
+        if not section:
+            return None
+        reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
+        fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+        project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+        ai = ensure_config(self.config).get("ai", {})
+        organization = self.organization or {}
+        self._refresh_company_from_m3(force=True)
+
+        commercial: dict[str, Any] = {}
+        technical: dict[str, Any] = {}
+        if section.get("kind") == "technical":
+            from .bid_writing.technical import generate_technical_section
+
+            technical = {
+                section_id: generate_technical_section(
+                    section, fine_review, project, self.company, self.company_knowledge, ai
+                ) or {}
+            }
+        else:
+            from .bid_writing.commercial import generate_commercial_sections
+
+            commercial = (
+                generate_commercial_sections(
+                    project, self.company, self.company_knowledge, organization, ai
+                )
+                or {}
+            )
+
+        self._fill_bid_section(section, project, organization, commercial, technical)
+        bid_doc["status"] = "generated"
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {"bidDocument": bid_doc}
+
+    def save_bid_section(self, workspace_id: str, section_id: str, content: str) -> dict[str, Any] | None:
+        """保存用户手动编辑后的章节正文。"""
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+        section = next((s for s in bid_doc.get("plan", []) if s.get("sectionId") == section_id), None)
+        if not section:
+            return None
+        section["content"] = str(content or "")
+        section["status"] = "generated"
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {"bidDocument": bid_doc}
+
     def generate_bid_document(self, workspace_id: str, mode: str = "open") -> dict[str, Any] | None:
+
         workspace = self.workspaces.get(workspace_id)
         if not workspace:
             return None
@@ -849,7 +960,6 @@ class Store:
 
         from .bid_writing.commercial import generate_commercial_sections
         from .bid_writing.technical import generate_technical_sections
-        from .bid_writing.template_reuse import fill_section_template
 
         commercial: dict[str, Any] = {}
         technical: dict[str, Any] = {}
@@ -863,29 +973,7 @@ class Store:
             technical = {}
 
         for section in bid_doc.get("plan", []):
-            section_id = section.get("sectionId", "")
-            # 模板复用：招标文件给了完整格式的章节，复制原文并填空
-            if section.get("source") == "copied_template":
-                try:
-                    filled = fill_section_template(section, project, organization, self.company)
-                except Exception:
-                    filled = {}
-                if filled:
-                    section["content"] = str(filled.get("content", ""))
-                    section["blanksToFill"] = filled.get("blanksToFill") or []
-                    section["status"] = filled.get("status", "generated")
-                continue
-            # 报价表：招标未给格式时留占位（报价必须人工填写，绝不编造数字）
-            if section_id == "p-01":
-                if not section.get("content"):
-                    section["content"] = "# 开标一览表\n\n【需人工填写：投标报价】"
-                    section["status"] = "missing"
-                continue
-            merged = commercial.get(section_id) or technical.get(section_id)
-            if merged:
-                section["content"] = str(merged.get("content", ""))
-                section["sourceRefs"] = merged.get("sourceRefs") or []
-                section["status"] = merged.get("status", "generated")
+            self._fill_bid_section(section, project, organization, commercial, technical)
 
         bid_doc["mode"] = "secret" if mode == "secret" else "open"
         bid_doc["status"] = "generated"

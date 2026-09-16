@@ -7,8 +7,7 @@ import type { BidDocument, CatalogItem, Workspace } from "./shared/types";
 import TenderMonitorPage from "./features/tender-monitor/TenderMonitorPage.vue";
 import FollowUpPage from "./features/tender-monitor/FollowUpPage.vue";
 import MatchingPage from "./features/tender-matching/MatchingPage.vue";
-import BidWorkspacePage from "./features/bid-workspace/BidWorkspacePage.vue";
-import BidGeneratorPage from "./features/bid-workspace/BidGeneratorPage.vue";
+import BidWritingPage from "./features/bid-workspace/BidWritingPage.vue";
 import MaterialsPage from "./features/document-library/MaterialsPage.vue";
 import AutomationPage from "./features/automation/AutomationPage.vue";
 
@@ -68,7 +67,6 @@ const {
 function pageTitle() {
   if (activeTab.value === "catalog") return "实时抓取监控";
   if (activeTab.value === "follow-up") return "跟进项目";
-  if (activeTab.value === "generator") return "标书生成";
   if (activeTab.value === "materials") return "企业材料";
   return selectedProject.value?.title || "请选择一个项目";
 }
@@ -76,11 +74,10 @@ function pageTitle() {
 function pageSubtitle() {
   if (activeTab.value === "catalog") return "24小时实时监控招标公告，每30分钟自动抓取一次。";
   if (activeTab.value === "follow-up") return "集中查看已标记跟进的招标项目，及时核对报名和响应文件截止时间。";
-  if (activeTab.value === "generator") return "预览并编辑标书草稿，生成文档后下载响应文件。";
   if (activeTab.value === "materials") return "集中管理企业资质、业绩、人员等投标资料，支持导入模板包或逐条维护。";
   if (selectedProject.value?.analysisPreview) return selectedProject.value.analysisPreview;
   if (activeTab.value === "matching") return "输入招标文件开始评估，或从右侧历史项目查看已保存的匹配结果。";
-  if (activeTab.value === "workspace") return "维护响应文件草稿并导出响应包。";
+  if (activeTab.value === "workspace") return "选择招标文件 → 编辑目录 → 正文编辑，一键自动撰写并导出响应文件。";
   return "从左侧选择一个项目，或进入匹配评估开始分析。";
 }
 
@@ -92,13 +89,6 @@ function openWorkspace() {
   activeTab.value = "workspace";
 }
 
-function openGenerator() {
-  activeTab.value = "generator";
-}
-
-function backToWorkspace() {
-  activeTab.value = "workspace";
-}
 
 function onBidDocumentUpdated(doc: BidDocument) {
   if (selectedWorkspace.value) {
@@ -179,7 +169,7 @@ onMounted(loadBootstrap);
       @select-workspace="selectMatchingWorkspace"
     />
 
-    <BidWorkspacePage
+    <BidWritingPage
       v-else-if="activeTab === 'workspace'"
       :workspace="selectedWorkspace"
       :project="selectedProject"
@@ -188,22 +178,15 @@ onMounted(loadBootstrap);
       :selected-library-key="libraryForm.key"
       :materials-profile="materialsProfile"
       :busy="busy"
-      @generate="openGenerator"
+      :import-file="importFile"
+      :import-form="importForm"
+      :input-kind="importKind"
       @update:selected-library-key="libraryForm.key = $event"
       @update:bid-document="onBidDocumentUpdated"
       @select-workspace="selectMatchingWorkspace"
-    />
-
-    <BidGeneratorPage
-      v-else-if="activeTab === 'generator'"
-      :workspace="selectedWorkspace"
-      :project="selectedProject"
-      :busy="busy"
-      @back="backToWorkspace"
-      @save-draft="saveDraft"
-      @generate-document="generateResponse()"
-      @download-document="downloadDraft"
-      @update:draft="updateDraft"
+      @file-selected="importFile = $event"
+      @evaluate="importDocument"
+      @update:input-kind="importKind = $event"
     />
 
     <MaterialsPage v-else-if="activeTab === 'materials'" />

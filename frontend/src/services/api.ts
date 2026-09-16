@@ -1,6 +1,7 @@
 import type {
   BidDocument,
   BidMode,
+  BidSection,
   BootstrapResponse,
   CatalogItem,
   EvidenceFilesResponse,
@@ -160,6 +161,21 @@ export const api = {
     request<{ bidDocument: BidDocument }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/generate`,
       { method: "POST", body: JSON.stringify({ mode }) }
+    ),
+  bidDocumentSavePlan: (workspaceId: string, plan: BidSection[]) =>
+    request<{ bidDocument: BidDocument; workspace: Workspace }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/plan`,
+      { method: "PUT", body: JSON.stringify({ plan }) }
+    ),
+  bidDocumentGenerateSection: (workspaceId: string, sectionId: string) =>
+    request<{ bidDocument: BidDocument }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}/generate`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+  bidDocumentSaveSection: (workspaceId: string, sectionId: string, content: string) =>
+    request<{ bidDocument: BidDocument }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}`,
+      { method: "PUT", body: JSON.stringify({ content }) }
     ),
   bidDocumentExport: (workspaceId: string, mode: BidMode) =>
     request<{ files: { name: string; url: string }[]; message: string }>(

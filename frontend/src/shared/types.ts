@@ -474,6 +474,9 @@ export interface BidSection {
   blanksToFill?: string[];
   templateOrigin?: string;
   templateText?: string;
+  requirementIds?: string[];
+  sourceRefs?: Record<string, unknown>[];
+  sourceLocator?: string;
 }
 
 export interface DeviationRow {
