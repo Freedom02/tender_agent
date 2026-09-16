@@ -56,13 +56,12 @@ const bidDocument = ref<BidDocument | null>(null);
 const mode = ref<BidMode>("open");
 const planning = ref(false);
 const savingPlan = ref(false);
-const generatingSection = ref(false);
-const savingSection = ref(false);
+const generatingSectionId = ref("");
+const savingSectionId = ref("");
 const exporting = ref(false);
 const exportFiles = ref<{ name: string; url: string }[]>([]);
 
 const currentSectionId = ref("");
-const editingContent = ref("");
 const newSectionTitle = ref("");
 const newSectionSource = ref("template");
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -82,9 +81,6 @@ watch(
 
 const workspaceId = computed(() => props.workspace?.id || "");
 const plan = computed(() => bidDocument.value?.plan || []);
-const currentSection = computed(
-  () => plan.value.find((s) => s.sectionId === currentSectionId.value) || plan.value[0] || null
-);
 
 // ---- 工具函数 ----
 const SOURCE_OPTIONS: { value: string; label: string }[] = [
@@ -255,46 +251,44 @@ async function savePlan() {
 }
 
 // ---- 第三步：正文编辑 ----
-function selectSection(id: string) {
+function scrollToSection(id: string) {
   currentSectionId.value = id;
-  const sec = plan.value.find((s) => s.sectionId === id);
-  editingContent.value = sec?.content || "";
+  requestAnimationFrame(() => {
+    document.getElementById(`sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
-async function generateSection() {
-  const sec = currentSection.value;
-  if (!workspaceId.value || !sec) {
+async function generateSection(sectionId: string) {
+  if (!workspaceId.value || !sectionId) {
     ElMessage.warning("请先选择要撰写的章节");
     return;
   }
-  generatingSection.value = true;
+  generatingSectionId.value = sectionId;
   try {
-    const result = await api.bidDocumentGenerateSection(workspaceId.value, sec.sectionId);
+    const result = await api.bidDocumentGenerateSection(workspaceId.value, sectionId);
     bidDocument.value = result.bidDocument;
     emit("update:bid-document", result.bidDocument);
-    const updated = result.bidDocument.plan?.find((s) => s.sectionId === sec.sectionId);
-    editingContent.value = updated?.content || "";
     ElMessage.success("本章已自动撰写，可继续编辑");
   } catch (error) {
     ElMessage.error((error as Error).message);
   } finally {
-    generatingSection.value = false;
+    generatingSectionId.value = "";
   }
 }
 
-async function saveSection() {
-  const sec = currentSection.value;
+async function saveSection(sectionId: string) {
+  const sec = plan.value.find((s) => s.sectionId === sectionId);
   if (!workspaceId.value || !sec) return;
-  savingSection.value = true;
+  savingSectionId.value = sectionId;
   try {
-    const result = await api.bidDocumentSaveSection(workspaceId.value, sec.sectionId, editingContent.value);
+    const result = await api.bidDocumentSaveSection(workspaceId.value, sectionId, sec.content || "");
     bidDocument.value = result.bidDocument;
     emit("update:bid-document", result.bidDocument);
     ElMessage.success("本章已保存");
   } catch (error) {
     ElMessage.error((error as Error).message);
   } finally {
-    savingSection.value = false;
+    savingSectionId.value = "";
   }
 }
 
@@ -470,7 +464,7 @@ async function exportDocument() {
               :key="sec.sectionId"
               class="nav-item"
               :class="{ active: currentSectionId === sec.sectionId }"
-              @click="selectSection(sec.sectionId)"
+              @click="scrollToSection(sec.sectionId)"
             >
               <span class="nav-title">{{ sec.title }}</span>
               <el-tag size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
@@ -480,22 +474,38 @@ async function exportDocument() {
         </el-col>
 
         <el-col :xs="24" :md="13">
-          <el-card class="panel editor-panel" shadow="never">
+          <el-card class="panel doc-panel" shadow="never">
             <template #header>
               <div class="panel-header">
-                <div class="result-title"><el-icon><FileText /></el-icon><span>{{ currentSection?.title || "章节编辑" }}</span></div>
-                <el-tag v-if="currentSection" size="small" type="info" effect="plain">{{ sourceLabel(currentSection.source) }}</el-tag>
+                <div class="result-title"><el-icon><FileText /></el-icon><span>全文编辑</span></div>
+                <el-tag size="small" type="info" effect="plain">{{ plan.length }} 章</el-tag>
               </div>
             </template>
-            <el-input
-              v-model="editingContent"
-              type="textarea"
-              :rows="22"
-              placeholder="正文内容…可点击「一键自动撰写」填充；图片/附件请粘贴地址或 ![](路径)"
-            />
-            <div class="editor-actions">
-              <el-button type="primary" :icon="Wand2" :loading="generatingSection" @click="generateSection">一键自动撰写</el-button>
-              <el-button :icon="Check" :loading="savingSection" @click="saveSection">保存本章</el-button>
+            <div class="doc-scroll">
+              <div
+                v-for="(sec, i) in plan"
+                :key="sec.sectionId"
+                :id="`sec-${sec.sectionId}`"
+                class="doc-chapter"
+              >
+                <div class="chapter-head">
+                  <span class="chapter-index">{{ i + 1 }}</span>
+                  <h3 class="chapter-title">{{ sec.title }}</h3>
+                  <el-tag size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
+                  <el-tag size="small" type="info" effect="plain">{{ sourceLabel(sec.source) }}</el-tag>
+                  <div class="chapter-actions">
+                    <el-button size="small" type="primary" :icon="Wand2" :loading="generatingSectionId === sec.sectionId" @click="generateSection(sec.sectionId)">自动撰写</el-button>
+                    <el-button size="small" :icon="Check" :loading="savingSectionId === sec.sectionId" @click="saveSection(sec.sectionId)">保存</el-button>
+                  </div>
+                </div>
+                <el-input
+                  v-model="sec.content"
+                  type="textarea"
+                  :autosize="{ minRows: 3 }"
+                  placeholder="本章正文…可点「自动撰写」填充；图片/附件粘贴地址或 ![](路径)"
+                />
+              </div>
+              <el-empty v-if="!plan.length" description="暂无目录，请先回到第二步编辑目录" :image-size="80" />
             </div>
           </el-card>
         </el-col>
@@ -774,5 +784,53 @@ async function exportDocument() {
   color: var(--primary);
   font-size: 13px;
   text-decoration: none;
+}
+.doc-panel {
+  display: flex;
+  flex-direction: column;
+}
+.doc-scroll {
+  max-height: 68vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.doc-chapter {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  scroll-margin-top: 12px;
+}
+.chapter-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.chapter-index {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary-soft, rgba(64, 158, 255, 0.14));
+  color: var(--primary);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.chapter-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 120px;
+}
+.chapter-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 </style>
