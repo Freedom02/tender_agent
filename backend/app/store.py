@@ -69,6 +69,8 @@ class Store:
         self.libraries: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
         self.company: dict[str, Any] = {}
+        # 企业组织原始事实（含法定代表人/统一社会信用代码/注册地址，供商务文书填充）。
+        self.organization: dict[str, Any] = {}
         # 历史遗留：招标匹配/监控的企业数据源（旧 company-knowledge.json 已删，现为空壳）。
         self.company_knowledge: dict[str, Any] = {}
         # M3 画像刷新缓存：上次刷新时间戳。
@@ -293,6 +295,7 @@ class Store:
         try:
             facts = read_facts_from_m3(build_m3_client(self))
             self.company = build_profile(facts)
+            self.organization = facts.get("organization") or {}
             self.company_knowledge = {
                 **build_company_knowledge(facts),
                 **build_eligibility_knowledge(facts),
@@ -610,6 +613,19 @@ class Store:
                 source_file_id,
                 document.get("sections") if isinstance(document.get("sections"), list) else [],
                 document.get("tables") if isinstance(document.get("tables"), list) else [],
+                # 提取产物的落盘定位与头部信息。只影响"产物写到哪个项目目录下"，
+                # 不参与任何匹配判定（匹配层对这两个参数不做分支）。
+                project_id=str(item.get("id") or ""),
+                document_meta={
+                    "name": str(
+                        document.get("name") or document.get("fileName") or item.get("title") or ""
+                    ),
+                    "fileName": str(document.get("fileName") or document.get("name") or ""),
+                    "title": str(item.get("title") or ""),
+                    "projectId": str(item.get("id") or ""),
+                    "projectName": str(item.get("title") or ""),
+                    "documentKind": "tender_document",
+                },
             )
         return result
 
@@ -775,6 +791,124 @@ class Store:
         except Exception:
             pass
         return {"message": "响应文件已生成", "files": files}
+    # ------------------------------------------------------------------
+    # 标书撰写模块（M3 产出层）：规划 / 生成 / 导出 / 校对
+    # ------------------------------------------------------------------
+    def plan_bid_document(self, workspace_id: str) -> dict[str, Any] | None:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
+        fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+
+        from .bid_writing.deviations import build_deviation_tables
+        from .bid_writing.planning import plan_bid_document as _plan
+        from .bid_writing.schemas import build_bid_document
+
+        bid_doc = build_bid_document(workspace_id, str(workspace.get("projectId", "")))
+        bid_doc["plan"] = _plan(fine_review)
+        bid_doc["deviationTables"] = build_deviation_tables(fine_review)
+        bid_doc["status"] = "planned"
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {"bidDocument": bid_doc, "workspace": workspace}
+
+    def generate_bid_document(self, workspace_id: str, mode: str = "open") -> dict[str, Any] | None:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+        bid_doc["status"] = "generating"
+
+        reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
+        fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+        project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+        self._refresh_company_from_m3(force=True)
+        ai = ensure_config(self.config).get("ai", {})
+        organization = self.organization or {}
+
+        from .bid_writing.commercial import generate_commercial_sections
+        from .bid_writing.technical import generate_technical_sections
+
+        commercial: dict[str, Any] = {}
+        technical: dict[str, Any] = {}
+        try:
+            commercial = generate_commercial_sections(project, self.company, self.company_knowledge, organization, ai) or {}
+        except Exception:
+            commercial = {}
+        try:
+            technical = generate_technical_sections(bid_doc.get("plan", []), fine_review, project, self.company, self.company_knowledge, ai) or {}
+        except Exception:
+            technical = {}
+
+        for section in bid_doc.get("plan", []):
+            section_id = section.get("sectionId", "")
+            merged = commercial.get(section_id) or technical.get(section_id)
+            if merged:
+                section["content"] = str(merged.get("content", ""))
+                section["sourceRefs"] = merged.get("sourceRefs") or []
+                section["status"] = merged.get("status", "generated")
+
+        bid_doc["mode"] = "secret" if mode == "secret" else "open"
+        bid_doc["status"] = "generated"
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {"bidDocument": bid_doc}
+
+    def export_bid_document(self, workspace_id: str, mode: str = "open") -> dict[str, Any] | None:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        bid_doc = workspace.get("bidDocument")
+        if not isinstance(bid_doc, dict):
+            return None
+        if bid_doc.get("status") != "generated" or not any(str(s.get("content", "")) for s in bid_doc.get("plan", [])):
+            self.generate_bid_document(workspace_id, mode)
+            bid_doc = workspace.get("bidDocument") or {}
+
+        doc_to_export = bid_doc
+        if mode == "secret":
+            from .bid_writing.anonymize import anonymize_document
+            doc_to_export = anonymize_document(bid_doc, self.company, self.organization or {})
+
+        project_id = str(workspace.get("projectId", ""))
+        item = next((entry for entry in self.catalog if entry.get("id") == project_id), None)
+        output_dir = self.runtime_root / "projects" / project_id / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        from .bid_writing.assemble import assemble_docx
+
+        result = assemble_docx(doc_to_export, output_dir)
+        path = Path(result["path"]) if result.get("path") else None
+        if path is None or not path.exists():
+            return {"files": [], "mode": mode, "error": "导出失败：未生成文件"}
+        files = [{"name": path.name, "url": f"/runtime/projects/{project_id}/outputs/{path.name}"}]
+        archive = output_dir / f"{path.stem}.json"
+        write_json(archive, {"mode": mode, "bidDocument": doc_to_export})
+        files.append({"name": archive.name, "url": f"/runtime/projects/{project_id}/outputs/{archive.name}"})
+        return {"files": files, "mode": mode, "bidDocument": doc_to_export}
+
+    def proofread_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+
+        reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
+        fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+        project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+
+        from .bid_writing.proofread import proofread
+
+        result = proofread(bid_doc, fine_review, project, self.company) or {}
+        bid_doc["proofread"] = result
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return result
 
     def ask(self, question: str, project_id: str = "", agent: bool = False) -> dict[str, Any]:
         project = self.get_project(project_id) if project_id else None

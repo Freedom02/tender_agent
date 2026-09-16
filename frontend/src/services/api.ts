@@ -1,4 +1,6 @@
 import type {
+  BidDocument,
+  BidMode,
   BootstrapResponse,
   CatalogItem,
   EvidenceFilesResponse,
@@ -9,6 +11,7 @@ import type {
   MonitoringRunResult,
   OntologyMeta,
   OntologySummary,
+  ProofreadResult,
   Workspace
 } from "../shared/types";
 
@@ -146,5 +149,23 @@ export const api = {
     request<{ title: string; message: string }>("/api/notifications/test/in-app", { method: "POST" }),
   testWecom: () =>
     request<{ sent: boolean; status: string; detail: string }>("/api/wecom/test", { method: "POST" }),
-  runAutomation: () => request<Record<string, unknown>>("/api/automation/run", { method: "POST" })
+  runAutomation: () => request<Record<string, unknown>>("/api/automation/run", { method: "POST" }),
+  // ---- 标书生成 ----
+  bidDocumentPlan: (workspaceId: string) =>
+    request<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/plan`, {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+  bidDocumentGenerate: (workspaceId: string, mode: BidMode) =>
+    request<{ bidDocument: BidDocument }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/generate`,
+      { method: "POST", body: JSON.stringify({ mode }) }
+    ),
+  bidDocumentExport: (workspaceId: string, mode: BidMode) =>
+    request<{ files: { name: string; url: string }[]; message: string }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/export`,
+      { method: "POST", body: JSON.stringify({ mode }) }
+    ),
+  proofread: (workspaceId: string) =>
+    request<ProofreadResult>(`/api/workspaces/${encodeURIComponent(workspaceId)}/proofread`)
 };

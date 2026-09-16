@@ -458,3 +458,42 @@ export interface ImportResult {
   m3Sync: { objects: number; edges: number; warnings: string[] };
   profile: Record<string, unknown>;
 }
+
+// ---------------- 标书生成 ----------------
+
+export type BidMode = "open" | "secret";
+
+export interface BidSection {
+  sectionId: string;
+  title: string;
+  source: string;
+  kind: string;
+  content: string;
+  status: string;
+}
+
+export interface DeviationRow {
+  clause?: string;
+  requirement?: string;
+  response?: string;
+  deviation?: string;
+  type?: string;
+  level?: string;
+  remark?: string;
+  [key: string]: unknown;
+}
+
+export interface BidDocument {
+  plan: BidSection[];
+  deviationTables: {
+    technical: DeviationRow[];
+    commercial: DeviationRow[];
+  };
+  mode: BidMode;
+  status: string;
+}
+
+export interface ProofreadResult {
+  report: string;
+  riskItems: RiskItem[];
+}

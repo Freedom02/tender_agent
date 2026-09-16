@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .api.bid_writing import create_router as create_bid_writing_router
 from .api.config import create_router as create_config_router
 from .api.materials import create_router as create_materials_router
 from .api.monitoring import create_router as create_monitoring_router
@@ -61,6 +62,7 @@ app.include_router(create_monitoring_router(store))
 app.include_router(create_notifications_router(store))
 app.include_router(create_ontology_router(store))
 app.include_router(create_wecom_router(store))
+app.include_router(create_bid_writing_router(store))
 
 
 class SearchPayload(BaseModel):
