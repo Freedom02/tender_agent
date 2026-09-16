@@ -18,15 +18,22 @@ tender_agent/
 ├─ .env.example
 ├─ .gitignore
 ├─ README.md
-├─ UI设计规范.md
-├─ 模块协作说明.md
-├─ demo-data/
-│  ├─ README.md
-│  └─ tender-catalog.json
+├─ agent-config.json               # 本机配置（M3、AI、监控、通知，不提交 Git）
+├─ docs/                           # 开发、本体、接口文档
+│  ├─ PROJECT_STATUS.md
+│  ├─ DEVELOPMENT_GUIDE.md
+│  ├─ PROJECT_FILE_CATALOG.md
+│  ├─ API_INTERFACES.md
+│  ├─ 上传资料接口.md
+│  ├─ 解析与匹配模块边界.md
+│  ├─ 招标筛选与抓取流程.md
+│  ├─ 开发计划与待办.md
+│  ├─ UI设计规范.md
+│  ├─ archive/                     # 历史决策文档归档
+│  └─ ontology/                    # 本体文档
 ├─ backend/
 │  ├─ requirements.txt
-│  ├─ run.py
-│  ├─ build_data.py
+│  ├─ run.py                       # 启动入口（127.0.0.1:8793）
 │  ├─ build_ontology.py
 │  └─ app/
 │     ├─ __init__.py
@@ -49,28 +56,31 @@ tender_agent/
 │     ├─ importers/
 │     │  └─ excel_importer.py
 │     ├─ m3/
-│     │  └─ client.py
+│     │  ├─ client.py
+│     │  └─ sync.py
 │     ├─ notification/
 │     │  ├─ __init__.py
 │     │  └─ service.py
 │     ├─ tender_matching/
 │     │  ├─ __init__.py
+│     │  ├─ agent_bridge.py        # 智能体提取桥（可插拔）
+│     │  ├─ contracts.py
+│     │  ├─ document_fine_matching.py  # 提取层
+│     │  ├─ document_matching.py       # 匹配层（M3 事实路由）
+│     │  ├─ document_parser.py         # 解析层
+│     │  ├─ document_structure.py
+│     │  ├─ eligibility.py             # 公告资格粗匹配
+│     │  ├─ requirement_scope.py
 │     │  └─ service.py
 │     ├─ tender_monitor/
 │     │  ├─ __init__.py
+│     │  ├─ adapters.py
 │     │  ├─ custom_site.py
 │     │  ├─ scheduler.py
 │     │  └─ service.py
 │     └─ wecom/
 │        ├─ __init__.py
 │        └─ service.py
-├─ M3_workspace/
-│  ├─ generate_sql.py
-│  ├─ import_tenderhub.py
-│  ├─ drop_tenderhub.py
-│  ├─ query_m3.py
-│  ├─ verify_tenderhub.py
-│  └─ regenerate_ontology_outputs.py
 ├─ frontend/
 │  ├─ index.html
 │  ├─ package.json
@@ -89,8 +99,7 @@ tender_agent/
 │     │  └─ navigation.ts
 │     ├─ components/
 │     │  ├─ MetricOverview.vue
-│     │  ├─ ModuleNav.vue
-│     │  └─ ProjectList.vue
+│     │  └─ ModuleNav.vue
 │     ├─ features/
 │     │  ├─ automation/
 │     │  │  └─ AutomationPage.vue
@@ -98,21 +107,23 @@ tender_agent/
 │     │  │  ├─ BidGeneratorPage.vue
 │     │  │  └─ BidWorkspacePage.vue
 │     │  ├─ document-library/
-│     │  │  ├─ LibraryDirectoryPage.vue
-│     │  │  ├─ LibraryDocumentsPage.vue
-│     │  │  └─ LibraryPage.vue
+│     │  │  └─ MaterialsPage.vue
 │     │  ├─ tender-matching/
 │     │  │  └─ MatchingPage.vue
 │     │  └─ tender-monitor/
 │     │     ├─ FollowUpPage.vue
-│     │     ├─ TenderImportPage.vue
+│     │     ├─ NoticeReviewDrawer.vue
 │     │     └─ TenderMonitorPage.vue
 │     ├─ services/
 │     │  └─ api.ts
 │     └─ shared/
 │        ├─ file-utils.ts
 │        └─ types.ts
-└─ runtime/                         # 本地运行时生成，已被 Git 忽略
+├─ templates/                      # 企业材料收集表模板 + 证明材料
+├─ scripts/                        # 辅助脚本（模板生成、上传验证）
+├─ preview/                        # UI 主题预览生成
+├─ demo-data/                      # 脱敏演示数据（不提交 Git）
+└─ runtime/                        # 本地运行时生成（不提交 Git）
    ├─ catalog.json
    ├─ libraries.json
    ├─ workspaces.json

@@ -392,7 +392,7 @@ DOCX 会保留正文段落、表格、行列、单元格、标题样式等结构
 TenderRequirement 条款
   + 企业本体候选对象
   + 证据文件和核验状态
-  -> document_fine_matching.evaluate_tender_document()
+  -> document_matching.evaluate_tender_document()
   -> 逐条建立 RequirementComparison
   -> 输出状态、理由、企业证据、原文定位、风险和置信度
   -> 汇总资格响应分、技术响应分、商务响应分、证据覆盖率和风险

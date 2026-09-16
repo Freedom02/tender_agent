@@ -2,7 +2,7 @@
 
 > **维护约定**：本文档是前后端接口的**单一事实源（API 单一入口 + 契约）**，与代码同步维护。后端新增/修改路由（`app/main.py` + `app/api/*.py`）或前端改动封装（`src/services/api.ts`）、类型（`src/shared/types.ts`）时，务必同步更新本文档对应条目与文末附录。
 >
-> - 基础地址：开发环境 `http://localhost:8000`；生产环境前端 SPA 由后端 `StaticFiles` 托管在 `/`。
+> - 基础地址：开发环境后端 `http://127.0.0.1:8793`（前端 Vite 开发服务器为 `http://127.0.0.1:5173`，代理 `/api` 与 `/runtime` 到后端）；生产环境前端 SPA 由后端 `StaticFiles` 托管在 `/`。
 > - 版本对齐：**tender-agent v2.0.0**，企业材料本体 **tenderhub V0.4（8 类 + 8 关系）**。
 
 ---
@@ -206,7 +206,7 @@
 
 ### `POST /api/import`
 
-**描述**：上传并解析招标公告/文件（TXT/DOCX/PDF/XLSX），提取结构化字段并入库。文件 < 20MB。前端「招标导入」页使用。
+**描述**：上传并解析招标公告/文件（TXT/DOCX/PDF/XLSX），提取结构化字段并入库。文件 < 100MB。前端「招标导入」页使用。
 
 **请求体**：
 ```json
@@ -226,7 +226,7 @@
   "file": {
     "name": "招标公告-某项目.docx",
     "parseStatus": "解析完成",
-    "parseMethod": "docx_xml",
+    "parseMethod": "docx_xml_structured",
     "warnings": [],
     "extractedTextLength": 1520
   }

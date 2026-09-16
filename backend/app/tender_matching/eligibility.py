@@ -267,7 +267,18 @@ def call_openai_compatible(
     content = str(content).strip()
     if not content:
         return {"success": False, "error": "模型服务未返回可用内容"}
-    return {"success": True, "content": content, "model": model}
+    # finish_reason 与 usage 此前被丢弃，导致"返回为什么断了"无法定性：
+    # max_tokens 用尽（finish_reason=length）、服务端独立输出上限、网关流式中断，
+    # 三者的对策完全不同，却都会表现为"JSON 不完整"。原样带出交给上层判断。
+    finish_reason = str(choices[0].get("finish_reason") or "")
+    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    return {
+        "success": True,
+        "content": content,
+        "model": model,
+        "finishReason": finish_reason,
+        "usage": usage,
+    }
 
 
 def test_ai_connection(ai: dict[str, Any]) -> dict[str, Any]:

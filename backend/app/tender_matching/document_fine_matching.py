@@ -1142,14 +1142,17 @@ def _normalize_model_extraction(
             filtered_count += 1
             continue
 
+        # D2：契约上 sourceSegmentId 是「本条要求的出处（方括号里的片段ID）」，
+        # sourceSegmentIds 是「可选的关联片段」，因此**标量优先**。
+        # 原实现只在 sourceSegmentIds 不是 list 时才看标量，而模型经常把真实出处放标量、
+        # 把同表表头行放列表 —— 于是条目被解析到表头行，再被要求行校验整体过滤（整批清零）。
         raw_source_ids = raw.get("sourceSegmentIds")
-        if not isinstance(raw_source_ids, list):
-            raw_source_ids = [raw.get("sourceSegmentId")]
-        source_ids = [
-            str(source_id).strip()
-            for source_id in raw_source_ids
-            if str(source_id or "").strip() in segment_map
-        ]
+        listed_ids = raw_source_ids if isinstance(raw_source_ids, list) else []
+        source_ids: list[str] = []
+        for candidate in (raw.get("sourceSegmentId"), *listed_ids):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text and candidate_text in segment_map and candidate_text not in source_ids:
+                source_ids.append(candidate_text)
         locator = _safe_text(raw.get("sourceLocator"), 160)
         if not source_ids and locator:
             source_ids = locator_map.get(locator, [])[:1]
@@ -1167,9 +1170,15 @@ def _normalize_model_extraction(
             continue
 
         source_segment = segment_map.get(source_ids[0], {})
+        # D3：这里要判的是「**源片段**是不是要求行」，不是「模型改写的文本像不像要求行」。
+        # _is_table_requirement_row 以「text 含表格竖线」为前提（该契约来自规则通道的原文），
+        # 而模型通道的 text 是改写后的自然语言，天然不含竖线 —— 直接传会使表格行条目 100% 被丢弃。
+        # 注：_is_template_placeholder 仍用模型文本（模板/表单判据本就该看模型产出）。
+        source_text = _safe_text(source_segment.get("text"), 1200)
+        row_text = source_text or text
         if _is_template_placeholder(text) or (
             source_segment.get("tableId")
-            and not _is_table_requirement_row(source_segment, text)
+            and not _is_table_requirement_row(source_segment, row_text)
         ):
             filtered_count += 1
             continue
@@ -1302,12 +1311,295 @@ def _merge_requirement_candidates(
     return merged
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 否决条款的确定性兜底（D5 / P1）
+# ──────────────────────────────────────────────────────────────────────
+# 位置刻意放在"模型调用之后"：本模块只产出**额外的要求条目**送进合并池，
+# 不参与 scoped_segments 的构造，也不进 prompt 或批次。模型输入一字未动，
+# 因此不存在"改给模型看的输入 ⇒ 模型行为漂移"这一项副作用。
+#
+# 为什么不用 sectionType == "rejection" 作判据：结构层有两处确定性缺陷
+# （SECTION_TYPE_TERMS 的有序首命中 + document_structure.py:426 的父类型继承），
+# 实测四份真实文件合计 91 段的真否决章被判成了 qualification / other，
+# 任何以该字段为判据的规则都会在这批章上静默失效。
+#
+# 两层判据互补，缺一层都会漏：
+#   · 章标题层 —— 否决条款多为「引导句 + 枚举子项」，枚举子项自身不含关键词，
+#     只有它所属那一章的标题能把它标出来。
+#   · 片段正文层 —— 反过来，有些条款自身把话说全，章的标题反而不含否决词。
+REJECTION_HEADING_TERMS = (
+    "无效投标",
+    "无效标",
+    "投标无效",
+    "废标",
+    "否决",
+    "视为串通",
+    "资格审查不合格",
+    "符合性审查不合格",
+    "不得出现报价",
+    "无效响应",
+    "响应无效",
+    "作无效处理",
+)
+
+# 正文层词表与标题层**刻意不同源**：正文判据要抓"片段自身把话说全"的条款。
+REJECTION_BODY_TERMS = (
+    "无效投标",
+    "投标无效",
+    "无效标",
+    "废标",
+    "否决",
+    "串通",
+    "不合格",
+    "不予退还",
+    "取消投标资格",
+    "取消中标资格",
+    "拒绝其投标",
+    "予以拒绝",
+    "不得参加",
+    "作无效处理",
+    "视为无效",
+)
+
+# 用于在"标题命中否决词"的那一章内，划出条款的真实右边界。
+_REJECTION_ITEM_PATTERN = re.compile(r"^[（(]?\s*[一二三四五六七八九十\d]{1,3}\s*[）)、.．]")
+_REJECTION_LONG_SEGMENT_CHARS = 300
+
+
+def _hits_any(value: str, terms: tuple[str, ...]) -> bool:
+    """`value` 已由 `_compact` 归一化（去空白 + 小写）后判断是否含任一关键词。"""
+    return any(_compact(term) in value for term in terms)
+
+
+def _deterministic_rejection_segments(
+    segments: list[dict[str, Any]],
+    sections: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """确定性挑出「应被视为否决条款」的片段（零模型调用）。
+
+    ``keep = 标题范围层 ∪ 正文命中层``：
+
+    1. **标题范围层** —— 章的标题命中 ``REJECTION_HEADING_TERMS`` 时，从该章的
+       ``headingSegmentId`` 往后收**连续**的枚举子项 / 表格行；遇到下一个章的
+       标题片段、或超长片段（>300 字）立即停止。
+    2. **正文命中层** —— 片段正文命中 ``REJECTION_BODY_TERMS``。
+
+    第 1 层的两个停止条件不是保守起见，而是必需的：``document_structure.py``
+    用**扁平闭区间**切章节（``covered_segments = normalized_segments[position :
+    end_position + 1]``），于是"条款编号"会被当成章标题，把其后的正文一路吞进来。
+    实测 ``10.12…有下列情形之一的，投标无效：`` 吞进 25 段开标程序；
+    ``三、无效标检查`` 甚至把整张评分表挂进了自己的 ``segmentIds``（13 段）。
+    加上这两个停止条件后，被并入的噪声段从 01 的 11 段 / 04 的 7 段压到
+    2 段 / 0 段，而目标覆盖**一段未掉**。
+    """
+    ordered_ids = [str(item.get("id")) for item in segments if str(item.get("id") or "")]
+    by_id = {
+        str(item.get("id")): item for item in segments if str(item.get("id") or "")
+    }
+    position = {value: index for index, value in enumerate(ordered_ids)}
+
+    body_hits = {
+        segment_id
+        for segment_id, segment in by_id.items()
+        if _hits_any(_compact(segment.get("text")), REJECTION_BODY_TERMS)
+    }
+
+    section_list = [item for item in sections or [] if isinstance(item, dict)]
+    heading_segment_ids = {
+        str(item.get("headingSegmentId"))
+        for item in section_list
+        if str(item.get("headingSegmentId") or "")
+    }
+
+    span_hits: set[str] = set()
+    for section in section_list:
+        if not _hits_any(_compact(section.get("heading")), REJECTION_HEADING_TERMS):
+            continue
+        start = position.get(str(section.get("headingSegmentId") or ""))
+        if start is None:
+            continue
+        index = start + 1
+        while index < len(ordered_ids):
+            segment_id = ordered_ids[index]
+            if segment_id in heading_segment_ids:
+                # 下一个章的标题 → 这一条条款的范围结束
+                break
+            text = " ".join(str((by_id.get(segment_id) or {}).get("text") or "").split())
+            if not text:
+                index += 1
+                continue
+            if len(text) > _REJECTION_LONG_SEGMENT_CHARS:
+                # 整块大表（典型是被错挂到本章下的评分表）→ 停
+                break
+            if _REJECTION_ITEM_PATTERN.match(text) or "|" in text:
+                span_hits.add(segment_id)
+                index += 1
+                continue
+            break
+
+    keep = body_hits | span_hits
+    return [segment for segment in segments if str(segment.get("id") or "") in keep]
+
+
+# 兜底路径的**最小**噪声判据。
+#
+# 刻意不复用 `_is_requirement` / `_is_process_only_text` / `_is_incomplete_requirement_label`
+# 那一套：那几道闸是为"在一整篇文档里挑出像要求的句子"设计的，**必须严**，
+# 否则目录、页眉、模板占位、栏目名会全变成要求。
+# 但兜底路径的**选择性已经由否决词表完成**（确定性、窄），再过一遍"像不像要求"
+# 既是判据重复，又会系统性误杀否决条款的典型句式。实测（四份真实文件）：
+#
+#   · `9.2 投标人应对同一个采购包内的所有内容进行完整投标，否则投标无效。`
+#     —— 无 `_is_requirement` 词表命中 ⇒ 被判"非要求句"丢弃
+#   · `9.7 有下列情形之一的，视为投标人串通投标，其投标无效：`
+#     —— 以冒号结尾且不含时间/金额量词 ⇒ 被 `_is_incomplete_requirement_label` 丢弃
+#   · `（6）如出现下列情形之一的，…按照无效投标处理。` —— 同上
+#
+# 结果：兜底片段里"命中否决目标词"的部分，被规则通道挡掉了
+# 01 28/49、02 8/16、03 4/6、04 13/20 —— 即离线预期的 100% 召回在真实链路上
+# 会被削掉一半以上。这正是"只在真实执行中才暴露的接缝"。
+_REJECTION_TITLE_STRIP_RE = re.compile(
+    r"^(?:第[一二三四五六七八九十百]+[章节篇部分]"
+    r"|[一二三四五六七八九十]+[、.．]"
+    r"|（[一二三四五六七八九十\d]+）"
+    r"|\d+(?:\.\d+)*[、.．]?)[\s　]*"
+)
+_REJECTION_TOC_TAIL_RE = re.compile(r"[-—–－\s]*\d{1,3}\s*[-—–－\s]*$")
+_REJECTION_TITLE_MAX_CHARS = 8
+_REJECTION_MIN_CHARS = 6
+_REJECTION_TOC_MAX_CHARS = 40
+_REJECTION_PUNCTUATION_RE = re.compile(r"[，。；：、,.;:！？]")
+
+
+def _is_rejection_noise(text: str) -> bool:
+    """兜底片段的噪声判据：只挡"确定不是条款"的东西，宁松勿严。
+
+    三类：
+      · **模板占位** —— 表单字段名、占位符（`（单位名称）` 等）；
+      · **目录条目** —— 短、以章节编号开头、以页码结尾（`五、废标条款 - 34 -`）；
+      · **纯标题** —— 去掉编号后不足 8 字且不含任何标点（`三、无效标检查`）。
+        阈值刻意压到 8 字并叠加"无标点"条件：像 `（六）投标人串通投标的；`
+        这种真枚举子项有分号、`9.7有下列情形之一的，…其投标无效：` 有逗号，
+        两者都不会被误挡。
+    """
+    clean = str(text or "").strip()
+    if len(_compact(clean)) < _REJECTION_MIN_CHARS:
+        return True
+    if _is_template_placeholder(clean):
+        return True
+    if _REJECTION_TOC_TAIL_RE.search(clean):
+        # 以页码状结尾：只有"短 + 以章节编号开头"才算目录条目
+        return bool(
+            len(clean) <= _REJECTION_TOC_MAX_CHARS and _REJECTION_TITLE_STRIP_RE.match(clean)
+        )
+    body = _REJECTION_TITLE_STRIP_RE.sub("", clean, count=1).strip()
+    return len(_compact(body)) < _REJECTION_TITLE_MAX_CHARS and not _REJECTION_PUNCTUATION_RE.search(body)
+
+
+def _rejection_requirements_from_segments(
+    segments: list[dict[str, Any]],
+    sections: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """把兜底片段直接转成"否决条款"要求条目（确定性，零模型调用）。
+
+    与规则通道（`extract_tender_requirements_by_rule`）的关键差别：
+    **不做"这句话像不像一条要求"的判断**，因为这一层已经由否决词表完成了选择，
+    再判一次会误杀（见 `_is_rejection_noise` 上方注释）。
+
+    一条片段产出一条要求：否决条款需要逐条核验，合并会丢掉"逐条对照"的能力；
+    而枚举子项（`（六）投标人串通投标的；`）脱离引导句会语义不全，故保留其原文，
+    由 `section` 带上所属章标题作为上下文。
+    """
+    section_list = [item for item in sections or [] if isinstance(item, dict)]
+    depth = {
+        str(item.get("sectionId")): len(item.get("sectionPath") or [])
+        for item in section_list
+    }
+    owner: dict[str, str] = {}
+    for section in section_list:
+        section_id = str(section.get("sectionId"))
+        for segment_id in section.get("segmentIds") or []:
+            current = owner.get(str(segment_id))
+            if current is None or depth.get(section_id, 0) > depth.get(current, 0):
+                owner[str(segment_id)] = section_id
+    heading_of = {
+        str(item.get("sectionId")): str(item.get("heading") or "") for item in section_list
+    }
+
+    requirements: list[dict[str, Any]] = []
+    for segment in segments:
+        text = _safe_text(segment.get("text"), 1200)
+        if not text or _is_rejection_noise(text):
+            continue
+        segment_id = str(segment.get("id") or "")
+        index = len(requirements) + 1
+        requirements.append(
+            {
+                "id": f"rej-{index:03d}",
+                "category": "rejection",
+                "text": text,
+                "section": heading_of.get(owner.get(segment_id, ""), ""),
+                "sourceLocator": _source_locator(segment, index),
+                "mandatory": True,
+                # 与规则通道一致：判据本身就是否决条款，故直接置真。
+                "isRejection": True,
+                # 比规则通道的 0.64 高：这一层是确定性判据命中的，不是启发式猜测。
+                "confidence": 0.9,
+                "sourceSegmentId": segment_id,
+                # ⚠ **同时**给列表字段，不能只给标量。
+                # `_merge_requirement_candidates` 合并两个条目时，重建 source 列表用的是
+                # `matched.get("sourceSegmentIds") or []` —— 它**不会**回退到标量。
+                # 于是"只有标量的条目"一旦与别的条目合并，它的定位 id 就丢了，
+                # 下游按 `sourceSegmentIds` 找覆盖时会误判成"这段没被提取"。
+                # 实测：文件 01 的 `rej-015`/`rej-052`/`rej-077` 三个真否决条款
+                # 因此从最终结果里"消失"（目标召回 93% 而非 100%）。
+                "sourceSegmentIds": [segment_id] if segment_id else [],
+                "extractionSource": "rule",
+            }
+        )
+    return requirements
+
+
+# 单批片段数上限。与 max_chars 同时生效，两个条件谁先触发谁生效。
+# 经验值 40：一批 40 个片段的中文结构化输出通常在 1 万~3 万字符量级，
+# 既能控制在超时之内，又不至于把批次切得过碎、放大调用次数。
+MAX_SEGMENTS_PER_BATCH = 40
+
+# 批次抽取单次调用的输出上限（tokens）。中文结构化输出按「字符数 ≈ tokens × 2.6」估算，
+# 一批 6500 字符的输入产出上万字符 JSON 很常见，4000 会在句中截断。
+MODEL_BATCH_MAX_TOKENS = 16000
+
+# 「章节语义筛选」那次调用的输出上限（tokens）。
+# 该次输出只是 sectionId 列表，量级与「章节行数 × 单个 ID 长度」同阶：
+# 实测基准文件有 100~260 个章，含 `SEC-000123` 这类 ID，输出 600~2500 token 很常见。
+# 原值 800 会撞穿 —— 撞穿后 JSON 在中途被截断，`_json_from_model` 解析失败，
+# 函数**静默 `return []`**：整条 LLM 语义筛选链路归零（scoped 退化成空），
+# 而调用方看不出与"模型认为没有要求章节"的区别。这是纯静默失效，必须同时修阈值与可观测性。
+SECTION_IDENTIFY_MAX_TOKENS = 4000
+
+# 批次失败后按片段对半切分重试的层数上限。
+# 只拆一层：实测超时与输出截断两种成因在输入减半后都能恢复，
+# 继续递归只是在模型服务本身不可用时放大调用量。
+MAX_BATCH_SPLIT_DEPTH = 1
+
+# 「压缩文本重试」保留的字符数。该路径只用于单片段批次，
+# 多片段批次改走按片段对半切分（见 call_batch 内注释）。
+COMPRESSED_RETRY_CHARS = 2200
+
+
 def _model_input_batches(
     segments: list[dict[str, Any]],
     *,
     max_chars: int = 6500,
+    max_segments_per_batch: int = MAX_SEGMENTS_PER_BATCH,
 ) -> list[dict[str, Any]]:
-    """按游标切分模型输入，保证每个非空片段只进入一个批次。"""
+    """按游标切分模型输入，保证每个非空片段只进入一个批次。
+
+    切分条件同时受**字符数**与**片段数**约束。只按字符数切分时，成片的短片段
+    （表格行、短条款）会把上百个片段塞进同一批：实测某批 118 个片段（平均 55 字符）
+    占该文件发出片段总数的 56%，模型为 118 个片段生成完整 JSON 的耗时超过 120 秒
+    硬超时，整批丢失（``success=False``，与 ``max_tokens`` 无关）。
+    """
     def display_line(segment: dict[str, Any], segment_id: str, locator: str, text: str) -> str:
         cells = _table_cell_texts(segment)
         if not segment.get("tableId") or not cells:
@@ -1377,7 +1669,10 @@ def _model_input_batches(
         while cursor < len(candidates):
             candidate = candidates[cursor]
             candidate_length = len(candidate["line"]) + (1 if selected else 0)
-            if selected and length + candidate_length > max_chars:
+            if selected and (
+                length + candidate_length > max_chars
+                or len(selected) >= max_segments_per_batch
+            ):
                 break
             selected.append(candidate)
             length += candidate_length
@@ -1392,6 +1687,28 @@ def _model_input_batches(
             }
         )
     return batches
+
+
+def _split_batch_fragment(
+    fragment: dict[str, Any],
+    scoped_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把一个批次按片段数对半切分，用于失败后的重试。
+
+    不能按 ``fragment["text"]`` 换行切分 —— 表格类片段的展示文本本身就含多行，
+    按行切会让片段与 ID 错位、产出幻觉定位。这里按 ID 取回原始片段，
+    再走一次 ``_model_input_batches`` 渲染，保证切分后的文本与「本来就该这么切」
+    完全一致（含表格字段渲染逻辑）。
+    """
+    ids = {str(value) for value in fragment.get("segmentIds") or [] if str(value)}
+    subset = [segment for segment in scoped_segments if str(segment.get("id")) in ids]
+    if len(subset) < 2:
+        return [fragment]
+    middle = len(subset) // 2
+    halves: list[dict[str, Any]] = []
+    for chunk in (subset[:middle], subset[middle:]):
+        halves.extend(_model_input_batches(chunk))
+    return halves
 
 
 def _segments_for_sections(
@@ -1413,26 +1730,46 @@ def _segments_for_sections(
 def identify_requirement_sections(
     sections: list[dict[str, Any]],
     ai: dict[str, Any],
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[str]:
-    """第一段：让 LLM 从章节标题里挑出"含具体投标要求"的章节，返回 sectionId 列表。"""
+    """第一段：让 LLM 从章节标题里挑出"含具体投标要求"的章节，返回 sectionId 列表。
+
+    ``diagnostics``（可选）会被原地写入这次调用的可观测信息。加这个出参是因为
+    本函数原先**任何失败都只 `return []`、不留任何痕迹**：调用方无法区分
+    「模型认为没有要求章节」与「max_tokens 截断 / 调用失败 / JSON 不可解析」，
+    于是 max_tokens 撞穿后整条语义筛选链路静默归零也没人发现（F5）。
+    """
+    trace: dict[str, Any] = diagnostics if diagnostics is not None else {}
+
+    def _fail(reason: str) -> list[str]:
+        trace["sectionIdentifyFailureReason"] = reason
+        return []
+
     section_list = [section for section in sections if isinstance(section, dict)]
     menu_lines: list[str] = []
     for section in section_list:
         section_id = str(section.get("sectionId") or "")
         if not section_id:
             continue
-        heading = _safe_text(section.get("heading"), 200)
+        # D1：只喂一层标题时，模型看不到层级归属。例如「二、平台建设内容、技术要求：」
+        # 的父级是「第二部分 前附表及投标人须知」，而 prompt 要求排除投标人须知，
+        # 于是整块技术要求被连带排除（实测：命中片段 61~80 → 337~412，文件 03 找回 5 章 296 段）。
+        # 这里改用完整章节路径；prompt 的格式声明与判断依据也随之对齐为「路径」——
+        # 否则 prompt 说「标题」而清单给路径，实测片段级 Jaccard 会从 0.857 掉到 0.683，
+        # 文件 02 上还出现 5 次中 3 次返回空列表（模型被互相矛盾的描述搞糊涂后直接放弃）。
+        path = [str(item) for item in (section.get("sectionPath") or []) if str(item).strip()]
+        label = _safe_text(" / ".join(path) or section.get("heading"), 260)
         count = len(section.get("segmentIds") or [])
-        menu_lines.append(f"[{section_id}] {heading} | 段落数 {count}")
+        menu_lines.append(f"[{section_id}] {label} | 段落数 {count}")
     if not menu_lines:
-        return []
+        return _fail("章节清单为空，未发起章节识别调用")
     menu = "\n".join(menu_lines)
 
     prompt = (
-        "你是招标文件结构识别助手。下面是一份招标文件的章节清单，格式为：[章节ID] 标题 | 段落数。"
+        "你是招标文件结构识别助手。下面是一份招标文件的章节清单，格式为：[章节ID] 完整章节路径 | 段落数。"
         "请挑出【包含需要投标人满足或响应的具体条件的章节】：技术/功能/性能/参数、商务、资格、验收、服务、交付、售后等。"
         "排除流程性章节：投标邀请、投标人须知、评标办法、评分标准、合同格式、质疑投诉、中标人确定、开标程序、监督。"
-        "只依据标题判断，不要编造不存在的章节ID。"
+        "只依据章节路径判断，不要编造不存在的章节ID。"
         '输出严格 JSON，不使用 Markdown：{"sections":["章节ID1","章节ID2"]}'
     )
     result = call_openai_compatible(
@@ -1441,14 +1778,52 @@ def identify_requirement_sections(
             {"role": "system", "content": prompt},
             {"role": "user", "content": menu},
         ],
-        max_tokens=800,
+        max_tokens=SECTION_IDENTIFY_MAX_TOKENS,
         temperature=0,
     )
-    data = _json_from_model(result.get("content", "")) if result.get("success") else None
+    raw_content = str(result.get("content") or "")
+    finish_reason = str(result.get("finishReason") or "")
+    trace["sectionIdentifySectionCount"] = len(section_list)
+    trace["sectionIdentifyMaxTokens"] = SECTION_IDENTIFY_MAX_TOKENS
+    trace["sectionIdentifyFinishReason"] = finish_reason
+    trace["sectionIdentifyOutputChars"] = len(raw_content)
+
+    if not result.get("success"):
+        error = _safe_text(result.get("error") or result.get("message"), 200)
+        return _fail(f"章节识别调用失败：{error or '未返回错误信息'}")
+
+    data = _json_from_model(raw_content)
     if not isinstance(data, dict):
-        return []
+        # 截断必须与"模型返回了别的结构"区分开：两者都表现为解析失败，
+        # 但只有前者说明 SECTION_IDENTIFY_MAX_TOKENS 仍然偏小、需要继续上调。
+        if finish_reason == "length":
+            trace["sectionIdentifyTruncated"] = True
+            return _fail(
+                f"章节识别输出被 max_tokens 截断（finish_reason=length，"
+                f"{len(raw_content)} 字符 / {SECTION_IDENTIFY_MAX_TOKENS} tokens），"
+                "JSON 不完整，本次语义筛选整段失效"
+            )
+        return _fail(
+            "章节识别返回无法解析"
+            f"（finish_reason={finish_reason or '未知'}，{len(raw_content)} 字符）"
+        )
+
     valid = {str(section.get("sectionId")) for section in section_list if section.get("sectionId")}
-    return [item for item in (str(value) for value in data.get("sections") or []) if item in valid]
+    picked = [
+        item for item in (str(value) for value in data.get("sections") or []) if item in valid
+    ]
+    trace["sectionIdentifyPickedCount"] = len(picked)
+    if not picked:
+        # 「调用成功、JSON 可解析、但一个章都没挑」与「调用失败」必须分开报。
+        # 实测（文件 03，真实模型）确实会返回 `{"sections":[]}`（33 字符、finish_reason=stop）：
+        # 外观上完全正常，但下游 `llm_section_ids` 为空 ⇒ 整条链路**静默退化到规则兜底路径**，
+        # 送模型的片段集从 364 段变成 187 段。不报出来就永远查不到。
+        return _fail(
+            f"章节识别返回空列表（{len(raw_content)} 字符，{len(section_list)} 个候选章，"
+            f"finish_reason={finish_reason or '未知'}）：调用本身成功，"
+            "但语义筛选整段失效，链路已退化到规则兜底路径"
+        )
+    return picked
 
 
 def extract_tender_requirements(
@@ -1466,8 +1841,12 @@ def extract_tender_requirements(
 
     # 第一段：LLM 语义识别"含具体投标要求"的章节（不靠关键词词表）。
     llm_section_ids: list[str] = []
+    # F5：把这次调用的可观测信息（是否截断/失败、输出字符数、选中章数）带出来。
+    # 该次调用原先失败时只返回空列表，与"模型认为没有要求章节"完全不可区分，
+    # 于是整条语义筛选链路静默归零也无法排查。
+    identify_trace: dict[str, Any] = {}
     if ai_ready and sections:
-        llm_section_ids = identify_requirement_sections(sections, ai)
+        llm_section_ids = identify_requirement_sections(sections, ai, identify_trace)
         scope["llmSections"] = [
             {"sectionId": str(section.get("sectionId")), "heading": str(section.get("heading") or "")}
             for section in sections
@@ -1546,7 +1925,7 @@ def extract_tender_requirements(
         '"sourceSegmentIds":["可选的关联片段ID"],'
         '"mandatory":true,"isRejection":false,"confidence":0.0}],"warnings":[]}'
         "。sourceSegmentId 必须来自输入片段方括号中的真实 ID；不要自行生成定位，不要填写 sourceLocator。"
-        "请逐条提取该批原文中全部可核验要求，不要只挑关键条款，不要合并、不要遗漏，保持原文顺序。每批最多输出 30 条。"
+        "请逐条提取该批原文中全部可核验要求，不要只挑关键条款，不要合并、不要遗漏，保持原文顺序。"
     )
     available_segments = {
         str(item.get("id")): item
@@ -1555,6 +1934,10 @@ def extract_tender_requirements(
     }
     extracted: list[dict[str, Any]] = []
     warnings: list[str] = []
+    # 章节识别失败必须进入 warnings —— 否则下游只看到"scoped 为空"，会把
+    # 整份文件零提取归因到模型或数据，而不是这一次被截断的调用。
+    if identify_trace.get("sectionIdentifyFailureReason"):
+        warnings.append(str(identify_trace["sectionIdentifyFailureReason"]))
     model_used = ""
     sent_segment_ids: set[str] = set()
     reported_segment_ids: set[str] = set()
@@ -1630,27 +2013,46 @@ def extract_tender_requirements(
             },
         },
     }
-    batches = _model_input_batches(scoped_segments)
-    for index, batch in enumerate(batches, start=1):
-        batch_count = index
-        batch_segment_ids = {
-            str(value) for value in batch.get("segmentIds") or [] if str(value)
+    def call_batch(
+        fragment: dict[str, Any],
+        label: str,
+        allow_compressed_retry: bool,
+    ) -> dict[str, Any]:
+        """执行一次批次模型调用并归一化；失败时给出可定性的原因。
+
+        ``allow_compressed_retry`` 控制是否启用「压缩文本重试」这条兜底路径，
+        只应在**单片段批次**上开启，理由见下方注释。
+        """
+        fragment_ids = {
+            str(value) for value in fragment.get("segmentIds") or [] if str(value)
         }
-        sent_segment_ids.update(batch_segment_ids)
         result = call_openai_compatible(
             ai,
             [
                 {"role": "system", "content": prompt},
                 {
                     "role": "user",
-                    "content": f"招标文件片段（第 {index} 批）如下：\n{batch['text']}",
+                    "content": f"招标文件片段（第 {label} 批）如下：\n{fragment['text']}",
                 },
             ],
-            max_tokens=4000,
+            # 中文结构化输出按「字符数 ≈ tokens × 2.6」估算：一批 6500 字符的输入，
+            # 产出上万字符 JSON 很常见。4000 tokens 会在句中截断，使整批 JSON 不完整
+            # 而走静默丢弃分支（实测同一批覆盖率因此从 75% 掉到 0%）。
+            max_tokens=MODEL_BATCH_MAX_TOKENS,
             temperature=0,
             response_format=requirement_schema,
         )
-        if _is_gateway_timeout(result):
+        if _is_gateway_timeout(result) and allow_compressed_retry:
+            # 压缩文本重试：只保留前 2200 字符。**仅限单片段批次**使用。
+            #
+            # 多片段批次绝不能走这条路径，两个原因都是实测得到的：
+            #   1. 未进入前 2200 字符的片段会被静默丢弃，但 sent_segment_ids 在调用前
+            #      已全量登记，于是这些片段被记为「已发送却未被引用」，直接压低覆盖率；
+            #   2. 它的 max_tokens 只有 1200，对中文结构化输出必然截断
+            #      （实测返回 2991 字符 ≈ 1200 × 2.5，结尾断在字符串中间），
+            #      因此几乎不可能成功 —— 是一条只会失败却掩盖真因的路径。
+            # 多片段批次改由上层的「按片段对半切分重试」处理，那条路径发送的是
+            # 完整原文，且切分后输入减半，对超时与截断都有效。
             result = call_openai_compatible(
                 ai,
                 [
@@ -1658,48 +2060,155 @@ def extract_tender_requirements(
                     {
                         "role": "user",
                         "content": (
-                            f"招标文件片段（第 {index} 批，已压缩）如下：\n"
-                            f"{batch['text'][:2200]}"
+                            f"招标文件片段（第 {label} 批，已压缩）如下：\n"
+                            f"{fragment['text'][:COMPRESSED_RETRY_CHARS]}"
                         ),
                     },
                 ],
-                max_tokens=1200,
+                # 与主路径同为 16000：这里输入已经变小，输出上限没有理由再压低。
+                max_tokens=MODEL_BATCH_MAX_TOKENS,
                 temperature=0,
                 response_format=requirement_schema,
             )
         if not result.get("success"):
-            failed_batch_count += 1
-            warnings.append(f"第 {index} 批模型调用失败：{result.get('error', '未知错误')}")
-            continue
+            return {
+                "ok": False,
+                "segmentIds": fragment_ids,
+                "reason": str(result.get("error") or "未知错误"),
+            }
 
         normalized = _normalize_model_extraction(
             _json_from_model(result.get("content", "")) or {},
             {
                 segment_id: available_segments[segment_id]
-                for segment_id in batch_segment_ids
+                for segment_id in fragment_ids
                 if segment_id in available_segments
             },
         )
-        if not normalized:
-            warnings.append(f"第 {index} 批模型未返回可用 JSON。")
-            continue
-        extracted.extend(normalized["requirements"])
-        for requirement in normalized["requirements"]:
-            reported_segment_ids.update(
-                str(value)
-                for value in (
-                    requirement.get("sourceSegmentIds")
-                    or [requirement.get("sourceSegmentId")]
+        if normalized:
+            return {
+                "ok": True,
+                "segmentIds": fragment_ids,
+                "requirements": normalized["requirements"],
+                "warnings": normalized["warnings"],
+                "model": str(result.get("model", "")),
+            }
+
+        # 模型调用成功但结果无法解析。这条路径原先只记 warning 不计数，
+        # 使问题完全不可观测 —— 必须计入失败批次。同时按成因写清原因，否则
+        # 「max_tokens 截断」「服务端输出上限」「网关流式中断」三者无法区分：
+        #   · finish_reason=length，或返回长度已接近 token 上限 → 输出被截断
+        #   · 结尾无闭合符号但长度远小于上限                    → 服务端/网关侧中断
+        #   · 其余                                              → 返回体不是预期结构
+        raw_content = str(result.get("content") or "")
+        finish_reason = str(result.get("finishReason") or "")
+        tail_unclosed = bool(raw_content.strip()) and not raw_content.strip().endswith("}")
+        near_limit = len(raw_content) >= MODEL_BATCH_MAX_TOKENS * 2
+        details = [f"{len(raw_content)} 字符"]
+        if finish_reason == "length":
+            details.append("finish_reason=length，输出被 max_tokens 截断")
+        elif tail_unclosed and near_limit:
+            details.append("结尾未闭合且长度接近上限，疑似输出被截断")
+        elif tail_unclosed:
+            details.append("结尾未闭合但长度远小于上限，疑似服务端或网关侧中断")
+        return {
+            "ok": False,
+            "segmentIds": fragment_ids,
+            "reason": f"返回无法解析（{'；'.join(details)}）",
+        }
+
+    batches = _model_input_batches(scoped_segments)
+    batch_count = len(batches)
+    retry_batch_count = 0
+    queue: list[tuple[dict[str, Any], str, int]] = [
+        (batch, str(position), 0) for position, batch in enumerate(batches, start=1)
+    ]
+    while queue:
+        fragment, label, depth = queue.pop(0)
+        fragment_ids = {
+            str(value) for value in fragment.get("segmentIds") or [] if str(value)
+        }
+        sent_segment_ids.update(fragment_ids)
+
+        outcome = call_batch(
+            fragment,
+            label,
+            # 只有单片段批次才允许走「压缩文本重试」：多片段批次一旦压缩，
+            # 未进入前 2200 字符的片段会被记为「已发送却未被引用」，
+            # 且该路径的 max_tokens 必然导致截断。多片段批次交给下面的切分重试。
+            allow_compressed_retry=len(fragment_ids) <= 1,
+        )
+        if outcome["ok"]:
+            extracted.extend(outcome["requirements"])
+            for requirement in outcome["requirements"]:
+                reported_segment_ids.update(
+                    str(value)
+                    for value in (
+                        requirement.get("sourceSegmentIds")
+                        or [requirement.get("sourceSegmentId")]
+                    )
+                    if str(value)
                 )
-                if str(value)
-            )
-        warnings.extend(normalized["warnings"])
-        model_used = str(result.get("model", ""))
+            warnings.extend(outcome.get("warnings") or [])
+            model_used = outcome.get("model") or model_used
+            continue
+
+        # 整批丢弃的代价很高：该批全部片段退回规则通道，而规则通道对同义改写无能为力。
+        # 先按片段数对半切分重试一次 —— 超时与输出截断两种成因都会随输入减半而缓解。
+        if depth < MAX_BATCH_SPLIT_DEPTH and len(fragment_ids) > 1:
+            halves = _split_batch_fragment(fragment, scoped_segments)
+            if len(halves) > 1:
+                retry_batch_count += 1
+                warnings.append(
+                    f"第 {label} 批（{len(fragment_ids)} 个片段）{outcome['reason']}，"
+                    f"已按片段对半切分为 {len(halves)} 批重试。"
+                )
+                queue[0:0] = [
+                    (half, f"{label}.{position}", depth + 1)
+                    for position, half in enumerate(halves, start=1)
+                ]
+                continue
+
+        failed_batch_count += 1
+        warnings.append(
+            f"第 {label} 批（{len(fragment_ids)} 个片段）{outcome['reason']}，已由规则结果补齐。"
+        )
+
+    # 否决条款的确定性兜底（D5 / P1）：只在**合并池**里追加额外条目，
+    # 不参与 scoped_segments 的构造 ⇒ 模型输入一字未动。
+    #
+    # ⚠ 兜底**无条件覆盖全部候选**，不排除"已进 scoped 的片段"。
+    #   早期版本写的是"已被模型输入覆盖的就不重复送（模型那边已经处理过）"，
+    #   但**模型并不保证处理**：文件 01 上 scoped 含 127 段而模型只引用了其中一部分，
+    #   被跳过的 16 段里有 12 段是否决目标（`1.4有下列情形之一的，资格审查不合格：`、
+    #   `技术符合性 | 是 | 2.…其投标无效；` 等）—— 端到端实测其中
+    #   `SEG-000448` / `SEG-000453` 确实被漏掉，目标召回只有 89%。
+    #   兜底的意义是"把偶发覆盖变成确定性覆盖"，因此不能依赖模型那一步的成功与否。
+    #   与模型条目的重复交给 `_merge_requirement_candidates` 的同源去重处理。
+    rejection_segments = _annotate_table_context(
+        [
+            segment
+            for segment in _deterministic_rejection_segments(segments, sections)
+            if str(segment.get("id") or "") and _safe_text(segment.get("text"), 800)
+        ],
+        tables,
+    )
+    # ⚠ 刻意**不**走 `extract_tender_requirements_by_rule`：那条通道的过滤闸为
+    # "全量扫描里挑出像要求的句子"设计，会系统性吞掉否决条款的典型句式
+    # （`…否则投标无效。`、`…其投标无效：`）。详见 `_is_rejection_noise` 上方注释。
+    rejection_requirements = _rejection_requirements_from_segments(rejection_segments, sections)
 
     deduplicated = _merge_requirement_candidates(
         extracted,
-        rule_result.get("requirements", []),
-        scoped_segments,
+        [
+            *rule_result.get("requirements", []),
+            *rejection_requirements,
+        ],
+        # 第三参数只用于建"文档顺序"排序键。这里传**完整** segments 而不是 scoped_segments：
+        # 两者对同一 id 的相对顺序完全一致（scoped 是 segments 的保序子序列），
+        # 故既有条目的排序不变；而兜底片段不在 scoped 中，传完整序列才能让它
+        # 落回自己的文档位置，而不是被兜底键推到末尾。
+        segments,
     )
     missing_segment_ids = sorted(sent_segment_ids - reported_segment_ids)
     coverage_rate = (
@@ -1712,25 +2221,99 @@ def extract_tender_requirements(
             f"有 {len(missing_segment_ids)} 个输入片段未被模型引用，已由规则结果兜底或保留人工核验。"
         )
     if failed_batch_count:
-        warnings.append(f"{failed_batch_count}/{batch_count} 个模型批次失败，已使用规则结果补齐。")
+        # 计的是「最终仍失败的片段批」：切分重试成功的批次不计入，
+        # 重试后仍失败的会以 x.y 标签单独计数，故分母用 batch_count 仅作参照。
+        warnings.append(
+            f"{failed_batch_count} 个片段批最终未能获得模型结果"
+            f"（原始批次 {batch_count} 个，切分重试 {retry_batch_count} 次），已使用规则结果补齐。"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 指标口径说明（这一段是刻意写清的，因为它此前被误读过）
+    #
+    # coverage_rate 只累计「模型返回的」requirements，规则通道完全不参与。
+    # 因此它衡量的是"模型读全了没有"，**不是**"最终交付覆盖了多少原文"。
+    # 而规则通道往往贡献了最终条数的绝大部分，于是这个数字会系统性地低估
+    # 实际交付的完整度，把"本就不该产出要求的标题行"也算成漏提。
+    # 下面另算一个交付口径，两个一起看才能判断真实缺口。
+    # ------------------------------------------------------------------ #
+    delivered_segment_ids = {
+        str(value)
+        for requirement in deduplicated
+        for value in (
+            requirement.get("sourceSegmentIds") or [requirement.get("sourceSegmentId")]
+        )
+        if str(value)
+    }
+    delivered_cited = delivered_segment_ids & sent_segment_ids
+    delivered_coverage_rate = (
+        round(len(delivered_cited) * 100 / len(sent_segment_ids)) if sent_segment_ids else 0
+    )
+    zero_output_segment_ids = sorted(sent_segment_ids - delivered_cited)
+    if zero_output_segment_ids:
+        warnings.append(
+            f"有 {len(zero_output_segment_ids)} 个输入片段在最终要求集中没有任何定位"
+            f"（既无模型引用也无规则条目），需人工核验是否属于真实漏提。"
+        )
+
     extraction_stats = {
         "candidateSegmentCount": len(available_segments),
         "sentSegmentCount": len(sent_segment_ids),
         "reportedSegmentCount": len(reported_segment_ids & sent_segment_ids),
         "missingSegmentIds": missing_segment_ids[:200],
+        # coverageRate 保留旧键与旧口径（模型引用率），避免既有读取方失效；
+        # 新代码请优先读下面两个语义明确的键。
         "coverageRate": coverage_rate,
+        "modelCoverageRate": coverage_rate,
+        "deliveredCoverageRate": delivered_coverage_rate,
+        "zeroOutputSegmentCount": len(zero_output_segment_ids),
+        "zeroOutputSegmentIds": zero_output_segment_ids[:200],
         "batchCount": batch_count,
         "failedBatchCount": failed_batch_count,
+        "retryBatchCount": retry_batch_count,
+        # 命中范围指纹：上游「章节识别」那一次模型调用是非确定性的，会改变分母。
+        # 落盘这三个字段后，跨轮对比时能立刻发现"分母变了"，而不是把两个
+        # 不同量纲的数字直接相减、得出一个漂亮但不可归因的结论。
+        "scopedSegmentCount": len(scoped_segments),
+        "scopeSectionIds": [str(value) for value in llm_section_ids][:200],
+        "batchSegmentCounts": [len(batch.get("segmentIds") or []) for batch in batches],
         "ruleRequirementCount": len(rule_result.get("requirements", [])),
         "llmRequirementCount": len(extracted),
+        # 否决兜底并入量。这两个数为 0 就说明这一层没生效（词表或解析结果有问题），
+        # 应显式排查，而不是默认"该文件没有否决条款"。
+        "rejectionFallbackSegmentCount": len(rejection_segments),
+        "rejectionFallbackRequirementCount": len(rejection_requirements),
+        # F5：章节识别那一次调用的可观测性。原先它失败时静默返回空列表，
+        # 与"模型认为没有要求章节"不可区分 —— 这四个键让两种情形可以分开排查。
+        # 判读方式：
+        #   · sectionIdentifyTruncated=True → SECTION_IDENTIFY_MAX_TOKENS 仍偏小
+        #   · sectionIdentifyFailureReason 非空但未截断 → 调用/解析问题
+        #   · sectionIdentifyPickedCount=0 且无失败原因 → 模型确实没挑出章节（正常可能）
+        "sectionIdentifySectionCount": identify_trace.get("sectionIdentifySectionCount", 0),
+        "sectionIdentifyMaxTokens": identify_trace.get(
+            "sectionIdentifyMaxTokens", SECTION_IDENTIFY_MAX_TOKENS
+        ),
+        "sectionIdentifyFinishReason": identify_trace.get("sectionIdentifyFinishReason", ""),
+        "sectionIdentifyOutputChars": identify_trace.get("sectionIdentifyOutputChars", 0),
+        "sectionIdentifyPickedCount": identify_trace.get(
+            "sectionIdentifyPickedCount", len(llm_section_ids)
+        ),
+        "sectionIdentifyTruncated": bool(identify_trace.get("sectionIdentifyTruncated")),
+        "sectionIdentifyFailureReason": str(
+            identify_trace.get("sectionIdentifyFailureReason") or ""
+        ),
     }
 
     if deduplicated:
         return {
             "requirements": deduplicated,
-            "warnings": warnings[:8],
+            "warnings": warnings[:16],
             "scope": scope,
-            "extractionMethod": "llm+rule" if rule_result.get("requirements") else "llm",
+            "extractionMethod": (
+                "llm+rule"
+                if (rule_result.get("requirements") or rejection_requirements)
+                else "llm"
+            ),
             "modelUsed": model_used,
             "stats": extraction_stats,
             "extractionWarning": "模型结果已与规则结果合并，并对未引用片段做了覆盖核验。" if warnings else "",

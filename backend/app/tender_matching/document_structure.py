@@ -6,6 +6,18 @@ from typing import Any
 
 
 SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ★ 加词的硬约束（S1，第六轮实测）：本表**同时**被 `_looks_like_heading` 的
+    #   `term_signal`（`:313` 附近）使用 —— 命中本表即认为"像标题"。所以往这里加词
+    #   不只是改标签，还会让含该词的**正文行/长表格行**通过标题判定、新建章、截断父章、
+    #   整体移位 `SEC` 编号，进而改变送进模型的内容。
+    #   实测：完整候选集（14 词）会新建 8 个标题（01 +5、03 +3），其中一个是
+    #   「序号 资格评审因素 1 1）营业执照…」整行表格。⇒ 加词前必须先用
+    #   `待应用脚本/probe_s1_tree_neutral.py` 确认 Δ标题 = 0（树中性），
+    #   再用 `probe_s1_model_input_delta.py` 确认四个 Δ 为 0 或为纯正向。
+    #   下面这批词是**逐词实测通过**的（10 词）：Δ标题全 0、LLM 主路径模型输入
+    #   新增 0/移除 0、规则兜底路径新增 28/移除 0、候选段 +2/−0。
+    #   ⚠ 未纳入的 4 词（评标标准、评分细则、评审因素、资格证明文件）会让正文行变成
+    #     标题，须等 `:313` 与 `SECTION_TYPE_TERMS` 解耦后再加（见 §10.2）。
     (
         "rejection",
         (
@@ -15,6 +27,16 @@ SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "否决条款",
             "无效投标",
             "投标无效",
+            # S1 补充（树中性）。
+            # 注意：「资格审查不合格」「符合性审查不合格」含后续类型的词
+            # （qualification 的「资格审查」、compliance 的「符合性审查」），
+            # 因 rejection 排第 1 而**改写**这些标题的判定。实测 5 处改写全是
+            # 真否决条款（如「1.4有下列情形之一的，资格审查不合格：」），
+            # 属修正而非误伤，且候选段与模型输入均 0 移除。
+            "无效报价",
+            "无效响应",
+            "资格审查不合格",
+            "符合性审查不合格",
         ),
     ),
     (
@@ -41,6 +63,10 @@ SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "资格审查",
             "合格投标人",
             "特定资格要求",
+            # S1 补充（树中性）：03 上救回「二、申请人的资格要求：」5 段
+            # （候选段 +2、规则兜底路径模型输入 +28、无移除）。
+            "申请人的资格要求",
+            "申请人资格要求",
         ),
     ),
     (
@@ -63,6 +89,12 @@ SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "评审标准",
             "评审方法",
             "评标委员会",
+            # S1 补充（树中性）。⚠ 注意：`evaluation` **不在** requirement_scope 的
+            # PRIMARY_SECTION_TYPES 白名单里，判对这两个词**不会**新增要求候选；
+            # 它们的价值在 `document_fine_matching.VALID_SCOPE_SECTION_TYPES`
+            # （那里含 evaluation），即规则兜底路径的送模型过滤，以及类型语义正确性。
+            "评标细则",
+            "评分因素",
         ),
     ),
     (
@@ -141,6 +173,14 @@ SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "签署与封装",
             "签字与盖章",
             "装订要求",
+            # S1 补充（树中性）。⚠ 同 evaluation：`document_format` 不在
+            # PRIMARY_SECTION_TYPES 里，判对不新增要求候选；价值在
+            # VALID_SCOPE_SECTION_TYPES（含 document_format）与语义正确性。
+            # 「合同格式」按有序首命中会遮蔽 `contract` 的「合同条款」，
+            # 实测只 1 处（「（三）合同格式及合同条款」，1 段），且两类型都不在
+            # PRIMARY 白名单 ⇒ 对候选集与模型输入均 0 影响。
+            "合同格式",
+            "合同文本",
         ),
     ),
     (
@@ -291,6 +331,29 @@ def _heading_source_text(segment: dict[str, Any]) -> str:
     return _clean_heading(segment.get("text"))
 
 
+# 「像标题」的**长度闸门**。原值是硬编码的 `84 if 表格行 else 120`。
+#
+# 这两道闸门是 S6（长条款句被当章标题）的主要漏水口 —— 它和函数末尾那道
+# 「结尾为 。！？； 才否决」的闸门配合，让"以编号开头 + 含条款动词 +
+# 长度 ≤120 + 以「：」结尾"的**条款引导句**全部通过判定（「：」不在否决标点里）。
+#
+# 第七轮实测（4 份基准、共 590 章；脚本 `待应用脚本/probe_s313_decouple_design.py`）：
+#
+#     上限   残留S6   Δ标题消失   其中真标题误杀
+#     120       56         0           0      ← 原值
+#      40       24        35           0      ← 现值：3 条代价全是填空行/表格行
+#      24        0        75           2      （含一条挂着 40 段的真标题）
+#
+# 取 40：清掉 32/56 章 S6，代价 3 条经逐条判读**全部是填空行/表格行**
+# （`(5)政府采购方式：公开招标…`、`（五）投标地点：…`、表格跨行拼接）⇒ 零真标题误杀。
+#
+# ⚠ 改这两个值会改"什么算标题" ⇒ 改文档树 ⇒ 改送进模型的内容。
+#   任何调整都必须同进程交错验证（`待应用脚本/probe_limit40_landed_verify.py`），
+#   并逐条判读新消失的标题属"填空行/表格行"（收益）还是"真标题"（误杀）。
+HEADING_MAX_TEXT_CHARS = 40
+HEADING_MAX_TABLE_ROW_CHARS = 40
+
+
 def _looks_like_heading(segment: dict[str, Any]) -> bool:
     raw_text = _clean_text(segment.get("text"), 240)
     if _looks_like_toc_entry(raw_text):
@@ -306,8 +369,14 @@ def _looks_like_heading(segment: dict[str, Any]) -> bool:
     content_type = str(segment.get("contentType") or "")
     if content_type == "table_row" and "|" in str(segment.get("text") or ""):
         return False
-    if not style_signal and len(text) > (84 if content_type == "table_row" else 120):
-        return False
+    if not style_signal:
+        limit = (
+            HEADING_MAX_TABLE_ROW_CHARS
+            if content_type == "table_row"
+            else HEADING_MAX_TEXT_CHARS
+        )
+        if len(text) > limit:
+            return False
 
     prefix_signal = any(pattern.match(text) for pattern in HEADING_PREFIXES)
     term_signal = _section_type_for_heading(text) != "other"
@@ -340,6 +409,33 @@ def _looks_like_toc_entry(text: str) -> bool:
     if re.search(r"(?:\s|[.·…])[-－]?\s*\d+\s*[-－]?$", clean):
         return True
     return bool(re.search(r"\s+\d+$", clean)) and len(clean) <= 80
+
+
+# 「混合篇」判定的标题长度上界（字符）。只在**短标题**上标记 `isMixed`：
+# 长标题里偶然同时出现两类关键词很常见（如「交付时间：…达到验收…」），那不是"混合篇"，
+# 而是 S6（长条款句被当章标题）。取 32，与清单标签的截断长度同量级。
+MIXED_HEADING_MAX_CHARS = 32
+
+
+def _section_types_for_heading(heading: str) -> list[str]:
+    """返回该标题**命中的全部**类型（按 `SECTION_TYPE_TERMS` 的优先级顺序）。
+
+    与 `_section_type_for_heading` **同源**：后者就是取本列表的首个元素。
+    单独暴露这个函数是为了记录「混合篇」（同时命中 ≥2 个类型）—— 有序首命中会把
+    这类标题判成优先级最高的那个，但标题里其实**同时**含另一类的语义：
+
+        第四篇 资格审查及评标办法      qualification(先) + evaluation(后)
+        （一）评审因素                评价类，但父章是 qualification
+
+    ⚠ 本函数**只用于记录/诊断**，不参与任何判定 —— S2 的第 1 步就是"先只记录、
+    不改判定"，等拿到 `isMixed` 的分布再决定要不要动 `sectionType`（动它会进模型输入）。
+    """
+    compact = re.sub(r"\s+", "", heading)
+    return [
+        section_type
+        for section_type, terms in SECTION_TYPE_TERMS
+        if any(term in compact for term in terms)
+    ]
 
 
 def _section_type_for_heading(heading: str) -> str:
@@ -403,6 +499,14 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 "sourceLocator": _segment_locator(segment, position),
                 "level": _level_for_heading(heading, segment),
                 "sectionType": _section_type_for_heading(heading),
+                # S2 第 1 步：只记录，不参与判定。`sectionType` 仍是有序首命中的结果，
+                # 一字未动；这里额外把"命中的全部类型"和"是否混合篇"留下，
+                # 用于后续决定要不要改判定（改判定会进模型输入，需另行验证）。
+                "sectionTypeHits": _section_types_for_heading(heading),
+                "isMixed": (
+                    len(_section_types_for_heading(heading)) >= 2
+                    and len(heading) <= MIXED_HEADING_MAX_CHARS
+                ),
             }
         )
 
@@ -438,6 +542,8 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 "id": section_id,
                 "sectionId": section_id,
                 "sectionType": section_type,
+                "sectionTypeHits": candidate.get("sectionTypeHits") or [],
+                "isMixed": bool(candidate.get("isMixed")),
                 "heading": candidate["heading"],
                 "level": candidate["level"],
                 "parentId": parent["id"] if parent else "",
@@ -473,6 +579,9 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                     "id": "SEC-0000",
                     "sectionId": "SEC-0000",
                     "sectionType": "other",
+                    # 与其余 section 保持同一 shape（S2 第 1 步新增的两个记录键）
+                    "sectionTypeHits": [],
+                    "isMixed": False,
                     "heading": "前置内容",
                     "level": 0,
                     "parentId": "",

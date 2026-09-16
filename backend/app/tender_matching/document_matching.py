@@ -399,5 +399,8 @@ def evaluate_tender_document(
             "warning": extraction["extractionWarning"],
             "warnings": extraction.get("warnings", []),
             "scope": extraction.get("scope", {}),
+            # 提取层在 document_fine_matching 已算好覆盖率/失败批次等统计，
+            # 此前未透出，导致"提取质量"不可观测、无法建立基线。此处原样带出。
+            "stats": extraction.get("stats", {}),
         },
     )
