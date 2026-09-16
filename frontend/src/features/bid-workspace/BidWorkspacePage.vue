@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { BriefcaseBusiness, Database, FileText, ListChecks, Rocket, ShieldCheck, Upload } from "lucide-vue-next";
 import { api } from "../../services/api";
@@ -18,6 +18,7 @@ const props = defineProps<{
   workspace: Workspace | null;
   project: CatalogItem | null;
   libraries: LibrarySummary[];
+  workspaces: Workspace[];
   selectedLibraryKey: string;
   materialsProfile: MaterialProfile | null;
   busy: boolean;
@@ -27,6 +28,7 @@ const emit = defineEmits<{
   generate: [];
   "update:selected-library-key": [key: string];
   "update:bid-document": [doc: BidDocument];
+  "select-workspace": [workspace: Workspace];
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -43,6 +45,27 @@ const proofread = ref<ProofreadResult | null>(null);
 const fileName = computed(() => tenderFile.value?.name || props.project?.title || "");
 const selectedLibrary = computed(
   () => props.libraries.find((library) => library.key === props.selectedLibraryKey) || props.libraries[0] || null
+);
+
+const analyzedWorkspaces = computed(() =>
+  [...props.workspaces].sort((a, b) => {
+    const aFine = a.reasoning?.fineReview?.rows?.length || 0;
+    const bFine = b.reasoning?.fineReview?.rows?.length || 0;
+    return bFine - aFine;
+  })
+);
+
+function onSelectWorkspace(workspaceId: string) {
+  const ws = props.workspaces.find((item) => item.id === workspaceId);
+  if (ws) emit("select-workspace", ws);
+}
+
+watch(
+  () => props.workspace?.id,
+  () => {
+    bidDocument.value = null;
+    proofread.value = null;
+  }
 );
 
 const templates = [
@@ -190,6 +213,54 @@ function onFileChange(event: Event) {
 
 <template>
   <div class="bid-workspace-page">
+    <el-card class="panel project-select-panel" shadow="never">
+      <template #header>
+        <div class="panel-header">
+          <div class="result-title">
+            <el-icon><BriefcaseBusiness /></el-icon>
+            <span>选择已匹配的项目</span>
+          </div>
+          <el-tag type="info" effect="plain">从匹配评估结果选取，或下方上传新文件</el-tag>
+        </div>
+      </template>
+      <el-row :gutter="12" align="middle">
+        <el-col :xs="24" :md="16">
+          <el-select
+            :model-value="workspace?.id || ''"
+            class="field"
+            filterable
+            placeholder="选择已匹配评估的项目"
+            @update:model-value="onSelectWorkspace"
+          >
+            <el-option
+              v-for="ws in analyzedWorkspaces"
+              :key="ws.id"
+              :label="ws.title || ws.project.title"
+              :value="ws.id"
+            >
+              <div class="select-option">
+                <strong>{{ ws.title || ws.project.title }}</strong>
+                <small>
+                  {{
+                    ws.reasoning.fineReview
+                      ? `已拆解 ${ws.reasoning.fineReview.clauseCount} 条条款`
+                      : "公告资格粗匹配"
+                  }}
+                </small>
+              </div>
+            </el-option>
+          </el-select>
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <div v-if="workspace" class="project-current">
+            <span class="form-hint">当前项目：</span>
+            <strong>{{ project?.title || workspace.title }}</strong>
+          </div>
+          <span v-else class="form-hint">尚未选择项目，可上传新招标文件开始分析</span>
+        </el-col>
+      </el-row>
+    </el-card>
+
     <el-card class="panel generator-panel" shadow="never">
       <template #header>
         <div class="panel-header">
@@ -533,5 +604,17 @@ function onFileChange(event: Event) {
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.project-select-panel {
+  margin-bottom: 16px;
+}
+
+.project-current {
+  color: var(--text-primary);
+}
+
+.project-current strong {
+  font-weight: 600;
 }
 </style>

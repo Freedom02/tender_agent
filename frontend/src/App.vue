@@ -184,12 +184,14 @@ onMounted(loadBootstrap);
       :workspace="selectedWorkspace"
       :project="selectedProject"
       :libraries="libraries"
+      :workspaces="workspaces"
       :selected-library-key="libraryForm.key"
       :materials-profile="materialsProfile"
       :busy="busy"
       @generate="openGenerator"
       @update:selected-library-key="libraryForm.key = $event"
       @update:bid-document="onBidDocumentUpdated"
+      @select-workspace="selectMatchingWorkspace"
     />
 
     <BidGeneratorPage
