@@ -5,7 +5,16 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
-from .contracts import build_comparison, normalize_evidence, normalize_requirement, summarize_comparisons
+from .agent_bridge import bridge_config, run_agent_bridge_extraction
+from .contracts import (
+    SECTION_JUDGE_EXCLUDE,
+    SECTION_JUDGE_INCLUDE,
+    build_comparison,
+    build_section_menu,
+    normalize_evidence,
+    normalize_requirement,
+    summarize_comparisons,
+)
 from .eligibility import _is_gateway_timeout, call_openai_compatible
 from .requirement_scope import is_form_title, is_placeholder_row, select_requirement_scope
 
@@ -1746,29 +1755,23 @@ def identify_requirement_sections(
         return []
 
     section_list = [section for section in sections if isinstance(section, dict)]
-    menu_lines: list[str] = []
-    for section in section_list:
-        section_id = str(section.get("sectionId") or "")
-        if not section_id:
-            continue
-        # D1：只喂一层标题时，模型看不到层级归属。例如「二、平台建设内容、技术要求：」
-        # 的父级是「第二部分 前附表及投标人须知」，而 prompt 要求排除投标人须知，
-        # 于是整块技术要求被连带排除（实测：命中片段 61~80 → 337~412，文件 03 找回 5 章 296 段）。
-        # 这里改用完整章节路径；prompt 的格式声明与判断依据也随之对齐为「路径」——
-        # 否则 prompt 说「标题」而清单给路径，实测片段级 Jaccard 会从 0.857 掉到 0.683，
-        # 文件 02 上还出现 5 次中 3 次返回空列表（模型被互相矛盾的描述搞糊涂后直接放弃）。
-        path = [str(item) for item in (section.get("sectionPath") or []) if str(item).strip()]
-        label = _safe_text(" / ".join(path) or section.get("heading"), 260)
-        count = len(section.get("segmentIds") or [])
-        menu_lines.append(f"[{section_id}] {label} | 段落数 {count}")
+    # 菜单构造收敛到 `contracts.build_section_menu()` —— 智能体任务包里的 `sectionMenu`
+    # 用的是**同一个函数**。P0 并轨后这件事从"可选的整洁"变成"必须的约束"：
+    # 两个判断者（本地 LLM / 智能体）的输入必须逐字一致，否则"agent 判的章"与
+    # "LLM 判的章"之间的差异里会混进"菜单格式不同"这个无关变量，无法归因。
+    #
+    # D1 的历史结论已写进该函数：必须用**完整章节路径**而非单层标题，
+    # 否则「二、平台建设内容、技术要求：」这类章的父级（投标人须知）会把它连带排除
+    # （实测：命中片段 61~80 → 337~412，文件 03 找回 5 章 296 段）。
+    menu_lines = build_section_menu(section_list)
     if not menu_lines:
         return _fail("章节清单为空，未发起章节识别调用")
     menu = "\n".join(menu_lines)
 
     prompt = (
         "你是招标文件结构识别助手。下面是一份招标文件的章节清单，格式为：[章节ID] 完整章节路径 | 段落数。"
-        "请挑出【包含需要投标人满足或响应的具体条件的章节】：技术/功能/性能/参数、商务、资格、验收、服务、交付、售后等。"
-        "排除流程性章节：投标邀请、投标人须知、评标办法、评分标准、合同格式、质疑投诉、中标人确定、开标程序、监督。"
+        f"请挑出【包含需要投标人满足或响应的具体条件的章节】：{SECTION_JUDGE_INCLUDE}。"
+        f"排除流程性章节：{SECTION_JUDGE_EXCLUDE}。"
         "只依据章节路径判断，不要编造不存在的章节ID。"
         '输出严格 JSON，不使用 Markdown：{"sections":["章节ID1","章节ID2"]}'
     )
@@ -1832,6 +1835,9 @@ def extract_tender_requirements(
     ai: dict[str, Any],
     sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
+    source_file_id: str = "",
+    project_id: str = "",
+    document_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scope = select_requirement_scope(segments, sections, tables)
     base_url = str(ai.get("baseUrl") or "").strip()
@@ -1839,19 +1845,78 @@ def extract_tender_requirements(
     model = str(ai.get("model") or "").strip()
     ai_ready = ai.get("enabled") is not False and bool(base_url and api_key and model)
 
-    # 第一段：LLM 语义识别"含具体投标要求"的章节（不靠关键词词表）。
+    # ------------------------------------------------------------------ #
+    # 智能体桥（agent-bridge）：把外部智能体（WorkBuddy）作为提取层的**一个 Provider**。
+    #
+    # ★ P0 并轨：桥调用位置从「rule_result 之后」提前到「章节判断之前」。
+    #   原位置的理由是"`rule_result` 必须先生成"—— 但那是**合并阶段**的约束，
+    #   不是调用顺序的约束：桥只依赖 `segments`（送的是全量，不依赖 scoped），
+    #   与 `rule_result` 之间没有任何依赖关系。
+    #
+    #   提前消除了一次白跑：章节判断现在可以**由桥的同一次调用产出**
+    #   （任务包带 `sectionMenu`、输出 schema 带 `sections`）⇒ 桥命中时本地 LLM
+    #   调用次数 1 → 0。并轨前的实测证据是三个数字同时成立：
+    #   `sectionIdentifySectionCount=152` / `sectionIdentifyPickedCount=4` /
+    #   `agentBridgeHit=True` —— 桥命中而第一跳照跑，桥命中耗时 15.0s / 50.2s。
+    #
+    #   其余设计原则不变：
+    #     · 桥走本地 SDK / HTTP，**不依赖 `ai.baseUrl/apiKey/model`** —— 放这里也
+    #       仍然在 ai_ready 语义之外（桥自己看 `ai.agentBridge.enabled`）；
+    #     · 送桥的片段集是**全量 `segments`**：jobId 由「契约版本 + sourceFileId +
+    #       片段数 + 总字数」派生（见 `agent_bridge._job_id`），送 scoped 会让它随上游
+    #       非确定性结果漂移 ⇒ 文件桥的快路径永远命中不了；
+    #     · 桥不可用时返回 `None`，此处一字不改地回退原有 LLM 通道。
+    # ------------------------------------------------------------------ #
+    agent_bridge_result = run_agent_bridge_extraction(
+        segments,
+        ai,
+        source_file_id=source_file_id,
+        document_meta=document_meta,
+        sections=sections,
+        tables=tables,
+    )
+    agent_bridge_hit = agent_bridge_result is not None
+
+    # 章节判断（原「第一段」）：优先取桥的同批产物，取不到才回退本地 LLM。
+    #
+    # ⚠ 两种"取不到"必须分开对待，否则会静默丢掉第一跳的能力（而外观上一切正常）：
+    #     · agent 的 `sections` 非空 → 直接用（来源 agent），本地 LLM 调用 0 次；
+    #     · agent 的 `sections` 为空 → 这次调用没给出结构判断（旧 instructions 跑出的
+    #       结果文件、或模型没填该字段）⇒ **回退本地 LLM**（来源 llm）。这样最坏情况
+    #       等价于并轨前的行为，而不是让 scoped 范围失控变宽。
     llm_section_ids: list[str] = []
-    # F5：把这次调用的可观测信息（是否截断/失败、输出字符数、选中章数）带出来。
-    # 该次调用原先失败时只返回空列表，与"模型认为没有要求章节"完全不可区分，
-    # 于是整条语义筛选链路静默归零也无法排查。
+    # F5：章节判断那一次调用的可观测信息（是否截断/失败、输出字符数、选中章数）由
+    # `identify_requirement_sections` 原地写入 `identify_trace`。该次调用原先失败时
+    # 只返回空列表，与"模型认为没有要求章节"完全不可区分，于是整条语义筛选链路
+    # 静默归零也无法排查。并轨后该调用只在「桥未命中」或「桥未给出章节判断」时发生，
+    # 所以 trace 为空本身也是一个信号（见 stats 里的 `sectionIdentifySource`）。
     identify_trace: dict[str, Any] = {}
-    if ai_ready and sections:
+    agent_section_ids = [
+        str(value) for value in ((agent_bridge_result or {}).get("sections") or []) if str(value)
+    ]
+    if agent_bridge_hit and agent_section_ids:
+        llm_section_ids = agent_section_ids
+        section_identify_source = "agent"
+    elif ai_ready and sections:
         llm_section_ids = identify_requirement_sections(sections, ai, identify_trace)
+        section_identify_source = "llm"
+    else:
+        section_identify_source = "skipped"
+    if llm_section_ids:
         scope["llmSections"] = [
             {"sectionId": str(section.get("sectionId")), "heading": str(section.get("heading") or "")}
-            for section in sections
+            for section in (sections or [])
             if str(section.get("sectionId")) in set(llm_section_ids)
         ]
+    # 来源必须进产物：并轨后章节判断有 agent / llm / skipped 三种来源，
+    # 只看"选中了几章"无法归因，事后也没法回答"这次范围是谁定的"。
+    #
+    # ⚠ 这里用 `llmSectionPickedCount`（判断**选中**的章数）而不是 `llmSectionCount`：
+    #   后者在产物侧（`agent_bridge._compact_scope`）的含义是"能在章节树里找到对象的
+    #   章数"，两个口径会差在"模型给了一个不存在的章"的情况下。同名不同义是本项目
+    #   已经踩过的坑（分母漂移），所以刻意用不同的键名。
+    scope["llmSectionSource"] = section_identify_source
+    scope["llmSectionPickedCount"] = len(llm_section_ids)
 
     # 章节语义筛选优先：LLM 识别到目标章节时以其为主，仅补充规则识别出的“要求类”表格行，
     # 不再与规则范围取并集，避免把评标办法、合同条款、格式模板等流程性内容灌回模型。
@@ -1900,13 +1965,27 @@ def extract_tender_requirements(
         scoped_text = text
     rule_result = extract_tender_requirements_by_rule(scoped_text, scoped_segments)
 
-    if not ai_ready:
+        # 桥结果与 agent_bridge_hit 在函数上半部分已经算好（P0 并轨：桥调用提前到
+    # 章节判断之前，见那里的注释）。此处只消费，不重复调用。
+
+    if not ai_ready and not agent_bridge_hit:
+        # "桥开着但没命中"必须说出来。否则用户看到的是"分析成功、只是用了规则通道"，
+        # 完全不知道智能体那次其实**投递了任务、只是没等到结果**（Sidecar 没启动）。
+        # 这类静默降级是这套系统最容易让人误判的地方：一切看起来都正常。
+        bridge_note = (
+            "智能体桥已开启，但本次未取到结果（Sidecar 未在线或尚无该任务的结果）；"
+            "任务包已投递，Sidecar 启动后会直接复用。"
+            if bridge_config(ai).get("enabled")
+            else ""
+        )
         return {
             **rule_result,
             "scope": scope,
             "extractionMethod": "rule",
+            "extractionProvider": "builtin-rule",
+            "warnings": [*(rule_result.get("warnings") or []), *([bridge_note] if bridge_note else [])],
             "modelUsed": "",
-            "extractionWarning": "未配置大模型，已使用规则拆解条款。",
+            "extractionWarning": "未配置大模型，已使用规则拆解条款。" + (f"（{bridge_note}）" if bridge_note else ""),
         }
 
     prompt = (
@@ -1943,6 +2022,26 @@ def extract_tender_requirements(
     reported_segment_ids: set[str] = set()
     batch_count = 0
     failed_batch_count = 0
+
+    # ★ 桥命中：把智能体结果**当作"模型通道"的结果注入原有变量**，而不是另开一条分支。
+    #   这样合并、D5 否决兜底、覆盖率统计、返回结构全部复用同一条路径 ——
+    #   两条通道的差异就只在"谁产出了 requirements"，统计口径完全一致、可直接对比。
+    #   另开分支的代价是两套口径，历史教训：口径不一致的副本最终必然漂移。
+    agent_bridge_stats: dict[str, Any] = {}
+    if agent_bridge_hit:
+        agent_bridge_stats = agent_bridge_result.get("stats") or {}
+        extracted.extend(agent_bridge_result.get("requirements") or [])
+        sent_segment_ids.update(agent_bridge_result.get("sentSegmentIds") or set())
+        reported_segment_ids.update(agent_bridge_result.get("reportedSegmentIds") or set())
+        warnings.extend(agent_bridge_result.get("warnings") or [])
+        model_used = str(agent_bridge_result.get("modelUsed") or "")
+        batch_count = int(agent_bridge_result.get("batchCount") or 1)
+        failed_batch_count = int(agent_bridge_result.get("failedBatchCount") or 0)
+        warnings.append(
+            f"本次由智能体通道完成提取（jobId={agent_bridge_result.get('jobId', '')}，"
+            f"传输={agent_bridge_result.get('transport', '')}，"
+            f"引用片段 {len(reported_segment_ids)} / 送入 {len(sent_segment_ids)}）。"
+        )
 
     requirement_schema = {
         "type": "json_schema",
@@ -2117,9 +2216,17 @@ def extract_tender_requirements(
             "reason": f"返回无法解析（{'；'.join(details)}）",
         }
 
-    batches = _model_input_batches(scoped_segments)
-    batch_count = len(batches)
-    retry_batch_count = 0
+    # 桥命中时**不构造模型批次**（queue 为空，下面的 while 自然空转）：
+    # 不去改那 56 行批次循环的缩进，避免为了一条新通道去动已验证过的重试/切分逻辑。
+    # 但 batch_count 必须保留桥报告的值 —— 否则会被空列表覆盖成 0，
+    # stats 里显示"0 批"，看起来像整条链路没跑，正好把最需要观察的那次调用藏起来。
+    batches = [] if agent_bridge_hit else _model_input_batches(scoped_segments)
+    batch_count = (
+        int(agent_bridge_result.get("batchCount") or 0) if agent_bridge_hit else len(batches)
+    )
+    retry_batch_count = (
+        int(agent_bridge_stats.get("retryBatchCount") or 0) if agent_bridge_hit else 0
+    )
     queue: list[tuple[dict[str, Any], str, int]] = [
         (batch, str(position), 0) for position, batch in enumerate(batches, start=1)
     ]
@@ -2256,9 +2363,26 @@ def extract_tender_requirements(
             f"（既无模型引用也无规则条目），需人工核验是否属于真实漏提。"
         )
 
+    # 通道标识：`extractionMethod` 说清"谁产出了条款"，`extractionProvider` 说清"哪个实现"。
+    # 两个维度分开，是因为 D3「直接替换」上线后要能一眼分辨"这次跑的是哪条路"——
+    # 否则提取质量一旦变化，无法判断是 Provider 换了还是上游数据变了。
+    rule_contributed = bool(rule_result.get("requirements") or rejection_requirements)
+    if agent_bridge_hit:
+        extraction_method = "agent+rule" if rule_contributed else "agent"
+        extraction_provider = "workbuddy-agent"
+    else:
+        extraction_method = "llm+rule" if rule_contributed else "llm"
+        extraction_provider = "builtin-llm"
+
     extraction_stats = {
         "candidateSegmentCount": len(available_segments),
         "sentSegmentCount": len(sent_segment_ids),
+        # ⚠ 桥命中时覆盖率的分母**换量纲了**：桥送全量片段，LLM 通道送 scoped 子集。
+        #   跨通道比覆盖率之前必须先看这个键，否则会把"分母从几百变一千多"误读成
+        #   "质量下降"。本项目在 deliveredCoverageRate 上已经栽过一次同样的跟头。
+        "coverageDenominatorKind": (
+            "all-segments" if agent_bridge_hit else "scoped-segments"
+        ),
         "reportedSegmentCount": len(reported_segment_ids & sent_segment_ids),
         "missingSegmentIds": missing_segment_ids[:200],
         # coverageRate 保留旧键与旧口径（模型引用率），避免既有读取方失效；
@@ -2275,6 +2399,16 @@ def extract_tender_requirements(
         # 落盘这三个字段后，跨轮对比时能立刻发现"分母变了"，而不是把两个
         # 不同量纲的数字直接相减、得出一个漂亮但不可归因的结论。
         "scopedSegmentCount": len(scoped_segments),
+        # ★ 跨通道**可比**的口径。桥送全量片段（分母 1371），LLM 通道送 scoped 子集
+        #   （分母几百），直接比 coverageRate 会得出"换成智能体后覆盖率从 70% 掉到 2%"
+        #   这种荒谬结论。这里固定用**规则 scope** 当分母再算一次引用率：
+        #   两条通道同分母，才能回答"智能体是不是漏掉了该提的东西"。
+        "scopedCitedSegmentCount": len(reported_segment_ids & scoped_ids),
+        "scopedCoverageRate": (
+            round(len(reported_segment_ids & scoped_ids) * 100 / len(scoped_ids))
+            if scoped_ids
+            else 0
+        ),
         "scopeSectionIds": [str(value) for value in llm_section_ids][:200],
         "batchSegmentCounts": [len(batch.get("segmentIds") or []) for batch in batches],
         "ruleRequirementCount": len(rule_result.get("requirements", [])),
@@ -2302,21 +2436,93 @@ def extract_tender_requirements(
         "sectionIdentifyFailureReason": str(
             identify_trace.get("sectionIdentifyFailureReason") or ""
         ),
+        # ---- P0 并轨：章节判断的来源与归因 -----------------------------------
+        # ⚠ 只看 `sectionIdentifySectionCount=0` 会得出完全相反的结论：
+        #   并轨后桥命中时该值必然是 0 —— 不是"没识别出章节"，而是**这一次压根
+        #   没发起本地调用**（判断来自智能体）。两种情况必须靠本键区分。
+        #   · "agent"   桥命中且给出了 sections —— 本地 LLM 调用 0 次（目标状态）
+        #   · "llm"     桥未命中，或桥命中但未给出 sections —— 回退本地 LLM（等价并轨前）
+        #   · "skipped" 既没桥也没大模型 —— 走纯规则 scope
+        "sectionIdentifySource": section_identify_source,
+        "agentBridgeSectionMenuCount": int(
+            (agent_bridge_result or {}).get("sectionMenuCount") or 0
+        ),
+        "agentBridgeSectionsPickedCount": len(agent_section_ids),
+        # 编造的章节 ID 数。非 0 说明模型在"编 ID"而不是"选 ID"，章节菜单的描述或
+        # 输出格式需要收紧 —— 这是判据质量信号，不是可以忽略的噪声。
+        "agentBridgeFabricatedSectionCount": int(
+            (agent_bridge_result or {}).get("fabricatedSectionCount") or 0
+        ),
+        "agentBridgeSectionJudgement": str(
+            (agent_bridge_result or {}).get("sectionJudgement") or ""
+        ),
+        # ---- 通道归因（D3「直接替换」的可观测性基座）-------------------------
+        # D3 选了「直接替换、不做影子模式」，代价是"提取变了"与"匹配变了"会耦合，
+        # 出问题时无法归因。这里把**两条路径各自的口径**都记下来，成本近零：
+        # 下次质量变化时，看 provider 是否为 workbuddy-agent、jobId 是否换了、
+        # 以及 sent/reported 两个绝对量，就能定位到底是哪一环动的。
+        "extractionProvider": extraction_provider,
+        "agentBridgeHit": agent_bridge_hit,
+        "agentBridgeJobId": str((agent_bridge_result or {}).get("jobId") or ""),
+        "agentBridgeTransport": str((agent_bridge_result or {}).get("transport") or ""),
+        "agentBridgeStructurePath": str((agent_bridge_result or {}).get("structurePath") or ""),
+        # 桥侧的真实成本与护栏状态整包带出（批次耗时、token、漏网工具…）。
+        # 整包而不是逐键挑：逐键的话，桥那边新增一个统计键就要记得同步改这里，
+        # 而"忘记同步"的表现是**字段静默缺失**，和本轮修的那几个缺陷是同一类问题。
+        "agentBridgeStats": agent_bridge_stats,
+        "projectId": project_id,
+        "sourceFileId": source_file_id,
     }
+
+    # ------------------------------------------------------------------ #
+    # 产物落盘（D）：把这次提取的**完整产物**落到 runtime/projects/<id>/pack/。
+    # 产物服务于两个下游：匹配（已有）与方案撰写（bid_writing，开发中）。
+    # 因此它**不**绑定 fineReview.rows 的形状，而是自带溯源与结构信息。
+    # 落盘失败不影响主链路（只进 warnings）。
+    # ------------------------------------------------------------------ #
+    pack_path = ""
+    if agent_bridge_hit:
+        try:
+            from .agent_bridge import write_tender_pack
+
+            written = write_tender_pack(
+                ai,
+                project_id=project_id,
+                source_file_id=source_file_id,
+                document_meta=document_meta,
+                job_id=str(agent_bridge_result.get("jobId") or ""),
+                structure_path=str(agent_bridge_result.get("structurePath") or ""),
+                requirements=deduplicated,
+                scope=scope,
+                stats=extraction_stats,
+                warnings=warnings[:16],
+                extraction_method=extraction_method,
+                model_used=model_used,
+            )
+            if written:
+                pack_path = str(written)
+        except Exception as error:  # 产物是"锦上添花"，绝不能让它拖垮提取
+            warnings.append(f"提取产物落盘失败（{type(error).__name__}: {error}），提取结果不受影响。")
+        if pack_path:
+            extraction_stats["packPath"] = pack_path
 
     if deduplicated:
         return {
             "requirements": deduplicated,
             "warnings": warnings[:16],
             "scope": scope,
-            "extractionMethod": (
-                "llm+rule"
-                if (rule_result.get("requirements") or rejection_requirements)
-                else "llm"
-            ),
+            "extractionMethod": extraction_method,
+            "extractionProvider": extraction_provider,
             "modelUsed": model_used,
             "stats": extraction_stats,
-            "extractionWarning": "模型结果已与规则结果合并，并对未引用片段做了覆盖核验。" if warnings else "",
+            "packPath": pack_path,
+            "extractionWarning": (
+                "智能体结果已与规则结果合并，并对未引用片段做了覆盖核验。"
+                if (agent_bridge_hit and warnings)
+                else "模型结果已与规则结果合并，并对未引用片段做了覆盖核验。"
+                if warnings
+                else ""
+            ),
         }
 
     warning = "；".join(warnings[:3]) or "模型未返回可用 JSON"
@@ -2324,7 +2530,9 @@ def extract_tender_requirements(
         **rule_result,
         "scope": scope,
         "extractionMethod": "rule",
+        "extractionProvider": extraction_provider,
         "modelUsed": "",
         "stats": extraction_stats,
+        "packPath": pack_path,
         "extractionWarning": f"{warning}，已回退到规则拆解。",
     }

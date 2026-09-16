@@ -348,13 +348,20 @@ def evaluate_tender_document(
     source_file_id: str = "",
     sections: list[dict[str, Any]] | None = None,
     tables: list[dict[str, Any]] | None = None,
+    project_id: str = "",
+    document_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # `project_id` / `document_meta` 只用于**定位提取产物的落盘目录**与产物头部信息，
+    # 不参与任何匹配判定 —— 匹配层不因它们改变行为。
     extraction = extract_tender_requirements(
         text,
         segments,
         ai,
         sections,
         tables,
+        source_file_id=source_file_id,
+        project_id=project_id,
+        document_meta=document_meta,
     )
     rows: list[dict[str, Any]] = []
 

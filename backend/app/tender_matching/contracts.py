@@ -92,6 +92,43 @@ def safe_text(value: Any, limit: int = 1200) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+# --------------------------------------------------------------------------- #
+# 章节判断的**单源契约**（P0 并轨）
+#
+# 「哪些章是要求章」这件事有两个判断者：本地 LLM（第一跳）与外部智能体（第二跳）。
+# 如果两侧各写一套菜单格式与判据，必然漂移 —— 本项目已有教训：同一个分类器同时是
+# 标题判据，改一处必须同步另一处。这里把**菜单格式**与**判据文字**都收敛到本模块，
+# 两个判断者都从这里取，改一处即两侧同步。
+# --------------------------------------------------------------------------- #
+SECTION_JUDGE_INCLUDE = "技术/功能/性能/参数、商务、资格、验收、服务、交付、售后等"
+SECTION_JUDGE_EXCLUDE = (
+    "投标邀请、投标人须知、评标办法、评分标准、合同格式、质疑投诉、中标人确定、开标程序、监督"
+)
+
+
+def build_section_menu(sections: list[dict[str, Any]] | None) -> list[str]:
+    """把章节树编成"章节菜单"行；本地 LLM 与智能体任务包**共用这一个构造**。
+
+    行格式：``[SEC-0001] 第一章 投标邀请 / 7、招标文件的获取 | 段落数 38``
+
+    · 用**完整章节路径**而非单层标题：只喂一层标题时模型看不到层级归属，
+      例如「二、平台建设内容、技术要求：」的父级是「第二部分 前附表及投标人须知」，
+      而判据要求排除投标人须知 ⇒ 整块技术要求被连带排除（D1 实测）。
+    · `段落数` 是给判断者的规模信号（纯容器章 vs 实体要求章）。
+    """
+    lines: list[str] = []
+    for section in sections or []:
+        if not isinstance(section, dict):
+            continue
+        section_id = safe_text(section.get("sectionId"), 40)
+        if not section_id:
+            continue
+        path = [str(item) for item in (section.get("sectionPath") or []) if str(item).strip()]
+        label = safe_text(" / ".join(path) or section.get("heading"), 260)
+        lines.append(f"[{section_id}] {label} | 段落数 {len(section.get('segmentIds') or [])}")
+    return lines
+
+
 def requirement_importance(category: str, mandatory: bool, is_rejection: bool, text: str) -> str:
     if is_rejection or any(term in text for term in ("★", "废标", "无效投标", "投标无效", "否决")):
         return "critical"
