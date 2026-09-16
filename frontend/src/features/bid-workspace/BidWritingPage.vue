@@ -73,7 +73,6 @@ watch(
     if (doc && doc.plan?.length) {
       bidDocument.value = doc;
       if (doc.mode) mode.value = doc.mode;
-      if (!currentSectionId.value) currentSectionId.value = doc.plan[0]?.sectionId || "";
     }
   },
   { immediate: true }
@@ -184,7 +183,6 @@ async function generateToc() {
     const result = await api.bidDocumentPlan(workspaceId.value);
     bidDocument.value = result.bidDocument;
     emit("update:bid-document", result.bidDocument);
-    if (!currentSectionId.value) currentSectionId.value = result.bidDocument.plan?.[0]?.sectionId || "";
     activeStep.value = 2;
     ElMessage.success(
       result.bidDocument.planSource === "tender_document"
@@ -256,6 +254,99 @@ function scrollToSection(id: string) {
   requestAnimationFrame(() => {
     document.getElementById(`sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
+}
+
+function selectDocSection(id: string) {
+  currentSectionId.value = id;
+}
+
+function deselect() {
+  currentSectionId.value = "";
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderInline(s: string): string {
+  let out = s;
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  out = out.replace(/【(需人工填写|待补充|需人工补充|注意)[^】]*】/g, "<mark>$&</mark>");
+  return out;
+}
+
+function renderMarkdown(md: string): string {
+  if (!md) return "";
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let list: "ul" | "ol" | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${renderInline(escapeHtml(para.join(" ")))}</p>`);
+      para = [];
+    }
+  };
+  const closeList = () => {
+    if (list) {
+      out.push(list === "ul" ? "</ul>" : "</ol>");
+      list = null;
+    }
+  };
+  for (const raw of lines) {
+    const heading = raw.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushPara();
+      closeList();
+      out.push(`<h${heading[1].length}>${renderInline(escapeHtml(heading[2]))}</h${heading[1].length}>`);
+      continue;
+    }
+    const quote = raw.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushPara();
+      closeList();
+      out.push(`<blockquote>${renderInline(escapeHtml(quote[1]))}</blockquote>`);
+      continue;
+    }
+    const ul = raw.match(/^\s*[-*]\s+(.*)$/);
+    if (ul) {
+      flushPara();
+      if (list !== "ul") {
+        closeList();
+        out.push("<ul>");
+        list = "ul";
+      }
+      out.push(`<li>${renderInline(escapeHtml(ul[1]))}</li>`);
+      continue;
+    }
+    const ol = raw.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ol) {
+      flushPara();
+      if (list !== "ol") {
+        closeList();
+        out.push("<ol>");
+        list = "ol";
+      }
+      out.push(`<li>${renderInline(escapeHtml(ol[1]))}</li>`);
+      continue;
+    }
+    if (/^\s*$/.test(raw)) {
+      flushPara();
+      closeList();
+      continue;
+    }
+    para.push(raw);
+  }
+  flushPara();
+  closeList();
+  return out.join("\n");
 }
 
 async function generateSection(sectionId: string) {
@@ -474,40 +565,44 @@ async function exportDocument() {
         </el-col>
 
         <el-col :xs="24" :md="13">
-          <el-card class="panel doc-panel" shadow="never">
-            <template #header>
-              <div class="panel-header">
-                <div class="result-title"><el-icon><FileText /></el-icon><span>全文编辑</span></div>
-                <el-tag size="small" type="info" effect="plain">{{ plan.length }} 章</el-tag>
-              </div>
-            </template>
-            <div class="doc-scroll">
-              <div
+          <div class="word-page-wrap">
+            <div class="word-page">
+              <section
                 v-for="(sec, i) in plan"
                 :key="sec.sectionId"
                 :id="`sec-${sec.sectionId}`"
-                class="doc-chapter"
+                class="doc-section"
+                :class="{ selected: currentSectionId === sec.sectionId }"
+                @click="selectDocSection(sec.sectionId)"
               >
-                <div class="chapter-head">
-                  <span class="chapter-index">{{ i + 1 }}</span>
-                  <h3 class="chapter-title">{{ sec.title }}</h3>
-                  <el-tag size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
-                  <el-tag size="small" type="info" effect="plain">{{ sourceLabel(sec.source) }}</el-tag>
-                  <div class="chapter-actions">
-                    <el-button size="small" type="primary" :icon="Wand2" :loading="generatingSectionId === sec.sectionId" @click="generateSection(sec.sectionId)">自动撰写</el-button>
-                    <el-button size="small" :icon="Check" :loading="savingSectionId === sec.sectionId" @click="saveSection(sec.sectionId)">保存</el-button>
+                <div class="doc-heading">
+                  <span class="chapter-num">{{ String(i + 1).padStart(2, "0") }}</span>
+                  <h2 class="doc-title">{{ sec.title }}</h2>
+                  <el-tag v-if="currentSectionId === sec.sectionId" size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
+                </div>
+
+                <div v-if="currentSectionId === sec.sectionId" class="doc-editor" @click.stop>
+                  <el-input
+                    v-model="sec.content"
+                    type="textarea"
+                    :autosize="{ minRows: 4 }"
+                    class="doc-textarea"
+                    placeholder="本章正文…可点「自动撰写 / 一键填充」；图片/附件粘贴地址或 ![](路径)"
+                  />
+                  <div class="doc-actions">
+                    <el-button size="small" type="primary" :icon="Wand2" :loading="generatingSectionId === sec.sectionId" @click="generateSection(sec.sectionId)">自动撰写 / 一键填充</el-button>
+                    <el-button size="small" :icon="Check" :loading="savingSectionId === sec.sectionId" @click="saveSection(sec.sectionId)">保存本章</el-button>
+                    <el-button size="small" text @click="deselect">完成</el-button>
                   </div>
                 </div>
-                <el-input
-                  v-model="sec.content"
-                  type="textarea"
-                  :autosize="{ minRows: 3 }"
-                  placeholder="本章正文…可点「自动撰写」填充；图片/附件粘贴地址或 ![](路径)"
-                />
-              </div>
+                <div v-else class="doc-body">
+                  <span v-if="!sec.content" class="doc-empty">（本章暂无内容，点击此处或左侧目录，然后「自动撰写 / 一键填充」）</span>
+                  <div v-else v-html="renderMarkdown(sec.content)"></div>
+                </div>
+              </section>
               <el-empty v-if="!plan.length" description="暂无目录，请先回到第二步编辑目录" :image-size="80" />
             </div>
-          </el-card>
+          </div>
         </el-col>
 
         <el-col :xs="24" :md="6">
@@ -785,52 +880,117 @@ async function exportDocument() {
   font-size: 13px;
   text-decoration: none;
 }
-.doc-panel {
-  display: flex;
-  flex-direction: column;
-}
-.doc-scroll {
-  max-height: 68vh;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-.doc-chapter {
-  border: 1px solid var(--border-color);
+.word-page-wrap {
+  background: #eef0f3;
   border-radius: 8px;
-  padding: 12px 14px;
-  margin-bottom: 14px;
-  scroll-margin-top: 12px;
+  padding: 14px;
+  max-height: 74vh;
+  overflow-y: auto;
 }
-.chapter-head {
+.word-page {
+  background: #ffffff;
+  max-width: 820px;
+  margin: 0 auto;
+  min-height: 88vh;
+  padding: 46px 54px 80px;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.08);
+  color: #1f2329;
+  font-size: 14px;
+  line-height: 1.85;
+}
+.doc-section {
+  scroll-margin-top: 16px;
+}
+.doc-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 30px 0 12px;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid #eef0f3;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.doc-section.selected .doc-heading {
+  background: #f0f7ff;
+  border-left: 3px solid var(--primary, #409eff);
+  padding-left: 12px;
+}
+.chapter-num {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--primary, #409eff);
+  letter-spacing: 0.5px;
+}
+.doc-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: #1f2329;
+  flex: 1;
+}
+.doc-body {
+  cursor: text;
+  min-height: 1.2em;
+  color: #1f2329;
+}
+.doc-empty {
+  color: #b3b8c2;
+  font-style: italic;
+}
+.doc-editor {
+  margin-top: 4px;
+}
+.doc-textarea :deep(.el-textarea__inner) {
+  border: none;
+  box-shadow: none;
+  background: #fafbfc;
+  padding: 12px 14px;
+  line-height: 1.85;
+  font-size: 14px;
+  border-radius: 6px;
+}
+.doc-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f0f7ff;
+  border-radius: 6px;
 }
-.chapter-index {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--primary-soft, rgba(64, 158, 255, 0.14));
-  color: var(--primary);
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.chapter-title {
-  margin: 0;
-  font-size: 15px;
+.doc-body :deep(h1),
+.doc-body :deep(h2),
+.doc-body :deep(h3),
+.doc-body :deep(h4),
+.doc-body :deep(h5),
+.doc-body :deep(h6) {
+  margin: 16px 0 8px;
   font-weight: 600;
-  color: var(--text-primary);
-  flex: 1;
-  min-width: 120px;
+  color: #1f2329;
+  line-height: 1.4;
 }
-.chapter-actions {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
+.doc-body :deep(h1) { font-size: 18px; }
+.doc-body :deep(h2) { font-size: 16px; }
+.doc-body :deep(h3),
+.doc-body :deep(h4) { font-size: 15px; }
+.doc-body :deep(p) { margin: 0 0 8px; }
+.doc-body :deep(blockquote) {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--primary, #409eff);
+  background: #f6f9fc;
+  color: #555c66;
+  border-radius: 0 4px 4px 0;
 }
+.doc-body :deep(ul),
+.doc-body :deep(ol) { margin: 8px 0; padding-left: 22px; }
+.doc-body :deep(li) { margin: 3px 0; }
+.doc-body :deep(mark) {
+  background: #fff3cd;
+  color: #856404;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.doc-body :deep(a) { color: var(--primary, #409eff); }
 </style>
