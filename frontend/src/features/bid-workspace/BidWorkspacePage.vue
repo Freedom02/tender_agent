@@ -26,6 +26,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   generate: [];
   "update:selected-library-key": [key: string];
+  "update:bid-document": [doc: BidDocument];
 }>();
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -122,6 +123,7 @@ async function planDocument() {
   try {
     const result = await api.bidDocumentPlan(workspaceId);
     bidDocument.value = result.bidDocument;
+    emit("update:bid-document", result.bidDocument);
     proofread.value = null;
     ElMessage.success("标书规划完成，请审阅章节结构与偏离表");
   } catch (error) {
@@ -145,6 +147,7 @@ async function generateContent() {
   try {
     const result = await api.bidDocumentGenerate(workspaceId, mode.value);
     bidDocument.value = result.bidDocument;
+    emit("update:bid-document", result.bidDocument);
     if (result.bidDocument.mode) mode.value = result.bidDocument.mode;
     ElMessage.success("标书内容已生成");
   } catch (error) {

@@ -70,6 +70,17 @@ watch(
     }
   }
 );
+
+watch(
+  () => props.workspace?.bidDocument as BidDocument | undefined,
+  (doc) => {
+    if (doc && doc.plan?.length) {
+      bidDocument.value = doc;
+      if (doc.mode) mode.value = doc.mode;
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <template>

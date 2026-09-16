@@ -312,6 +312,7 @@ export interface Workspace {
   auditRecords?: AuditRecord[];
   draft: string;
   draftVersion: number;
+  bidDocument?: BidDocument;
 }
 
 export interface AuditRecord {

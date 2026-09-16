@@ -3,7 +3,7 @@ import { onMounted } from "vue";
 import AppShell from "./app/AppShell.vue";
 import { useAppState } from "./app/app-state";
 import type { AppTab } from "./app/navigation";
-import type { CatalogItem, Workspace } from "./shared/types";
+import type { BidDocument, CatalogItem, Workspace } from "./shared/types";
 import TenderMonitorPage from "./features/tender-monitor/TenderMonitorPage.vue";
 import FollowUpPage from "./features/tender-monitor/FollowUpPage.vue";
 import MatchingPage from "./features/tender-matching/MatchingPage.vue";
@@ -100,6 +100,12 @@ function backToWorkspace() {
   activeTab.value = "workspace";
 }
 
+function onBidDocumentUpdated(doc: BidDocument) {
+  if (selectedWorkspace.value) {
+    selectedWorkspace.value.bidDocument = doc;
+  }
+}
+
 function updateDraft(value: string) {
   if (selectedWorkspace.value) selectedWorkspace.value.draft = value;
 }
@@ -183,6 +189,7 @@ onMounted(loadBootstrap);
       :busy="busy"
       @generate="openGenerator"
       @update:selected-library-key="libraryForm.key = $event"
+      @update:bid-document="onBidDocumentUpdated"
     />
 
     <BidGeneratorPage
