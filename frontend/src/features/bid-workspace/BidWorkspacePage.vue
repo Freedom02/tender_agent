@@ -41,6 +41,14 @@ const generating = ref(false);
 const proofreading = ref(false);
 const bidDocument = ref<BidDocument | null>(null);
 const proofread = ref<ProofreadResult | null>(null);
+const planPreviewSections = computed(() =>
+  bidDocument.value?.plan?.filter(
+    (s) =>
+      s.source !== "deviation" &&
+      (s.content || s.status === "generated" || s.status === "missing")
+  ) || []
+);
+const activePreviewSections = ref<string[]>([]);
 
 const fileName = computed(() => tenderFile.value?.name || props.project?.title || "");
 const selectedLibrary = computed(
@@ -113,10 +121,23 @@ const deviationTables = computed<Array<{ key: string; title: string; rows: Devia
 
 function sectionStatusType(status?: string): "success" | "warning" | "danger" | "info" {
   const value = (status || "").toLowerCase();
-  if (["完成", "已生成", "done", "complete", "success"].includes(value)) return "success";
+  if (["完成", "已生成", "generated", "done", "complete", "success", "planned"].includes(value))
+    return "success";
   if (["生成中", "待生成", "pending", "generating"].includes(value)) return "warning";
-  if (["失败", "failed", "error"].includes(value)) return "danger";
+  if (["缺失", "missing", "失败", "failed", "error"].includes(value)) return "danger";
   return "info";
+}
+
+const STATUS_NAMES: Record<string, string> = {
+  generated: "已生成",
+  pending: "待生成",
+  generating: "生成中",
+  missing: "缺失",
+  planned: "已规划",
+};
+
+function statusName(status?: string): string {
+  return STATUS_NAMES[status || ""] || status || "待生成";
 }
 
 function riskAlertType(level?: string): "error" | "warning" | "success" | "info" {
@@ -185,7 +206,9 @@ async function generateContent() {
     bidDocument.value = result.bidDocument;
     emit("update:bid-document", result.bidDocument);
     if (result.bidDocument.mode) mode.value = result.bidDocument.mode;
-    ElMessage.success("标书内容已生成");
+    const first = result.bidDocument.plan?.find((s) => s.content);
+    if (first) activePreviewSections.value = [first.sectionId];
+    ElMessage.success("标书内容已生成，请在下方内容预览区查看");
   } catch (error) {
     ElMessage.error((error as Error).message);
   } finally {
@@ -474,7 +497,7 @@ function onFileChange(event: Event) {
                   <template v-if="data.section">
                     <el-tag size="small" type="info" effect="plain">{{ data.section.kind || "章节" }}</el-tag>
                     <el-tag size="small" :type="sectionStatusType(data.section.status)" effect="plain">
-                      {{ data.section.status || "待生成" }}
+                      {{ statusName(data.section.status) }}
                     </el-tag>
                     <span class="chapter-node-source">来源：{{ sourceLabel(data.section.source) }}</span>
                     <el-tag
@@ -489,6 +512,28 @@ function onFileChange(event: Event) {
                 </div>
               </template>
             </el-tree>
+            <el-collapse
+              v-if="bidDocument && planPreviewSections.length"
+              v-model="activePreviewSections"
+              class="preview-collapse"
+            >
+              <el-collapse-item
+                v-for="section in planPreviewSections"
+                :key="section.sectionId"
+                :name="section.sectionId"
+              >
+                <template #title>
+                  <div class="preview-title">
+                    <strong>{{ section.title }}</strong>
+                    <el-tag size="small" :type="sectionStatusType(section.status)" effect="plain">
+                      {{ statusName(section.status) }}
+                    </el-tag>
+                  </div>
+                </template>
+                <div v-if="section.content" class="preview-content">{{ section.content }}</div>
+                <span v-else class="form-hint">暂无内容</span>
+              </el-collapse-item>
+            </el-collapse>
           </el-card>
         </el-col>
 
@@ -645,5 +690,32 @@ function onFileChange(event: Event) {
 
 .project-current strong {
   font-weight: 600;
+}
+
+.preview-collapse {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 4px;
+}
+
+.preview-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.preview-content {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-soft);
+  color: var(--text-regular);
+  font-size: 13px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

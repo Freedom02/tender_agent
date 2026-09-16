@@ -22,6 +22,24 @@ const exporting = ref(false);
 const exportFiles = ref<{ name: string; url: string }[]>([]);
 const activeSections = ref<string[]>([]);
 
+function statusTagType(status?: string): 'success' | 'warning' | 'danger' | 'info' {
+  const s = (status || "").toLowerCase();
+  if (["完成", "已生成", "generated", "done", "complete", "success", "planned"].includes(s)) return "success";
+  if (["生成中", "待生成", "pending", "generating"].includes(s)) return "warning";
+  if (["缺失", "missing", "失败", "failed", "error"].includes(s)) return "danger";
+  return "info";
+}
+const STATUS_NAMES: Record<string, string> = {
+  generated: "已生成",
+  pending: "待生成",
+  generating: "生成中",
+  missing: "缺失",
+  planned: "已规划",
+};
+function statusName(status?: string): string {
+  return STATUS_NAMES[status || ""] || status || "待生成";
+}
+
 const workspaceId = computed(() => props.workspace?.id || "");
 const plan = computed(() => bidDocument.value?.plan || []);
 
@@ -138,10 +156,10 @@ watch(
                     <el-tag
                       v-if="section.status"
                       size="small"
-                      :type="section.status === '完成' || section.status === 'done' ? 'success' : 'warning'"
+                      :type="statusTagType(section.status)"
                       effect="plain"
                     >
-                      {{ section.status }}
+                      {{ statusName(section.status) }}
                     </el-tag>
                   </div>
                 </template>
