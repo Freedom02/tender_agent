@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { BriefcaseBusiness, Database, FileText, Rocket, Upload } from "lucide-vue-next";
+import { BriefcaseBusiness, Database, FileText, ListChecks, Rocket, ShieldCheck, Upload } from "lucide-vue-next";
 import { api } from "../../services/api";
 import type {
   BidDocument,
@@ -33,7 +33,9 @@ const tenderFile = ref<File | null>(null);
 const templateKey = ref("standard");
 const industryKey = ref("human-resources");
 const mode = ref<BidMode>("open");
+const planning = ref(false);
 const generating = ref(false);
+const proofreading = ref(false);
 const bidDocument = ref<BidDocument | null>(null);
 const proofread = ref<ProofreadResult | null>(null);
 
@@ -101,29 +103,76 @@ function riskAlertType(level?: string): "error" | "warning" | "success" | "info"
   return "info";
 }
 
-async function generateBidDocument() {
+function deviationType(deviation?: string): "success" | "warning" | "danger" | "info" {
+  const value = (deviation || "").trim();
+  if (value === "无偏离" || value === "正偏离") return "success";
+  if (value === "负偏离") return "danger";
+  if (value === "待人工确认") return "warning";
+  if (value === "不适用") return "info";
+  return "info";
+}
+
+async function planDocument() {
   const workspaceId = props.workspace?.id;
   if (!workspaceId) {
     ElMessage.warning("请先选择一个工作台项目");
     return;
   }
+  planning.value = true;
+  try {
+    const result = await api.bidDocumentPlan(workspaceId);
+    bidDocument.value = result.bidDocument;
+    proofread.value = null;
+    ElMessage.success("标书规划完成，请审阅章节结构与偏离表");
+  } catch (error) {
+    ElMessage.error((error as Error).message);
+  } finally {
+    planning.value = false;
+  }
+}
+
+async function generateContent() {
+  const workspaceId = props.workspace?.id;
+  if (!workspaceId) {
+    ElMessage.warning("请先选择一个工作台项目");
+    return;
+  }
+  if (!bidDocument.value) {
+    ElMessage.warning("请先点击「1. 规划标书」");
+    return;
+  }
   generating.value = true;
   try {
-    await api.bidDocumentPlan(workspaceId);
     const result = await api.bidDocumentGenerate(workspaceId, mode.value);
     bidDocument.value = result.bidDocument;
     if (result.bidDocument.mode) mode.value = result.bidDocument.mode;
-    // 校对报告为独立接口，失败不阻断生成结果展示
-    try {
-      proofread.value = await api.proofread(workspaceId);
-    } catch {
-      proofread.value = null;
-    }
-    ElMessage.success("标书草稿已生成");
+    ElMessage.success("标书内容已生成");
   } catch (error) {
     ElMessage.error((error as Error).message);
   } finally {
     generating.value = false;
+  }
+}
+
+async function runProofread() {
+  const workspaceId = props.workspace?.id;
+  if (!workspaceId) {
+    ElMessage.warning("请先选择一个工作台项目");
+    return;
+  }
+  if (!bidDocument.value) {
+    ElMessage.warning("请先规划并生成标书");
+    return;
+  }
+  proofreading.value = true;
+  try {
+    proofread.value = await api.proofread(workspaceId);
+    ElMessage.success("校对完成");
+  } catch (error) {
+    proofread.value = null;
+    ElMessage.error((error as Error).message);
+  } finally {
+    proofreading.value = false;
   }
 }
 
@@ -267,18 +316,39 @@ function onFileChange(event: Event) {
       </el-row>
 
       <div class="generator-actions">
-        <span class="form-hint">生成后将自动读取招标要求，并结合企业资料库生成章节与偏离表。</span>
+        <span class="form-hint">
+          按步骤操作：① 规划章节与偏离表 → ② 生成逐条响应内容 → ③ 校对自查，确认后再进入编辑与导出。
+        </span>
         <div class="generator-buttons">
           <el-button
-            :icon="Rocket"
+            :icon="ListChecks"
             :disabled="!workspace"
+            :loading="planning"
+            type="primary"
+            @click="planDocument"
+          >
+            1. 规划标书
+          </el-button>
+          <el-button
+            :icon="Rocket"
+            :disabled="!workspace || !bidDocument"
             :loading="generating"
             type="primary"
-            @click="generateBidDocument"
+            @click="generateContent"
           >
-            生成标书草稿
+            2. 生成内容
           </el-button>
-          <el-button :disabled="!workspace" plain @click="emit('generate')">进入编辑与导出</el-button>
+          <el-button
+            :icon="ShieldCheck"
+            :disabled="!workspace || !bidDocument"
+            :loading="proofreading"
+            @click="runProofread"
+          >
+            3. 校对自查
+          </el-button>
+          <el-button :disabled="!workspace || !bidDocument" plain @click="emit('generate')">
+            进入编辑与导出 →
+          </el-button>
         </div>
       </div>
     </el-card>
@@ -338,11 +408,17 @@ function onFileChange(event: Event) {
                 class="deviation-table"
                 :empty-text="`暂无${table.title}`"
               >
-                <el-table-column prop="clause" label="条款" width="90" />
-                <el-table-column prop="requirement" label="招标要求" min-width="180" show-overflow-tooltip />
-                <el-table-column prop="response" label="响应内容" min-width="180" show-overflow-tooltip />
-                <el-table-column prop="deviation" label="偏离说明" min-width="140" show-overflow-tooltip />
-                <el-table-column prop="type" label="偏离类型" width="110" />
+                <el-table-column type="index" label="序号" width="60" />
+                <el-table-column prop="requirement" label="招标要求" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="deviation" label="偏离情况" width="120">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="deviationType(row.deviation)" effect="plain">
+                      {{ row.deviation || "—" }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="response" label="响应说明" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="evidence" label="证据引用" min-width="140" show-overflow-tooltip />
               </el-table>
             </div>
           </el-card>

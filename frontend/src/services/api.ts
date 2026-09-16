@@ -152,7 +152,7 @@ export const api = {
   runAutomation: () => request<Record<string, unknown>>("/api/automation/run", { method: "POST" }),
   // ---- 标书生成 ----
   bidDocumentPlan: (workspaceId: string) =>
-    request<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/plan`, {
+    request<{ bidDocument: BidDocument; workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/plan`, {
       method: "POST",
       body: JSON.stringify({})
     }),
