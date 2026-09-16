@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.shared import Cm
 
 from .schemas import (
     BID_MODE_OPEN,
@@ -195,33 +196,48 @@ def markdown_to_docx(document: Document, markdown_text: str) -> None:
 # ---------------------------------------------------------------------------
 # 章节 / 偏离表渲染
 # ---------------------------------------------------------------------------
-def _append_evidence_placeholder(document: Document, path: str, seen: set[str]) -> None:
-    """追加一条证据占位（去重），不真正插图。"""
-    if not path or path in seen:
-        return
-    seen.add(path)
-    document.add_paragraph(f"【附件：证据路径 {path}】")
+def _insert_asset(document: Document, asset: dict[str, Any], key: str) -> None:
+    """插入一条图文资产：图片直接插图 + 图注；否则输出附件占位。"""
+    kind = str(asset.get("kind") or "")
+    caption = str(asset.get("caption") or "").strip() or "证明材料"
+    local_path = str(asset.get("local_path") or "").strip()
+    page_count = int(asset.get("page_count") or 0)
+    width_cm = float(asset.get("width_cm") or 14.0)
+
+    if kind == "image" and local_path and Path(local_path).exists():
+        try:
+            document.add_picture(local_path, width=Cm(width_cm))
+            document.add_paragraph(f"图：{caption}", style="Caption")
+            return
+        except Exception:
+            pass  # 图片无法插入时回退为附件占位
+
+    document.add_paragraph(f"【附件：{caption}（{key}，共 {page_count} 页）】")
 
 
-def _add_evidence_placeholders(document: Document, section: dict[str, Any]) -> None:
-    """为章节溯源引用里带 evidencePath 的项输出占位段落。"""
-    seen: set[str] = set()
-
+def _add_evidence_assets(document: Document, section: dict[str, Any], assets: dict[str, Any] | None) -> None:
+    """为章节溯源引用插入真实图文；有资产则插图，无资产/暗标则输出占位。"""
+    refs: list[dict[str, Any]] = []
     direct = section.get("evidencePath")
     if direct:
-        _append_evidence_placeholder(document, str(direct), seen)
+        refs.append({"evidencePath": str(direct), "name": ""})
+    refs.extend(r for r in (section.get("sourceRefs") or []) if isinstance(r, dict))
 
-    refs = section.get("sourceRefs") or []
+    seen: set[str] = set()
     for ref in refs:
-        if not isinstance(ref, dict):
+        key = str(ref.get("evidencePath") or "").strip()
+        if not key or key in seen:
             continue
-        path = ref.get("evidencePath") or ""
-        if path:
-            _append_evidence_placeholder(document, str(path), seen)
+        seen.add(key)
+        asset = (assets or {}).get(key)
+        if asset:
+            _insert_asset(document, asset, key)
+        else:
+            document.add_paragraph(f"【附件：证据路径 {key}】")
 
 
-def _render_section(document: Document, section: dict[str, Any]) -> None:
-    """渲染单个章节：标题 + Markdown 正文 + 证据占位。"""
+def _render_section(document: Document, section: dict[str, Any], assets: dict[str, Any] | None = None) -> None:
+    """渲染单个章节：标题 + Markdown 正文 + 证据插图/占位。"""
     title = str(section.get("title") or "").strip() or "（未命名章节）"
     content = section.get("content") or ""
 
@@ -232,7 +248,7 @@ def _render_section(document: Document, section: dict[str, Any]) -> None:
     else:
         markdown_to_docx(document, str(content))
 
-    _add_evidence_placeholders(document, section)
+    _add_evidence_assets(document, section, assets)
 
 
 def _cell_text(value: Any) -> str:
@@ -313,6 +329,7 @@ def assemble_docx(
     bid_document: dict[str, Any],
     output_dir: str | Path,
     template_path: str | None = None,
+    assets: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把 bid_document 组装成一个 .docx 文件并落盘。
 
@@ -320,6 +337,7 @@ def assemble_docx(
         bid_document: 标书文档 dict（plan + deviationTables + mode）。
         output_dir: 输出目录（Path 或 str，不存在则创建）。
         template_path: 可选 .docx 模板路径；未提供或文件不存在则用默认模板。
+        assets: 可选 {evidencePath: asset-dict}，用于把证据图文插入章节（暗标传 None）。
 
     Returns:
         ``{"fileName", "path", "mode"}``，mode 取 ``bid_document["mode"]``。
@@ -361,7 +379,7 @@ def assemble_docx(
             _render_deviation_table(document, DEVIATION_TABLE_TITLES.get(key, key), rows)
             rendered_deviation_keys.add(key)
         else:
-            _render_section(document, section)
+            _render_section(document, section, assets)
 
     # ④ 偏离表兜底：plan 未覆盖的表仍要输出
     for key in (DEVIATION_TABLE_TECHNICAL, DEVIATION_TABLE_COMMERCIAL):

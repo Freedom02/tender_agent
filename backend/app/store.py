@@ -880,7 +880,19 @@ class Store:
 
         from .bid_writing.assemble import assemble_docx
 
-        result = assemble_docx(doc_to_export, output_dir)
+        # 证据图文装配：把各章节 sourceRefs 的 evidencePath 解析为可插图资产。
+        # 暗标（secret）不插图 —— 图片内的 LOGO/印章无法可靠脱敏，只保留文字占位。
+        assets: dict[str, Any] = {}
+        if mode != "secret":
+            from .media_store.local import LocalFolderStore
+            from .bid_writing.evidence_assembler import assemble_evidence
+
+            _refs: list[dict[str, Any]] = []
+            for _section in doc_to_export.get("plan", []):
+                _refs.extend(r for r in (_section.get("sourceRefs") or []) if isinstance(r, dict))
+            assets = assemble_evidence(_refs, LocalFolderStore(self.runtime_root))
+
+        result = assemble_docx(doc_to_export, output_dir, assets=assets or None)
         path = Path(result["path"]) if result.get("path") else None
         if path is None or not path.exists():
             return {"files": [], "mode": mode, "error": "导出失败：未生成文件"}
