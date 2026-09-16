@@ -471,6 +471,9 @@ export interface BidSection {
   kind: string;
   content: string;
   status: string;
+  blanksToFill?: string[];
+  templateOrigin?: string;
+  templateText?: string;
 }
 
 export interface DeviationRow {
@@ -492,6 +495,8 @@ export interface BidDocument {
   };
   mode: BidMode;
   status: string;
+  planSource?: string;
+  planSourceDetail?: string;
 }
 
 export interface ProofreadResult {

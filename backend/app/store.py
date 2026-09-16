@@ -800,13 +800,31 @@ class Store:
             return None
         reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
         fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+        project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+        document = project.get("document") if isinstance(project.get("document"), dict) else {}
+        sections = document.get("sections") if isinstance(document.get("sections"), list) else []
 
         from .bid_writing.deviations import build_deviation_tables
         from .bid_writing.planning import plan_bid_document as _plan
+        from .bid_writing.planning import plan_from_outline
         from .bid_writing.schemas import build_bid_document
+        from .bid_writing.outline import extract_response_outline
+        from .bid_writing.template_reuse import attach_templates
 
         bid_doc = build_bid_document(workspace_id, str(workspace.get("projectId", "")))
-        bid_doc["plan"] = _plan(fine_review)
+        ai = ensure_config(self.config).get("ai", {})
+
+        outline = extract_response_outline(sections, ai)
+        if outline and outline.get("items"):
+            plan = attach_templates(plan_from_outline(outline["items"], fine_review), sections)
+            bid_doc["planSource"] = "tender_document"
+            bid_doc["planSourceDetail"] = str(outline.get("sourceDetail") or "")
+        else:
+            plan = _plan(fine_review)
+            bid_doc["planSource"] = "builtin_template"
+            bid_doc["planSourceDetail"] = ""
+
+        bid_doc["plan"] = plan
         bid_doc["deviationTables"] = build_deviation_tables(fine_review)
         bid_doc["status"] = "planned"
         workspace["bidDocument"] = bid_doc
@@ -831,6 +849,7 @@ class Store:
 
         from .bid_writing.commercial import generate_commercial_sections
         from .bid_writing.technical import generate_technical_sections
+        from .bid_writing.template_reuse import fill_section_template
 
         commercial: dict[str, Any] = {}
         technical: dict[str, Any] = {}
@@ -845,6 +864,23 @@ class Store:
 
         for section in bid_doc.get("plan", []):
             section_id = section.get("sectionId", "")
+            # 模板复用：招标文件给了完整格式的章节，复制原文并填空
+            if section.get("source") == "copied_template":
+                try:
+                    filled = fill_section_template(section, project, organization, self.company)
+                except Exception:
+                    filled = {}
+                if filled:
+                    section["content"] = str(filled.get("content", ""))
+                    section["blanksToFill"] = filled.get("blanksToFill") or []
+                    section["status"] = filled.get("status", "generated")
+                continue
+            # 报价表：招标未给格式时留占位（报价必须人工填写，绝不编造数字）
+            if section_id == "p-01":
+                if not section.get("content"):
+                    section["content"] = "# 开标一览表\n\n【需人工填写：投标报价】"
+                    section["status"] = "missing"
+                continue
             merged = commercial.get(section_id) or technical.get(section_id)
             if merged:
                 section["content"] = str(merged.get("content", ""))

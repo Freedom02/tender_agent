@@ -136,6 +136,19 @@ function deviationType(deviation?: string): "success" | "warning" | "danger" | "
   return "info";
 }
 
+const SOURCE_LABELS: Record<string, string> = {
+  template: "内置模板",
+  ai: "AI 撰写",
+  table: "事实表格",
+  attachment: "附件",
+  copied_template: "复制招标格式",
+  deviation: "偏离表"
+};
+
+function sourceLabel(source?: string): string {
+  return SOURCE_LABELS[source || ""] || source || "—";
+}
+
 async function planDocument() {
   const workspaceId = props.workspace?.id;
   if (!workspaceId) {
@@ -438,6 +451,14 @@ function onFileChange(event: Event) {
                   <span>章节结构</span>
                 </div>
                 <el-tag size="small" type="info" effect="plain">{{ bidDocument.plan.length }} 章</el-tag>
+                <el-tag
+                  v-if="bidDocument.planSource"
+                  size="small"
+                  :type="bidDocument.planSource === 'tender_document' ? 'success' : 'info'"
+                  effect="plain"
+                >
+                  {{ bidDocument.planSource === 'tender_document' ? '招标文件目录' : '内置模板' }}
+                </el-tag>
               </div>
             </template>
             <el-tree
@@ -455,7 +476,15 @@ function onFileChange(event: Event) {
                     <el-tag size="small" :type="sectionStatusType(data.section.status)" effect="plain">
                       {{ data.section.status || "待生成" }}
                     </el-tag>
-                    <span class="chapter-node-source">来源：{{ data.section.source || "—" }}</span>
+                    <span class="chapter-node-source">来源：{{ sourceLabel(data.section.source) }}</span>
+                    <el-tag
+                      v-if="data.section.blanksToFill && data.section.blanksToFill.length"
+                      size="small"
+                      type="warning"
+                      effect="plain"
+                    >
+                      待填 {{ data.section.blanksToFill.length }} 项
+                    </el-tag>
                   </template>
                 </div>
               </template>

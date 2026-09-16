@@ -85,6 +85,44 @@ def assign_requirements(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
     return assigned
 
 
+def plan_from_outline(items: list[dict[str, Any]], fine_review: dict[str, Any]) -> list[dict[str, Any]]:
+    """由招标文件响应目录生成章节树。
+
+    items 来自 outline.extract_response_outline（[{sectionId,title,source,kind}]）。
+    章节标题跟随招标文件，sectionId 复用固定池（c-XX/t-XX/d-XX）以对接
+    commercial.py / technical.py；技术章节的 requirementIds 按 category 归属（同固定模板）。
+    """
+    rows = _rows(fine_review)
+    assignment = assign_requirements(rows)
+
+    sections: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        section_id = str(item.get("sectionId") or "")
+        title = str(item.get("title") or "").strip()
+        if not section_id or not title or section_id in seen:
+            continue
+        seen.add(section_id)
+        sections.append(
+            build_section(
+                section_id,
+                title,
+                str(item.get("source") or SECTION_SOURCE_AI),
+                kind=str(item.get("kind") or SECTION_KIND_TECHNICAL),
+                requirement_ids=assignment.get(section_id, []),
+            )
+        )
+
+    # 偏离表兜底：招标文件未列偏离表时也保证输出
+    for section_id, title in (("d-01", "技术规格偏离表"), ("d-02", "商务偏离表")):
+        if section_id not in seen:
+            sections.append(build_section(section_id, title, SECTION_SOURCE_TABLE, kind=SECTION_KIND_DEVIATION))
+
+    return sections
+
+
 def plan_bid_document(fine_review: dict[str, Any]) -> list[dict[str, Any]]:
     """产出完整章节树：商务(固定文书+表格) + 技术(AI 章节) + 偏离表。"""
     rows = _rows(fine_review)

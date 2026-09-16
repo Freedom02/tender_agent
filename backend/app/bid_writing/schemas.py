@@ -29,6 +29,7 @@ SECTION_SOURCE_TEMPLATE = "template"     # 固定文书（投标函/承诺书等
 SECTION_SOURCE_AI = "ai"                 # LLM 逐条响应撰写
 SECTION_SOURCE_TABLE = "table"           # 从 facts 表格化（一览表/配置表/偏离表）
 SECTION_SOURCE_ATTACHMENT = "attachment" # 附件/证明材料插页
+SECTION_SOURCE_COPIED_TEMPLATE = "copied_template"  # 从招标文件复制的完整格式（填空）
 
 # 章节大类
 SECTION_KIND_COMMERCIAL = "commercial"   # 商务标书
@@ -151,6 +152,8 @@ def build_bid_document(
         "status": "planned",
         "version": 1,
         "generatedAt": "",
+        "planSource": "builtin_template",
+        "planSourceDetail": "",
         "plan": [],
         "deviationTables": {
             DEVIATION_TABLE_TECHNICAL: [],
