@@ -5,27 +5,198 @@ from unittest.mock import patch
 
 from backend.app.tender_matching.contracts import (
     build_comparison,
+    coerce_requirement_category,
     normalize_evidence,
     normalize_requirement,
+    requirement_class_for_route,
     summarize_comparisons,
 )
 from backend.app.tender_matching.document_matching import (
-    _status_from_evidence as fine_status_from_evidence,
     summarize_fine_review,
     update_fine_review_status,
 )
+from backend.app.tender_matching.deterministic import (
+    deterministic_match,
+    subject_type_matches_requirement,
+)
 from backend.app.tender_matching.eligibility import (
     _status_from_evidence as announcement_status_from_evidence,
+    _category_for as announcement_category_for,
     _normalize_model_extraction,
     build_announcement_model_input,
     evaluate_announcement_eligibility,
     extract_announcement_requirements,
     extract_requirements_by_rule,
+    _procurement_need_category,
     split_announcement_sections,
 )
 
 
 class MatchingContractTests(unittest.TestCase):
+    def test_announcement_category_does_not_use_bare_technical_nouns(self) -> None:
+        for text in ("平台", "系统", "数据", "技术"):
+            with self.subTest(text=text):
+                self.assertEqual(announcement_category_for(text), "other")
+
+        self.assertEqual(
+            announcement_category_for("数字孪生平台建设及数据接入"),
+            "technical",
+        )
+        self.assertEqual(
+            announcement_category_for("供应商应完成系统部署和数据接入服务"),
+            "technical",
+        )
+        self.assertEqual(
+            _procurement_need_category("供应商应提供实施培训和运维服务"),
+            "service",
+        )
+        for text in ("服务", "实施", "验收", "履约"):
+            with self.subTest(text=text):
+                self.assertEqual(_procurement_need_category(text), "other")
+        self.assertEqual(
+            _procurement_need_category("项目实施方案和售后服务内容"),
+            "service",
+        )
+        self.assertEqual(
+            _procurement_need_category("项目验收标准及交付成果"),
+            "deliverable",
+        )
+        self.assertEqual(
+            announcement_category_for("供应商应具备专业技术能力"),
+            "qualification",
+        )
+
+    def test_commitment_and_policy_text_do_not_route_to_company_evidence(self) -> None:
+        self.assertEqual(
+            coerce_requirement_category(
+                "financial",
+                "提供政府采购供应商资格承诺函的，在投标文件中可不提供财务状况报告、纳税证明等资格条件证明材料。",
+            ),
+            "document",
+        )
+        self.assertEqual(
+            coerce_requirement_category("qualification", "（1）资格及资信证明部分"),
+            "document",
+        )
+        self.assertEqual(
+            coerce_requirement_category("qualification", "质疑人为法人或其他组织的，提供营业执照复印件。"),
+            "document",
+        )
+
+    def test_multi_branch_subject_type_clause_keeps_qualification_route(self) -> None:
+        clause = (
+            "营业执照等证明文件：①投标人为企业的，提供有效的营业执照复印件；"
+            "投标人为事业单位的，提供有效的事业单位法人证书复印件；"
+            "投标人为社会团体的，提供有效的社会团体法人登记证书复印件；"
+            "投标人为合伙企业、个体工商户的，提供有效的营业执照复印件；"
+            "投标人为非企业专业服务机构的，提供有效的执业许可证等证明材料复印件；"
+            "投标人为自然人的，提供有效的自然人身份证件复印件；"
+            "其他投标人应按照有关法律、法规和规章规定，提供有效的相应具体证照复印件。"
+        )
+        self.assertEqual(
+            coerce_requirement_category("qualification", clause),
+            "qualification",
+        )
+        # 单一主体分支（事业单位）仍按"非企业主体"归为 document，不查企业证照
+        self.assertEqual(
+            coerce_requirement_category("qualification", "投标人为事业单位的，提供有效的事业单位法人证书复印件。"),
+            "document",
+        )
+
+    def test_conditional_or_procedural_materials_do_not_route_to_company_evidence(self) -> None:
+        cases = [
+            (
+                "qualification",
+                "\u8054\u5408\u4f53\u5404\u65b9\u5e94\u63d0\u4ea4\u8054\u5408\u4f53\u534f\u8bae\uff0c\u8054\u5408\u4f53\u534f\u8bae\u5e94\u7b26\u5408\u62db\u6807\u6587\u4ef6\u89c4\u5b9a\u3002",
+                "document",
+            ),
+            (
+                "qualification",
+                "\u9879\u76ee\u5982\u6d89\u53ca\u8d44\u8d28\u8981\u6c42\uff0c\u8be5\u90e8\u5206\u5de5\u4f5c\u5185\u5bb9\u5e94\u7531\u8054\u5408\u4f53\u4e2d\u7b26\u5408\u8be5\u8d44\u8d28\u8981\u6c42\u7684\u4f9b\u5e94\u5546\u627f\u62c5\u3002",
+                "document",
+            ),
+            (
+                "personnel",
+                "\u539f\u4ef6\u5c5e\u4e8e\u975e\u4e2d\u6587\u63cf\u8ff0\u7684\uff0c\u5e94\u63d0\u4f9b\u5177\u6709\u7ffb\u8bd1\u8d44\u8d28\u7684\u673a\u6784\u7ffb\u8bd1\u7684\u4e2d\u6587\u8bd1\u672c\u3002",
+                "document",
+            ),
+            (
+                "qualification",
+                "b3\u4f9d\u6cd5\u5e94\u7ec8\u6b62\u91c7\u8d2d\u7a0b\u5e8f\u7684\u8bc1\u660e\u6750\u6599\uff1b",
+                "document",
+            ),
+            (
+                "personnel",
+                "\u4e0d\u540c\u6295\u6807\u4eba\u7684\u7535\u5b50\u6295\u6807\u6587\u4ef6\u8f7d\u660e\u7684\u9879\u76ee\u7ba1\u7406\u6210\u5458\u6216\u8054\u7cfb\u4eba\u5458\u4e3a\u540c\u4e00\u4eba\uff1b",
+                "rejection",
+            ),
+            (
+                "financial",
+                "\u8d44\u683c\u53ca\u8d44\u4fe1\u8bc1\u660e\u90e8\u5206\u4e2d\u4e0d\u5f97\u51fa\u73b0\u62a5\u4ef7\u90e8\u5206\u7684\u5168\u90e8\u6216\u8005\u90e8\u5206\u7684\u6295\u6807\u62a5\u4ef7\u4fe1\u606f\uff0c\u5426\u5219\u8d44\u683c\u5ba1\u67e5\u4e0d\u5408\u683c\u3002",
+                "rejection",
+            ),
+            (
+                "qualification",
+                "\u5355\u4f4d\u6388\u6743\u4e66\uff1a\u6295\u6807\u4eba\u4e3a\u81ea\u7136\u4eba\u7684\uff0c\u53ef\u4e0d\u586b\u5199\u672c\u6388\u6743\u4e66\u3002",
+                "document",
+            ),
+            (
+                "qualification",
+                "\u8425\u4e1a\u6267\u7167\u7b49\u8bc1\u660e\u6587\u4ef6\uff1a\u6295\u6807\u4eba\u4e3a\u4e8b\u4e1a\u5355\u4f4d\u7684\uff0c\u63d0\u4f9b\u6709\u6548\u7684\u4e8b\u4e1a\u5355\u4f4d\u6cd5\u4eba\u8bc1\u4e66\u590d\u5370\u4ef6\u3002",
+                "document",
+            ),
+        ]
+        for raw_category, text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(coerce_requirement_category(raw_category, text), expected)
+
+    def test_route_contract_uses_only_existing_ontology_classes(self) -> None:
+        self.assertEqual(
+            requirement_class_for_route(
+                "financial",
+                "提供由会计师事务所出具的2025年度财务审计报告。",
+                {"ontologyClasses": ["financial_evidence"]},
+            ),
+            "evidence",
+        )
+        self.assertEqual(
+            requirement_class_for_route(
+                "credit",
+                "未被信用中国列入失信被执行人名单。",
+                {"ontologyClasses": ["credit_record"]},
+            ),
+            "compliance",
+        )
+
+    def test_subject_type_branches_do_not_match_enterprise_license(self) -> None:
+        company = {
+            "organization": {
+                "organizationName": "北京示例科技有限公司",
+                "organizationType": "企业",
+            },
+            "certificates": [
+                {
+                    "credentialId": "cert-license",
+                    "credentialName": "公司 营业执照",
+                    "verificationStatus": "有效",
+                }
+            ],
+        }
+
+        self.assertTrue(
+            subject_type_matches_requirement("投标人为企业的，提供有效的营业执照复印件", company["organization"])
+        )
+        self.assertFalse(
+            subject_type_matches_requirement("投标人为事业单位的，提供有效的事业单位法人证书复印件", company["organization"])
+        )
+        self.assertIsNone(
+            deterministic_match(
+                "投标人为事业单位的，提供有效的事业单位法人证书复印件",
+                "qualification",
+                company,
+            )
+        )
+
     def test_announcement_section_splitter_classifies_common_sections(self) -> None:
         text = """一、项目基本情况
 1、采购项目编号：ABC-2026-001
@@ -591,7 +762,7 @@ class MatchingContractTests(unittest.TestCase):
         qualification_row = next(
             row for row in result["rows"] if row["category"] == "qualification"
         )
-        self.assertEqual(qualification_row["status"], "待补材料")
+        self.assertEqual(qualification_row["status"], "不确定")
         self.assertEqual(result["summary"]["notSatisfiedCount"], 0)
 
     def test_pending_evidence_is_not_verified(self) -> None:
@@ -640,10 +811,6 @@ class MatchingContractTests(unittest.TestCase):
             announcement_status_from_evidence("qualification", matched, evidences),
             "满足",
         )
-        self.assertEqual(
-            fine_status_from_evidence("qualification", matched, evidences),
-            "满足",
-        )
 
     def test_summary_counts_direct_evidence_and_mandatory_closure(self) -> None:
         requirement = normalize_requirement(
@@ -659,7 +826,7 @@ class MatchingContractTests(unittest.TestCase):
         )
         row = build_comparison(
             requirement,
-            status="待补材料",
+            status="不确定",
             reason="证据待核验",
             matched_objects=[{"id": "QUAL-001", "materialIds": ["MAT-001"]}],
             evidences=[
@@ -696,7 +863,7 @@ class MatchingContractTests(unittest.TestCase):
         )
         row = build_comparison(
             requirement,
-            status="待澄清",
+            status="不确定",
             reason="需要人工核验签章要求",
             matched_objects=[],
             evidences=[],
@@ -752,7 +919,7 @@ class MatchingContractTests(unittest.TestCase):
         )
         row = build_comparison(
             requirement,
-            status="待补材料",
+            status="不确定",
             reason="证据尚未核验",
             matched_objects=[],
             evidences=[],

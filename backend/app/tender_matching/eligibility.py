@@ -10,6 +10,12 @@ from typing import Any
 from urllib import error, request
 
 from .contracts import build_comparison, normalize_evidence, normalize_requirement, summarize_comparisons
+from .observability import observe_llm_call
+from .routing_contracts import (
+    ACCEPTANCE_SIGNAL_TERMS,
+    SERVICE_PLAN_SIGNAL_TERMS,
+    has_personnel_signal,
+)
 
 
 ALLOWED_CATEGORIES = {
@@ -24,6 +30,9 @@ ALLOWED_CATEGORIES = {
     "other",
 }
 
+# ⚠ 公告资格粗匹配专用词表（仅用于公告预审，不进入招标文件细匹配）。
+# 与 document_fine_matching.CATEGORY_LABELS 同名但作用域不同：公告阶段无 template/contract/
+# evaluation 等实体，只有 9 类。细匹配的主线分类是 8 域（见 builtin_target_map.TARGET_MODULES）。
 CATEGORY_LABELS = {
     "qualification": "资质",
     "performance": "业绩",
@@ -169,6 +178,28 @@ def _chat_endpoint(base_url: str) -> str:
     return clean if clean.endswith("/chat/completions") else f"{clean}/chat/completions"
 
 
+def _chat_endpoints(base_url: str) -> list[str]:
+    """Return compatible chat endpoints, including a guarded /v1 fallback.
+
+    Some OpenAI-compatible gateways publish the API root as ``https://host/v1``
+    while operators store only ``https://host``.  Those gateways may return an
+    HTML landing page with HTTP 200 for ``/chat/completions``.  Retrying the
+    standard ``/v1/chat/completions`` path turns that ambiguous response into a
+    real API call without affecting already-versioned or explicit endpoints.
+    """
+
+    primary = _chat_endpoint(base_url)
+    clean = base_url.rstrip("/")
+    candidates = [primary]
+    if (
+        not clean.endswith("/chat/completions")
+        and not re.search(r"/v\d+$", clean, flags=re.IGNORECASE)
+    ):
+        candidates.append(f"{clean}/v1/chat/completions")
+    return list(dict.fromkeys(candidates))
+
+
+@observe_llm_call
 def call_openai_compatible(
     ai: dict[str, Any],
     messages: list[dict[str, str]],
@@ -176,6 +207,7 @@ def call_openai_compatible(
     max_tokens: int,
     temperature: float = 0,
     response_format: dict[str, Any] | None = None,
+    max_attempts: int | None = None,
 ) -> dict[str, Any]:
     """Call an OpenAI-compatible chat endpoint with safe, actionable failure messages."""
     if ai.get("enabled") is False:
@@ -189,7 +221,7 @@ def call_openai_compatible(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    organization_id = str(ai.get("organizationId") or "").strip()
+    organization_id = str(ai.get("organizationId") or os.getenv("AI_ORGANIZATION", "")).strip()
     if organization_id:
         headers["OpenAI-Organization"] = organization_id
 
@@ -207,12 +239,22 @@ def call_openai_compatible(
         timeout_seconds = 120
     timeout_seconds = min(max(timeout_seconds, 15), 300)
 
-    max_attempts = 3
+    if max_attempts is None:
+        max_attempts = 3
+    else:
+        try:
+            max_attempts = min(max(int(max_attempts), 1), 3)
+        except (TypeError, ValueError):
+            max_attempts = 3
     last_error = ""
     raw_body = b""
+    selected_endpoint = ""
+    endpoints = _chat_endpoints(base_url)
     for attempt in range(1, max_attempts + 1):
+        endpoint = endpoints[min(attempt - 1, len(endpoints) - 1)]
+        selected_endpoint = endpoint
         req = request.Request(
-            _chat_endpoint(base_url),
+            endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers=headers,
             method="POST",
@@ -238,6 +280,14 @@ def call_openai_compatible(
         except OSError:
             last_error = "模型服务连接中断或响应读取失败，请稍后重试"
         else:
+            try:
+                json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                if attempt < len(endpoints):
+                    last_error = (
+                        "模型端点返回非 JSON 内容，正在尝试标准 /v1/chat/completions 路径"
+                    )
+                    continue
             break
         if attempt < max_attempts and _is_retryable_error({"success": False, "error": last_error}):
             time.sleep(min(2 * attempt, 6))
@@ -249,7 +299,10 @@ def call_openai_compatible(
     except UnicodeDecodeError:
         return {"success": False, "error": "模型服务返回的内容不是 UTF-8 文本"}
     except json.JSONDecodeError:
-        return {"success": False, "error": "模型服务返回了非 JSON 内容，请稍后重试"}
+        return {
+            "success": False,
+            "error": f"模型服务返回了非 JSON 内容，请检查 API Base URL（实际端点：{selected_endpoint}）",
+        }
     if not isinstance(body, dict):
         return {"success": False, "error": "模型服务返回 JSON 结构异常"}
     choices = body.get("choices")
@@ -276,6 +329,7 @@ def call_openai_compatible(
         "success": True,
         "content": content,
         "model": model,
+        "endpoint": selected_endpoint,
         "finishReason": finish_reason,
         "usage": usage,
     }
@@ -303,10 +357,7 @@ def _category_for(text: str) -> str:
         return "credit"
     if any(term in value for term in ("财务报告", "审计报告", "财务状况", "资产负债", "银行资信", "资信证明")):
         return "financial"
-    if any(
-        term in value
-        for term in ("项目经理", "项目负责人", "技术负责人", "人员", "团队", "工程师", "驻场")
-    ):
+    if has_personnel_signal(value):
         return "personnel"
     if any(term in value for term in ("类似项目", "类似业绩", "项目业绩", "合同业绩", "案例")):
         return "performance"
@@ -320,6 +371,7 @@ def _category_for(text: str) -> str:
             "社会保障资金",
             "中小企业",
             "小微企业",
+            "专业技术能力",
         )
     ):
         return "qualification"
@@ -335,14 +387,26 @@ def _category_for(text: str) -> str:
             "数字孪生",
             "三维",
             "可视化",
-            "平台",
-            "系统",
             "数据治理",
+            "数据接入",
+            "数据处理",
             "物联",
             "ai",
             "智能体",
-            "实施",
-            "技术",
+            "技术要求",
+            "技术参数",
+            "技术指标",
+            "功能",
+            "性能",
+            "参数",
+            "配置",
+            "接口",
+            "系统集成",
+            "系统部署",
+            "平台建设",
+            "平台部署",
+            "模型",
+            "渲染",
         )
     ):
         return "technical"
@@ -356,11 +420,57 @@ def _procurement_need_category(text: str) -> str:
         or bool(re.search(r"\d+(?:\.\d+)?\s*(?:套|台|件|项|人次|吨|平方米|公里)", value))
     ):
         return "quantity"
-    if any(term in value for term in ("交付", "交货", "成果", "交付物", "验收", "建设完成", "提交报告")):
+    if any(
+        term in value
+        for term in (
+            "交付",
+            "交货",
+            "成果",
+            "交付物",
+            "建设完成",
+            "提交报告",
+            *ACCEPTANCE_SIGNAL_TERMS,
+        )
+    ):
         return "deliverable"
-    if any(term in value for term in ("技术", "功能", "性能", "参数", "配置", "接口", "数据", "平台", "系统", "指标")):
+    if any(
+        term in value
+        for term in (
+            "技术要求",
+            "技术参数",
+            "技术指标",
+            "功能",
+            "性能",
+            "参数",
+            "配置",
+            "接口",
+            "数据接入",
+            "数据治理",
+            "数据处理",
+            "平台建设",
+            "平台部署",
+            "系统建设",
+            "系统部署",
+            "系统集成",
+            "指标",
+        )
+    ):
         return "technical"
-    if any(term in value for term in ("服务", "运维", "培训", "实施", "驻场", "售后", "质保", "咨询")):
+    if any(
+        term in value
+        for term in (
+            *SERVICE_PLAN_SIGNAL_TERMS,
+            "服务内容",
+            "服务范围",
+            "服务期限",
+            "服务要求",
+            "服务需求",
+            "服务类型",
+            "驻场服务",
+            "咨询服务",
+            "服务成果",
+        )
+    ):
         return "service"
     if any(term in value for term in ("范围", "采购内容", "主要标的", "标的名称", "项目内容", "建设内容")):
         return "scope"
@@ -1689,6 +1799,7 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
         return {
             **rule_result,
             "extractionMethod": "rule",
+            "extractionProvider": "builtin-rule",
             "modelUsed": "",
             "extractionWarning": _result_notice_warning(str(rule_result["project"].get("noticeType", ""))),
         }
@@ -1696,6 +1807,7 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
         return {
             **rule_result,
             "extractionMethod": "rule",
+            "extractionProvider": "builtin-rule",
             "modelUsed": "",
             "extractionWarning": "未配置大模型，已使用规则抽取。",
         }
@@ -1765,6 +1877,7 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
                 "requirements": merged_requirements,
                 "warnings": list(dict.fromkeys([*rule_result["warnings"], *normalized["warnings"]])),
                 "extractionMethod": "llm+rule",
+                "extractionProvider": "builtin-llm",
                 "modelUsed": result["model"],
                 "extractionWarning": "",
             })
@@ -1774,6 +1887,7 @@ def extract_announcement_requirements(text: str, ai: dict[str, Any]) -> dict[str
     return {
         **rule_result,
         "extractionMethod": "rule",
+        "extractionProvider": "builtin-rule",
         "modelUsed": "",
         "extractionWarning": warning,
     }
@@ -1886,9 +2000,7 @@ def _status_from_evidence(
     evidences: list[dict[str, Any]],
 ) -> str:
     if not matched:
-        if category in {"qualification", "personnel", "performance", "financial", "technical"}:
-            return "待补材料"
-        return "待澄清"
+        return "不确定"
     direct_evidences = [
         normalize_evidence(item)
         for item in evidences
@@ -1898,7 +2010,7 @@ def _status_from_evidence(
         return "满足"
     if direct_evidences and all(item.get("isExpired") for item in direct_evidences):
         return "不满足"
-    return "待补材料" if direct_evidences or matched else "待澄清"
+    return "不确定"
 
 
 def _candidate_records(category: str, text: str, knowledge: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1977,10 +2089,8 @@ def _score_for_status(status: str) -> int:
     return {
         "满足": 100,
         "部分满足": 70,
-        "待澄清": 48,
-        "待补材料": 22,
+        "不确定": 35,
         "不满足": 0,
-        "不适用": 100,
     }.get(status, 35)
 
 
@@ -2028,13 +2138,13 @@ def evaluate_announcement_eligibility(
         status = _status_from_evidence(category, matched, evidences)
 
         if "联合体" in requirement_text:
-            status = "待澄清"
+            status = "不确定"
             evidences = []
         elif category == "region":
             regions = _list_of_dicts(company_profile.get("service_regions"))
             matching_regions = _matching_records(requirement_text, regions)
             if matching_regions:
-                status = "待补材料"
+                status = "不确定"
                 evidences = [
                     {
                         "id": str(item.get("name", "")),
@@ -2047,28 +2157,24 @@ def evaluate_announcement_eligibility(
                     for item in matching_regions
                 ]
             else:
-                status = "待澄清"
+                status = "不确定"
                 evidences = []
         elif category in {"credit", "rejection"}:
-            status = "待澄清"
+            status = "不确定"
             evidences = []
 
-        risk = "低" if status in {"满足", "不适用"} else "中" if status in {"部分满足", "待澄清"} else "高"
+        risk = "低" if status == "满足" else "中" if status in {"部分满足", "不确定"} else "高"
         suggestion = {
             "满足": "仍需在递交前核验原件、有效期和招标文件附件。",
             "部分满足": "已找到关联本体对象和资料来源，需核验原件、有效期或项目适用性。",
-            "待补材料": "资料库未形成可直接核验的材料，请补充或核验后再判断。",
-            "待澄清": "当前要求或企业资料无法形成确定结论，请人工核验原始公告和对应材料。",
+            "不确定": "当前要求或企业资料无法形成确定结论，请人工核验原始公告和对应材料，或补充/核验后再判断。",
             "不满足": "当前本体资料未找到对应硬性资质，请确认是否确实缺失或尚未录入。",
-            "不适用": "该要求已确认不适用于当前投标主体或本次响应。",
         }[status]
         reason = {
             "满足": "已找到经过核验且当前有效的直接企业证据。",
             "部分满足": "已找到相关企业对象或证据，但适用范围仍需确认。",
-            "待补材料": "已找到相关企业对象，但直接证明材料尚未核验或未完整入库。",
-            "待澄清": "当前公告要求与企业资料之间无法建立确定对应关系。",
+            "不确定": "当前公告要求与企业资料之间无法建立确定对应关系，需人工核验或补充材料。",
             "不满足": "现有直接证据显示关键条件已失效或明确不符合。",
-            "不适用": "该要求经人工确认不适用于本次响应。",
         }[status]
         row = build_comparison(
             requirement_contract,
@@ -2102,7 +2208,7 @@ def evaluate_announcement_eligibility(
     notice_type = str(extraction["project"].get("noticeType", ""))
     if notice_type in RESULT_NOTICE_TYPES:
         decision = "无法完成资格判断，请补充原始招标公告或招标文件"
-        eligibility_status = "待澄清"
+        eligibility_status = "不确定"
         should_get_tender_document = False
     elif hard_blockers:
         decision = "不建议参与"
@@ -2114,11 +2220,11 @@ def evaluate_announcement_eligibility(
         should_get_tender_document = True
     elif score >= 45:
         decision = "人工重点评估"
-        eligibility_status = "待澄清"
+        eligibility_status = "不确定"
         should_get_tender_document = True
     else:
         decision = "不建议参与"
-        eligibility_status = "待澄清"
+        eligibility_status = "不确定"
         should_get_tender_document = False
 
     if notice_type in RESULT_NOTICE_TYPES:
@@ -2153,6 +2259,7 @@ def evaluate_announcement_eligibility(
         "procurementNeeds": procurement_needs,
         "extraction": {
             "method": extraction["extractionMethod"],
+            "provider": extraction.get("extractionProvider", ""),
             "modelUsed": extraction["modelUsed"],
             "cacheHit": bool(extraction.get("extractionCacheHit")),
             "warning": extraction["extractionWarning"],
@@ -2166,12 +2273,12 @@ def evaluate_announcement_eligibility(
             "rejectionRisks": [
                 {
                     "requirementId": str(row.get("requirementId", "")),
-                    "title": f"{row.get('kind', '否决条款')}：{row.get('status', '待澄清')}",
+                    "title": f"{row.get('kind', '否决条款')}：{row.get('status', '不确定')}",
                     "detail": str(row.get("rawText", "")),
                     "sourceLocator": str(row.get("sourceLocator", "")),
                 }
                 for row in rows
-                if row.get("isRejection") and row.get("status") not in {"满足", "不适用"}
+                if row.get("isRejection") and row.get("status") != "满足"
             ],
             "shouldGetTenderDocument": should_get_tender_document,
             "recommendation": decision,

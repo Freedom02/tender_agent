@@ -1,0 +1,22 @@
+{
+  "case": "post_award_contract",
+  "observations": [
+    {
+      "sectionId": "SEC-CONTRACT-001",
+      "heading": "Post-award contract template",
+      "signals": [
+        "The contract is signed after award",
+        "Breach liability",
+        "Contract termination"
+      ]
+    }
+  ],
+  "expected": {
+    "domain": "contract",
+    "role": "leaf",
+    "processingMode": "ignore",
+    "primaryRoute": "ignored_contract",
+    "ignored": true,
+    "policy": "Keep the source location for audit and future contract review; exclude it from current technical and qualification matching."
+  }
+}

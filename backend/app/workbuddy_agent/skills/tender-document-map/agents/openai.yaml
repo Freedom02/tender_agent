@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tender Document Map"
+  short_description: "Map tender document ranges with source-safe routing"
+  default_prompt: "Use the tender document map workflow to inspect the current document, locate eight business domains, validate source ranges, and save a DocumentMap."

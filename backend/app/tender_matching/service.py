@@ -278,7 +278,6 @@ def evaluate_company_relevance(
     """Evaluate discovery relevance using weighted title/field/body evidence."""
     title_text, structured_text, body_text = _notice_zones(item)
     primary_text = f"{title_text} {structured_text}"
-    text = f"{primary_text} {body_text}"
     directions = _selected_knowledge_values(company_knowledge, "businessDirections", monitoring.get("targetDirections"))
     scenarios = _selected_knowledge_values(company_knowledge, "industryScenarios", monitoring.get("targetScenarios"))
     products = _selected_knowledge_values(company_knowledge, "products", monitoring.get("targetProducts"))

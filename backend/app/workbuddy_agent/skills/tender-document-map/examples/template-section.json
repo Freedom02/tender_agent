@@ -1,0 +1,34 @@
+{
+  "case": "technical_response_table",
+  "observations": [
+    {
+      "sectionId": "SEC-TPL-001",
+      "heading": "Technical and service response table",
+      "tableId": "TABLE-TPL-001",
+      "rowIds": [
+        "SEG-TPL-001",
+        "SEG-TPL-002"
+      ]
+    }
+  ],
+  "expected": {
+    "domain": "template",
+    "role": "leaf",
+    "processingMode": "template_extract",
+    "primaryRoute": "template_processor",
+    "templateLocator": {
+      "sectionIds": [
+        "SEC-TPL-001"
+      ],
+      "segmentIds": [
+        "SEG-TPL-001",
+        "SEG-TPL-002"
+      ],
+      "tableIds": [
+        "TABLE-TPL-001"
+      ],
+      "writingAgentUsable": true
+    },
+    "policy": "Preserve the table as a template; do not send the form body directly to enterprise matching."
+  }
+}

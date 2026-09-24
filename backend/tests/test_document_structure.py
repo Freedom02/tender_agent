@@ -103,6 +103,118 @@ class DocumentStructureTests(unittest.TestCase):
         self.assertEqual(result["headingCount"], 1)
         self.assertEqual(result["sections"][0]["heading"], "前置内容")
         self.assertEqual(result["sections"][1]["heading"], "第一篇 投标邀请书")
+    def test_normalizes_pdf_compatibility_numerals_and_decimal_levels(self) -> None:
+        result = build_section_tree(
+            [
+                {
+                    "id": "SEG-001",
+                    "contentType": "pdf_text_block",
+                    "sourceLocator": "page 1, block 1",
+                    "text": "\u7b2c\u2f00\u7ae0 \u6295\u6807\u9080\u8bf7",
+                    "style": {},
+                },
+                {
+                    "id": "SEG-002",
+                    "contentType": "pdf_text_block",
+                    "sourceLocator": "page 1, block 2",
+                    "text": "1.1.\u91c7\u8d2d\u9879\u76ee\u540d\u79f0",
+                    "style": {},
+                },
+                {
+                    "id": "SEG-003",
+                    "contentType": "pdf_text_block",
+                    "sourceLocator": "page 1, block 3",
+                    "text": "1.00 900,000.00 \u6279",
+                    "style": {},
+                },
+                {
+                    "id": "SEG-004",
+                    "contentType": "pdf_text_block",
+                    "sourceLocator": "page 1, block 4",
+                    "text": "\uff081\uff09\u82e5\u51fa\u73b0\u4e2d\u6807\u5019\u9009\u4eba\u5e76\u5217\u5f62\u5f0f\uff0c\u5219\u6309\u7167\u4e0b\u5217\u65b9\u5f0f\u786e\u5b9a\u4e2d\u6807\u4eba",
+                    "style": {},
+                },
+            ]
+        )
+
+        self.assertEqual(result["headingCount"], 2)
+        chapter = next(
+            section
+            for section in result["sections"]
+            if section["heading"] == "\u7b2c\u4e00\u7ae0 \u6295\u6807\u9080\u8bf7"
+        )
+        subsection = next(
+            section
+            for section in result["sections"]
+            if section["heading"] == "1.1.\u91c7\u8d2d\u9879\u76ee\u540d\u79f0"
+        )
+        self.assertEqual(chapter["level"], 1)
+        self.assertTrue(chapter["isMajor"])
+        self.assertEqual(subsection["level"], 2)
+        self.assertFalse(subsection["isMajor"])
+        self.assertFalse(any(section["heading"].startswith("1.00") for section in result["sections"]))
+
+    def test_semantic_chapter_markers_override_word_outline_level(self) -> None:
+        result = build_section_tree(
+            [
+                {
+                    "id": "SEG-001",
+                    "contentType": "paragraph",
+                    "sourceLocator": "第1段",
+                    "text": "第一章 技术要求",
+                    "style": {"outlineLevel": "1"},
+                },
+                {
+                    "id": "SEG-002",
+                    "contentType": "paragraph",
+                    "sourceLocator": "第2段",
+                    "text": "第一节 产品参数",
+                    "style": {"outlineLevel": "2"},
+                },
+            ]
+        )
+
+        chapter = next(section for section in result["sections"] if section["heading"] == "第一章 技术要求")
+        subsection = next(section for section in result["sections"] if section["heading"] == "第一节 产品参数")
+        self.assertEqual(chapter["level"], 1)
+        self.assertTrue(chapter["isMajor"])
+        self.assertEqual(subsection["level"], 2)
+        self.assertEqual(subsection["parentId"], chapter["id"])
+
+    def test_supports_bare_numbered_top_level_headings_and_filters_toc_rows(self) -> None:
+        result = build_section_tree(
+            [
+                {
+                    "id": "SEG-001",
+                    "contentType": "paragraph",
+                    "sourceLocator": "第1段",
+                    "text": "第一 报价文件 1",
+                    "style": {},
+                },
+                {
+                    "id": "SEG-002",
+                    "contentType": "paragraph",
+                    "sourceLocator": "第2段",
+                    "text": "第一 报价文件",
+                    "style": {"outlineLevel": "1"},
+                },
+                {
+                    "id": "SEG-003",
+                    "contentType": "paragraph",
+                    "sourceLocator": "第3段",
+                    "text": "一、投标报价",
+                    "style": {},
+                },
+            ]
+        )
+
+        headings = [section["heading"] for section in result["sections"]]
+        self.assertNotIn("第一 报价文件 1", headings)
+        root = next(section for section in result["sections"] if section["heading"] == "第一 报价文件")
+        child = next(section for section in result["sections"] if section["heading"] == "一、投标报价")
+        self.assertEqual(root["level"], 1)
+        self.assertTrue(root["isMajor"])
+        self.assertEqual(child["parentId"], root["id"])
 
 
 if __name__ == "__main__":

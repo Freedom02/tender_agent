@@ -1,0 +1,20 @@
+{
+  "case": "rejection_candidate_with_condition",
+  "observations": [
+    {
+      "segmentId": "SEG-REJ-001",
+      "text": "A bid is invalid when the required signature and seal are missing."
+    }
+  ],
+  "expected": {
+    "rejectionCandidate": {
+      "matchedTerm": "bid invalid",
+      "contextSegmentIds": [
+        "SEG-REJ-001"
+      ],
+      "isHardRisk": true,
+      "status": "candidate"
+    },
+    "policy": "Read the surrounding submission and signature requirements before human confirmation; never downgrade the signal silently."
+  }
+}

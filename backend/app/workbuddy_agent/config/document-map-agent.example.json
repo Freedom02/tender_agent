@@ -1,0 +1,17 @@
+{
+  "skillDir": "backend/app/workbuddy_agent/skills/tender-document-map",
+  "mcpConfigPath": "backend/app/workbuddy_agent/config/tender-review.mcp.example.json",
+  "runtimeDir": "runtime/document_map_agent",
+  "model": "auto",
+  "codebuddyCodePath": "",
+  "settingSources": [],
+  "permissionMode": "default",
+  "maxTurns": 40,
+  "maxToolCalls": 40,
+  "maxSaveAttempts": 3,
+  "timeoutSeconds": 600,
+  "maxRetries": 0,
+  "requireMapValidation": true,
+  "requireRejectionScan": true,
+  "fallbackMode": "builtin"
+}

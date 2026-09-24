@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from typing import Any
 
 
@@ -256,7 +257,14 @@ SECTION_TYPE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 CHINESE_NUMERAL = "一二三四五六七八九十百千万零〇两"
 MARKER_PREFIX = r"[★▲※○●]?\s*"
+BARE_TOP_LEVEL_PATTERN = re.compile(
+    rf"^{MARKER_PREFIX}\u7b2c[{CHINESE_NUMERAL}0-9]+\s+\S.*"
+)
+
 HEADING_PREFIXES = (
+    # Some response files use a bare numbered top-level heading such as
+    # "第一 报价文件" instead of "第一章/第一篇".
+    BARE_TOP_LEVEL_PATTERN,
     re.compile(rf"^{MARKER_PREFIX}第[{CHINESE_NUMERAL}0-9]+(?:篇|章|部|部分|册|卷).*"),
     re.compile(rf"^{MARKER_PREFIX}第[{CHINESE_NUMERAL}0-9]+节.*"),
     re.compile(rf"^{MARKER_PREFIX}[{CHINESE_NUMERAL}]+[、.．].*"),
@@ -292,7 +300,8 @@ REQUIREMENT_HINTS = (
 
 
 def _clean_text(value: Any, limit: int = 1200) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"\s+", " ", normalized).strip()[:limit]
 
 
 def _clean_heading(value: Any) -> str:
@@ -316,9 +325,28 @@ def _style_has_heading_signal(segment: dict[str, Any]) -> bool:
     )
 
 
+# 表格行内容类型：不同解析器产出的 contentType 不一致——
+#   docx  → "table_row"（document_parser.py）
+#   pdf   → "pdf_table_row"（多列表格行，文本用 " | " 连接）
+#   xlsx  → "spreadsheet_row"
+# PDF 表格行还额外带 `style.tableRow=True`。
+#
+# 这些行**永远不应被当作章节标题**：否则「2 | 评标方法 | 采购包1:综合评分法
+# (具体规则详见第五章)」这类须知前附表行会新建章、截断父章，并把整段须知内容
+# 灌进 evaluation（评分标准）target（基准里 5.4 评分准则误召回即源于此——
+# 原守卫只精确匹配 "table_row"，漏掉了 "pdf_table_row"）。
+_TABLE_ROW_CONTENT_TYPES = frozenset({"table_row", "pdf_table_row", "spreadsheet_row"})
+
+
+def _is_table_row(segment: dict[str, Any]) -> bool:
+    if str(segment.get("contentType") or "") in _TABLE_ROW_CONTENT_TYPES:
+        return True
+    style = segment.get("style")
+    return bool(isinstance(style, dict) and style.get("tableRow"))
+
+
 def _heading_source_text(segment: dict[str, Any]) -> str:
-    content_type = str(segment.get("contentType") or "")
-    if content_type == "table_row":
+    if _is_table_row(segment):
         cells = segment.get("cells")
         if isinstance(cells, list):
             values = [
@@ -366,21 +394,42 @@ def _looks_like_heading(segment: dict[str, Any]) -> bool:
         return False
 
     style_signal = _style_has_heading_signal(segment)
-    content_type = str(segment.get("contentType") or "")
-    if content_type == "table_row" and "|" in str(segment.get("text") or ""):
+    if _is_table_row(segment) and "|" in str(segment.get("text") or ""):
         return False
     if not style_signal:
         limit = (
             HEADING_MAX_TABLE_ROW_CHARS
-            if content_type == "table_row"
+            if _is_table_row(segment)
             else HEADING_MAX_TEXT_CHARS
         )
         if len(text) > limit:
             return False
 
     prefix_signal = any(pattern.match(text) for pattern in HEADING_PREFIXES)
-    term_signal = _section_type_for_heading(text) != "other"
+    term_signal = _heading_starts_with_section_term(text)
     if not style_signal and not prefix_signal and not term_signal:
+        return False
+    if (
+        not style_signal
+        and DECIMAL_PATTERN.match(text)
+        and len(re.sub(r"[\d\s,，.．]", "", text)) <= 4
+    ):
+        return False
+    if (
+        not style_signal
+        and len(text) > 24
+        and any(
+            hint in text
+            for hint in (
+                "若出现",
+                "按照",
+                "根据",
+                "应当",
+                "不得",
+                "必须",
+            )
+        )
+    ):
         return False
 
     if prefix_signal and not style_signal:
@@ -446,26 +495,57 @@ def _section_type_for_heading(heading: str) -> str:
     return "other"
 
 
+def _heading_starts_with_section_term(text: str) -> bool:
+    """标题型关键词须出现在开头（前 8 字），且整句不含义务动词（须/应/提供/具备等）。
+
+    正文句如"投标人须具备三年以上类似项目业绩经验"虽含"业绩"，但"业绩"在句尾、
+    且含义务动词"须/具备"，不应判为标题。
+
+    同理，以 section term 开头的**算式行**也不是标题——例如
+    "投标报价得分=(评标基准价/投标报价)×100" 以"投标报价"（pricing 词）开头，
+    若被误判为标题会把 5.4 评分细则整段截断（见 5.4 评分准则误召回）。等号/乘号/
+    加减号等算符与标题互斥。
+    """
+    compact = re.sub(r"\s+", "", text)
+    head = compact[:8]
+    has_term = any(
+        term in head
+        for _section_type, terms in SECTION_TYPE_TERMS
+        for term in terms
+    )
+    if not has_term:
+        return False
+    if re.search(r"[=＝×÷＋+]", compact):
+        return False
+    return not any(hint in compact for hint in REQUIREMENT_HINTS)
+
+
 def _level_for_heading(heading: str, segment: dict[str, Any]) -> int:
-    style = segment.get("style") if isinstance(segment.get("style"), dict) else {}
-    outline_level = str(style.get("outlineLevel") or "").strip()
-    if outline_level.isdigit():
-        return min(int(outline_level) + 1, 8)
+    # A semantic numbering marker is more reliable than Word's outline level.
+    # In the wild, chapter headings are often stored with outlineLevel=1,
+    # although they are the business-level root of the document.
     if TOP_LEVEL_PATTERN.match(heading):
         return 1
-    if SECTION_PATTERN.match(heading):
-        return 2
+    if BARE_TOP_LEVEL_PATTERN.match(heading):
+        return 1
     if CHAPTER_PATTERN.match(heading):
         return 1
     if APPENDIX_PATTERN.match(heading):
         return 1
+    if SECTION_PATTERN.match(heading):
+        return 2
     if CHINESE_ITEM_PATTERN.match(heading):
         return 2
     if PAREN_ITEM_PATTERN.match(heading):
         return 3
     if DECIMAL_PATTERN.match(heading):
         digits = re.match(r"^\d+(?:\.\d+)*", heading)
-        return min((digits.group(0).count(".") + 2) if digits else 3, 8)
+        return min((digits.group(0).count(".") + 1) if digits else 2, 8)
+
+    style = segment.get("style") if isinstance(segment.get("style"), dict) else {}
+    outline_level = str(style.get("outlineLevel") or "").strip()
+    if outline_level.isdigit():
+        return min(int(outline_level) + 1, 8)
     return 2
 
 
@@ -498,6 +578,7 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 "sourceSegmentId": str(segment.get("id") or ""),
                 "sourceLocator": _segment_locator(segment, position),
                 "level": _level_for_heading(heading, segment),
+                "isMajor": _level_for_heading(heading, segment) <= 1,
                 "sectionType": _section_type_for_heading(heading),
                 # S2 第 1 步：只记录，不参与判定。`sectionType` 仍是有序首命中的结果，
                 # 一字未动；这里额外把"命中的全部类型"和"是否混合篇"留下，
@@ -546,6 +627,7 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 "isMixed": bool(candidate.get("isMixed")),
                 "heading": candidate["heading"],
                 "level": candidate["level"],
+                "isMajor": bool(candidate.get("isMajor")),
                 "parentId": parent["id"] if parent else "",
                 "sectionPath": section_path,
                 "headingSegmentId": candidate["sourceSegmentId"],
@@ -584,6 +666,7 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                     "isMixed": False,
                     "heading": "前置内容",
                     "level": 0,
+                    "isMajor": True,
                     "parentId": "",
                     "sectionPath": ["前置内容"],
                     "headingSegmentId": "",
@@ -615,6 +698,7 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 "sectionType": "other",
                 "heading": "未分类内容",
                 "level": 0,
+                "isMajor": True,
                 "parentId": "",
                 "sectionPath": ["未分类内容"],
                 "headingSegmentId": "",

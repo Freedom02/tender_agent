@@ -1,0 +1,30 @@
+{
+  "case": "technical_and_evaluation_mixed",
+  "observations": [
+    {
+      "heading": "Technical solution scoring and requirements",
+      "signals": [
+        "The platform must support unified authentication",
+        "A complete technical solution receives 10 points"
+      ]
+    }
+  ],
+  "expected": {
+    "sections": [
+      {
+        "domain": "technical",
+        "role": "leaf",
+        "processingMode": "fine_extract",
+        "primaryRoute": "technical_processor",
+        "secondaryDomains": []
+      },
+      {
+        "domain": "evaluation",
+        "role": "leaf",
+        "processingMode": "display",
+        "primaryRoute": "evaluation_processor"
+      }
+    ],
+    "policy": "Do not convert the score rule into a mandatory qualification."
+  }
+}

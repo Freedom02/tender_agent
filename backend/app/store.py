@@ -16,10 +16,27 @@ from .tender_matching.eligibility import (
     evaluate_announcement_eligibility,
     test_ai_connection,
 )
-from .tender_matching.document_matching import evaluate_tender_document, update_fine_review_status
-from .tender_matching.document_parser import parse_doc, parse_docx, parse_pdf, parse_plain_text, parse_xlsx
+from .tender_matching.document_matching import (
+    evaluate_tender_document,
+    summarize_fine_review,
+    update_fine_review_status,
+)
+from .tender_matching.document_parser import (
+    parse_doc,
+    parse_docx,
+    parse_document_ir,
+    parse_pdf,
+    parse_plain_text,
+    parse_xlsx,
+)
 from .tender_matching.document_structure import enrich_document_structure
+from .tender_matching.decision_summary import build_workspace_decision_summary
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
+from .workbuddy_agent.workflow.integration import (
+    WorkBuddyAgentMatchingError,
+    build_review_output_from_analysis_pack,
+    evaluate_tender_document_with_workbuddy_agent,
+)
 from .tender_monitor.adapters import (
     is_procurement_notice,
     normalize_notice_text,
@@ -559,6 +576,10 @@ class Store:
             return enrich_document_structure(parse_xlsx(content))
         return enrich_document_structure(parse_plain_text(content))
 
+    def extract_document_ir(self, name: str, content: bytes, mime_type: str = ""):
+        """Return the typed parser artifact without changing the legacy API."""
+        return parse_document_ir(content, file_name=name, mime_type=mime_type)
+
     @staticmethod
     def extract_text_from_docx(content: bytes) -> str:
         return Store.extract_document_content_from_docx(content)["text"]
@@ -605,28 +626,122 @@ class Store:
             ensure_config(self.config).get("monitoring", {}),
         )
         if document.get("kind") == "tender_document":
-            result["fineReview"] = evaluate_tender_document(
-                text,
-                document.get("segments") if isinstance(document.get("segments"), list) else [],
-                self.company_knowledge,
-                ensure_config(self.config).get("ai", {}),
-                source_file_id,
-                document.get("sections") if isinstance(document.get("sections"), list) else [],
-                document.get("tables") if isinstance(document.get("tables"), list) else [],
-                # 提取产物的落盘定位与头部信息。只影响"产物写到哪个项目目录下"，
-                # 不参与任何匹配判定（匹配层对这两个参数不做分支）。
-                project_id=str(item.get("id") or ""),
-                document_meta={
-                    "name": str(
-                        document.get("name") or document.get("fileName") or item.get("title") or ""
-                    ),
-                    "fileName": str(document.get("fileName") or document.get("name") or ""),
-                    "title": str(item.get("title") or ""),
-                    "projectId": str(item.get("id") or ""),
-                    "projectName": str(item.get("title") or ""),
-                    "documentKind": "tender_document",
-                },
-            )
+            ai_config = ensure_config(self.config).get("ai", {})
+            segments = document.get("segments") if isinstance(document.get("segments"), list) else []
+            sections = document.get("sections") if isinstance(document.get("sections"), list) else []
+            tables = document.get("tables") if isinstance(document.get("tables"), list) else []
+            project_id = str(item.get("id") or source_file_id or "project")
+            document_meta = {
+                "name": str(document.get("name") or document.get("fileName") or item.get("title") or ""),
+                "fileName": str(document.get("fileName") or document.get("name") or ""),
+                "title": str(item.get("title") or ""),
+                "projectId": project_id,
+                "projectName": str(item.get("title") or ""),
+                "documentKind": "tender_document",
+                "contentHash": str(document.get("contentHash") or ""),
+            }
+            extraction_mode = str(ai_config.get("extractionMode") or "builtin").strip().lower()
+            workbuddy_route: dict[str, Any] | None = None
+
+            if extraction_mode == "workbuddy_agent_mcp":
+                try:
+                    workbuddy_route = evaluate_tender_document_with_workbuddy_agent(
+                        text=text,
+                        document=document,
+                        company_knowledge=self.company_knowledge,
+                        ai=ai_config,
+                        source_file_id=source_file_id,
+                        project_id=project_id,
+                        document_meta=document_meta,
+                    )
+                    fine_review = workbuddy_route["fineReview"]
+                except WorkBuddyAgentMatchingError as error:
+                    runtime_result = error.runtime_result
+                    fallback_mode = str(
+                        (ai_config.get("workbuddyAgentMcp") or {}).get("fallbackMode")
+                        or "builtin"
+                    ).strip().lower()
+                    if fallback_mode != "builtin":
+                        failed_extraction = {
+                            "method": "workbuddy_agent_mcp",
+                            "provider": "workbuddy-agent-mcp",
+                            "modelUsed": "",
+                            "warnings": [],
+                            "errors": [str(value) for value in runtime_result.get("errors") or [str(error)]],
+                            "agentStatus": "failed",
+                            "stats": {"agentStatus": "failed", "fallbackMode": fallback_mode},
+                            "analysisPack": None,
+                        }
+                        fine_review = summarize_fine_review([], failed_extraction)
+                        workbuddy_route = {"runtime": runtime_result, "fallback": ""}
+                    else:
+                        fine_review = evaluate_tender_document(
+                            text,
+                            segments,
+                            self.company_knowledge,
+                            ai_config,
+                            source_file_id,
+                            sections,
+                            tables,
+                            project_id=project_id,
+                            document_meta=document_meta,
+                        )
+                        extraction = fine_review.get("extraction")
+                        if not isinstance(extraction, dict):
+                            extraction = {}
+                            fine_review["extraction"] = extraction
+                        agent_errors = [
+                            str(value)
+                            for value in runtime_result.get("errors") or [str(error)]
+                            if str(value).strip()
+                        ]
+                        extraction["agentStatus"] = "failed"
+                        extraction["agentErrors"] = agent_errors
+                        extraction["fallbackMode"] = "builtin"
+                        extraction["warnings"] = list(
+                            dict.fromkeys(
+                                [
+                                    *[str(value) for value in extraction.get("warnings") or [] if str(value).strip()],
+                                    "workbuddy_agent_fallback_builtin",
+                                ]
+                            )
+                        )
+                        extraction.setdefault("stats", {}).update(
+                            {
+                                "agentProvider": "workbuddy-agent-mcp",
+                                "agentStatus": "failed",
+                                "fallbackMode": "builtin",
+                                "agentErrors": agent_errors,
+                            }
+                        )
+                        workbuddy_route = {"runtime": runtime_result, "fallback": "builtin"}
+            else:
+                fine_review = evaluate_tender_document(
+                    text,
+                    segments,
+                    self.company_knowledge,
+                    ai_config,
+                    source_file_id,
+                    sections,
+                    tables,
+                    project_id=project_id,
+                    document_meta=document_meta,
+                )
+
+            review_output = build_review_output_from_analysis_pack(fine_review)
+            fine_review["reviewOutput"] = review_output
+            result["fineReview"] = fine_review
+            result["reviewOutput"] = review_output
+            extraction = fine_review.get("extraction")
+            if isinstance(extraction, dict):
+                extraction["reviewOutput"] = review_output
+                analysis_pack = fine_review.get("analysisPack")
+                if not isinstance(analysis_pack, dict):
+                    analysis_pack = extraction.get("analysisPack")
+                if isinstance(analysis_pack, dict):
+                    analysis_pack["reviewOutput"] = review_output
+            if workbuddy_route is not None:
+                result["workbuddyAgent"] = workbuddy_route
         return result
 
     def analyze(self, project_id: str) -> dict[str, Any] | None:

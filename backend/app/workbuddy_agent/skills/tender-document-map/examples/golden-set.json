@@ -1,0 +1,105 @@
+{
+  "schemaVersion": "tender-document-map-golden/v1",
+  "cases": [
+    {
+      "id": "TECH-001",
+      "text": "The platform must support unified authentication.",
+      "expected": {"domain": "technical", "processingMode": "fine_extract", "primaryRoute": "technical_processor"}
+    },
+    {
+      "id": "TECH-002",
+      "text": "The supplier shall provide implementation and delivery services.",
+      "expected": {"domain": "technical", "processingMode": "fine_extract", "primaryRoute": "technical_processor"}
+    },
+    {
+      "id": "QUAL-001",
+      "text": "The bidder must hold a valid information security certification.",
+      "expected": {"domain": "qualification", "processingMode": "fine_extract", "primaryRoute": "qualification_processor"}
+    },
+    {
+      "id": "QUAL-002",
+      "text": "The project manager must have the required professional certificate.",
+      "expected": {"domain": "qualification", "processingMode": "fine_extract", "primaryRoute": "qualification_processor"}
+    },
+    {
+      "id": "COMM-001",
+      "text": "Payment is made in three installments after acceptance.",
+      "expected": {"domain": "commercial", "processingMode": "display", "primaryRoute": "display_processor"}
+    },
+    {
+      "id": "COMM-002",
+      "text": "The warranty period is three years.",
+      "expected": {"domain": "commercial", "processingMode": "display", "primaryRoute": "display_processor"}
+    },
+    {
+      "id": "EVAL-001",
+      "text": "A complete solution receives up to 10 points.",
+      "expected": {"domain": "evaluation", "processingMode": "display", "primaryRoute": "evaluation_processor"}
+    },
+    {
+      "id": "EVAL-002",
+      "text": "Each similar project contract earns 2 points.",
+      "expected": {"domain": "evaluation", "processingMode": "display", "primaryRoute": "evaluation_processor"}
+    },
+    {
+      "id": "CONTRACT-001",
+      "text": "The winning bidder signs the procurement contract after award.",
+      "expected": {"domain": "contract", "processingMode": "ignore", "primaryRoute": "ignored_contract"}
+    },
+    {
+      "id": "CONTRACT-002",
+      "text": "The contract defines breach liability and termination.",
+      "expected": {"domain": "contract", "processingMode": "ignore", "primaryRoute": "ignored_contract"}
+    },
+    {
+      "id": "TPL-001",
+      "text": "Bid letter form: bidder fills in the organization name and seal.",
+      "expected": {"domain": "template", "processingMode": "template_extract", "primaryRoute": "template_processor"}
+    },
+    {
+      "id": "TPL-002",
+      "text": "Price schedule response table with bidder input columns.",
+      "expected": {"domain": "template", "processingMode": "template_extract", "primaryRoute": "template_processor"}
+    },
+    {
+      "id": "PROJECT-001",
+      "text": "The project budget and maximum bid price are listed here.",
+      "expected": {"domain": "project_info", "processingMode": "full_scan", "primaryRoute": "display_processor"}
+    },
+    {
+      "id": "PROJECT-002",
+      "text": "The bid deadline is 10:00 on 2026-10-01.",
+      "expected": {"domain": "project_info", "processingMode": "full_scan", "primaryRoute": "display_processor"}
+    },
+    {
+      "id": "REJ-001",
+      "text": "The bid is invalid when the required signature is missing.",
+      "expected": {"domain": "rejection", "processingMode": "full_scan", "primaryRoute": "rejection_processor"}
+    },
+    {
+      "id": "REJ-002",
+      "text": "A response that exceeds the maximum price is rejected.",
+      "expected": {"domain": "rejection", "processingMode": "full_scan", "primaryRoute": "rejection_processor"}
+    },
+    {
+      "id": "MIX-001",
+      "text": "Technical requirements and technical scoring rules appear in one chapter.",
+      "expected": {"split": true, "domains": ["technical", "evaluation"]}
+    },
+    {
+      "id": "MIX-002",
+      "text": "A technical response table contains both form cells and requirement rows.",
+      "expected": {"primaryDomain": "template", "secondaryDomain": "technical", "processingMode": "template_extract"}
+    },
+    {
+      "id": "MIX-003",
+      "text": "A contract appendix is adjacent to bid submission instructions.",
+      "expected": {"split": true, "ignoredDomain": "contract", "activeDomain": "commercial"}
+    },
+    {
+      "id": "AMB-001",
+      "text": "The section heading is ambiguous and the surrounding text is incomplete.",
+      "expected": {"needsHumanReview": true, "record": "unresolved_issue"}
+    }
+  ]
+}

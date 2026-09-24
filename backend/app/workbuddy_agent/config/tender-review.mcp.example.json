@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tender-review": {
+      "command": "python",
+      "args": [
+        "scripts/tender_review_mcp.py"
+      ],
+      "env": {
+        "TENDER_REVIEW_BOOTSTRAP": "caller_owned_document_ir_stdin"
+      }
+    }
+  }
+}

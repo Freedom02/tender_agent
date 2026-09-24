@@ -25,6 +25,17 @@ _TEMPLATE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "p-01": ("开标一览", "报价明细", "分项报价", "报价表", "报价单"),
 }
 
+_PLAN_TEMPLATE_TYPES: dict[str, str] = {
+    "c-01": "bid_letter",
+    "c-02": "commitment",
+    "c-03": "legal_representative",
+    "c-04": "authorization",
+    "c-05": "guarantee",
+    "c-06": "declaration",
+    "c-07": "other",
+    "p-01": "price_schedule",
+}
+
 # 填空字段：label -> context 键（按 label 长度降序替换，避免前缀误吃）
 _FILL_FIELDS: tuple[tuple[str, str], ...] = (
     ("统一社会信用代码", "creditCode"),
@@ -83,7 +94,7 @@ def find_template_section(sections: list[Any], section_id: str) -> dict[str, Any
     for section in sections:
         if not isinstance(section, dict):
             continue
-        sec_title = _norm(str(section.get("title") or ""))
+        sec_title = _norm(str(section.get("heading") or section.get("title") or ""))
         if not sec_title:
             continue
         if not any(_norm(kw) in sec_title for kw in keywords):
@@ -95,37 +106,163 @@ def find_template_section(sections: list[Any], section_id: str) -> dict[str, Any
         for section in sections:
             if not isinstance(section, dict):
                 continue
-            sec_title = _norm(str(section.get("title") or ""))
+            sec_title = _norm(str(section.get("heading") or section.get("title") or ""))
             if any(_norm(kw) in sec_title for kw in keywords):
                 candidates.append(section)
                 break
     return max(candidates, key=lambda s: len(str(s.get("text") or ""))) if candidates else None
 
 
-def attach_templates(plan: list[Any], sections: list[Any]) -> list[Any]:
-    """给 plan 里"招标文件已提供完整格式"的章节挂模板文本，source 升级为 copied_template。"""
+def _source_reference(
+    source: dict[str, Any],
+    *,
+    template_id: str = "",
+    template_type: str = "",
+    title: str = "",
+) -> dict[str, Any]:
+    reference: dict[str, Any] = {}
+    for key in (
+        "sectionId",
+        "segmentId",
+        "segmentIds",
+        "sourceLocator",
+        "sectionPath",
+        "pageStart",
+        "pageEnd",
+        "tableIds",
+    ):
+        value = source.get(key)
+        if value not in (None, "", [], {}):
+            reference[key] = value
+    if template_id:
+        reference["templateId"] = template_id
+    if template_type:
+        reference["templateType"] = template_type
+    if title:
+        reference["title"] = title
+    return reference
+
+
+def _template_ref_from_index(section_id: str, template_index: list[Any] | None) -> dict[str, Any] | None:
+    expected_type = _PLAN_TEMPLATE_TYPES.get(section_id, "")
+    candidates = [
+        item
+        for item in (template_index or [])
+        if isinstance(item, dict)
+        and (not expected_type or str(item.get("templateType") or "") == expected_type)
+        and isinstance(item.get("source"), dict)
+    ]
+    if not candidates:
+        return None
+    item = sorted(
+        candidates,
+        key=lambda value: (
+            (value.get("source") or {}).get("pageStart", 10**9),
+            (value.get("source") or {}).get("sourceLocator", ""),
+        ),
+    )[0]
+    return _source_reference(
+        item["source"],
+        template_id=str(item.get("templateId") or item.get("id") or ""),
+        template_type=str(item.get("templateType") or expected_type),
+        title=str(item.get("title") or ""),
+    )
+
+
+def _template_ref_from_section(template_section: dict[str, Any], section_id: str) -> dict[str, Any]:
+    return _source_reference(
+        {
+            "sectionId": template_section.get("sectionId") or template_section.get("id"),
+            "segmentIds": template_section.get("segmentIds") or [],
+            "sourceLocator": template_section.get("startLocator") or template_section.get("sourceLocator"),
+            "sectionPath": template_section.get("sectionPath") or [],
+        },
+        template_id=f"source-{section_id}",
+        template_type=_PLAN_TEMPLATE_TYPES.get(section_id, "other"),
+        title=str(template_section.get("heading") or template_section.get("title") or ""),
+    )
+
+
+def attach_templates(
+    plan: list[Any],
+    sections: list[Any],
+    template_index: list[Any] | None = None,
+) -> list[Any]:
+    """给计划章节挂原文模板定位，不在目录阶段复制模板正文。"""
     for section in plan:
         if not isinstance(section, dict):
             continue
         section_id = str(section.get("sectionId") or "")
         if section_id not in _TEMPLATE_KEYWORDS:
             continue
-        template_section = find_template_section(sections, section_id)
-        if not template_section:
-            continue
-        text = str(template_section.get("text") or "").strip()
-        if not text:
+        template_ref = _template_ref_from_index(section_id, template_index)
+        template_section = None
+        if template_ref is None:
+            template_section = find_template_section(sections, section_id)
+            if template_section:
+                template_ref = _template_ref_from_section(template_section, section_id)
+        if not template_ref:
             continue
         section["source"] = "copied_template"
         section["templateOrigin"] = str(
-            template_section.get("sourceLocator") or template_section.get("title") or ""
+            template_ref.get("sourceLocator")
+            or template_ref.get("title")
+            or (template_section or {}).get("sourceLocator")
+            or ""
         )
-        section["templateText"] = text
+        section["templateRef"] = template_ref
+        section.pop("templateText", None)
     return plan
 
 
-def fill_section_template(section: dict, project: dict, organization: dict | None, company: dict | None) -> dict:
+def _resolve_template_text(
+    template_ref: dict[str, Any],
+    sections: list[Any] | None,
+    segments: list[Any] | None,
+) -> str:
+    source = template_ref.get("source") if isinstance(template_ref.get("source"), dict) else template_ref
+    section_id = str(source.get("sectionId") or "")
+    section = next(
+        (
+            item
+            for item in (sections or [])
+            if isinstance(item, dict)
+            and str(item.get("sectionId") or item.get("id") or "") == section_id
+        ),
+        None,
+    )
+    if section and str(section.get("text") or "").strip():
+        return str(section["text"]).strip()
+    wanted_ids = [
+        str(value)
+        for value in (source.get("segmentIds") or [source.get("segmentId")])
+        if str(value)
+    ]
+    segment_map = {
+        str(item.get("id")): item
+        for item in (segments or [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    return "\n".join(
+        str(segment_map[item_id].get("text") or "").strip()
+        for item_id in wanted_ids
+        if item_id in segment_map and str(segment_map[item_id].get("text") or "").strip()
+    ).strip()
+
+
+def fill_section_template(
+    section: dict,
+    project: dict,
+    organization: dict | None,
+    company: dict | None,
+    *,
+    sections: list[Any] | None = None,
+    segments: list[Any] | None = None,
+) -> dict:
+    template_ref = section.get("templateRef") if isinstance(section.get("templateRef"), dict) else {}
     text = str(section.get("templateText") or "").strip()
+    if not text and template_ref:
+        text = _resolve_template_text(template_ref, sections, segments)
     if not text:
         return {"content": "", "blanksToFill": ["模板原文缺失"], "status": "missing"}
     filled = fill_template_text(text, project, organization, company)
