@@ -4,6 +4,8 @@ import type {
   BidSection,
   BootstrapResponse,
   CatalogItem,
+  CloudBidRun,
+  ComplianceReviewResult,
   EvidenceFilesResponse,
   ImportResult,
   MaterialFact,
@@ -12,13 +14,19 @@ import type {
   MonitoringRunResult,
   OntologyMeta,
   OntologySummary,
+  ParseBundle,
   ProofreadResult,
   Workspace
 } from "../shared/types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  const headers = new Headers(init?.headers || {});
+  if (!isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers,
     ...init
   });
   if (!response.ok) {
@@ -40,6 +48,36 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  createBidRun: (file: File, workspaceId = "", projectId = "") => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("workspace_id", workspaceId);
+    form.append("project_id", projectId);
+    return request<{ run: CloudBidRun }>("/api/bid-runs", {
+      method: "POST",
+      body: form
+    });
+  },
+  getBidRun: (runId: string) =>
+    request<{ run: CloudBidRun }>(`/api/bid-runs/${encodeURIComponent(runId)}`),
+  materializeBidRun: (runId: string) =>
+    request<{
+      run: CloudBidRun;
+      project: CatalogItem;
+      workspace: Workspace;
+      materialized: boolean;
+    }>(`/api/bid-runs/${encodeURIComponent(runId)}/materialize`, {
+      method: "POST"
+    }),
+  getParseBundle: (workspaceId: string) =>
+    request<{ parseBundle: ParseBundle }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/parse-bundle`
+    ),
+  reuseMatchAnalysis: (workspaceId: string) =>
+    request<{ workspace: Workspace; parseBundle: ParseBundle; parseSource: string }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/reuse-match-analysis`,
+      { method: "POST" }
+    ),
   analyze: (projectId: string) =>
     request<{ item: CatalogItem; workspace: Workspace }>("/api/analyze", {
       method: "POST",
@@ -66,12 +104,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ draft })
     }),
-  updateFineReviewStatus: (workspaceId: string, rowId: string, status: string, reviewer = "当前用户") =>
+  updateFineReviewStatus: (
+    workspaceId: string,
+    rowId: string,
+    status: string,
+    uncertaintyReason = "",
+    reviewer = "当前用户",
+    responseValue?: string,
+    materialBindings?: Array<Record<string, unknown>>
+  ) =>
     request<{ workspace: Workspace }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/fine-review/status`,
       {
         method: "POST",
-        body: JSON.stringify({ rowId, status, reviewer })
+        body: JSON.stringify({
+          rowId,
+          status,
+          reviewer,
+          uncertaintyReason,
+          responseValue,
+          materialBindings
+        })
       }
     ),
   // ---- 企业材料本体（M3 读取）----
@@ -79,6 +132,47 @@ export const api = {
   getOntologySummary: () => request<OntologySummary>("/api/ontology/summary"),
   getFacts: (className: string, limit = 20) =>
     request<MaterialFact[]>(`/api/ontology/classes/${encodeURIComponent(className)}?limit=${limit}`),
+  createFactWithEvidence: async (className: string, fields: Record<string, unknown>, files: File[]) => {
+    const form = new FormData();
+    form.append("fields", JSON.stringify(fields));
+    files.forEach((file) => form.append("files", file, file.name));
+    const response = await fetch(`/api/materials/facts/${encodeURIComponent(className)}/with-evidence`, {
+      method: "POST",
+      body: form
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `请求失败：${response.status}`);
+    }
+    return response.json() as Promise<{
+      item: MaterialFact;
+      objectId: string;
+      rid: string;
+      className: string;
+      evidencePath: string;
+      relations: unknown[];
+      warnings: string[];
+    }>;
+  },
+  attachEvidenceToFact: async (className: string, objectId: string, files: File[]) => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file, file.name));
+    const response = await fetch(
+      `/api/materials/facts/${encodeURIComponent(className)}/${encodeURIComponent(objectId)}/attach-evidence`,
+      { method: "POST", body: form }
+    );
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `请求失败：${response.status}`);
+    }
+    return response.json() as Promise<{
+      item: MaterialFact;
+      objectId: string;
+      rid: string;
+      className: string;
+      evidencePath: string;
+    }>;
+  },
   createFact: (className: string, fields: Record<string, unknown>) =>
     request<MaterialFact>(`/api/ontology/classes/${encodeURIComponent(className)}`, {
       method: "POST",
@@ -172,16 +266,71 @@ export const api = {
       `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}/generate`,
       { method: "POST", body: JSON.stringify({}) }
     ),
-  bidDocumentSaveSection: (workspaceId: string, sectionId: string, content: string) =>
+  bidDocumentFillTemplate: (workspaceId: string, sectionId: string) =>
+    request<{ bidDocument: BidDocument; section: BidSection; provider?: string; message?: string }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}/fill-template`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+  bidDocumentRewriteSection: (
+    workspaceId: string,
+    sectionId: string,
+    instruction: string,
+    mode: "append" | "rewrite" | "replace_selection" = "append",
+    selectedText = ""
+  ) =>
+    request<{
+      bidDocument: BidDocument;
+      section: BidSection;
+      rewritten: boolean;
+      provider?: string;
+      message?: string;
+    }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}/rewrite`,
+      {
+        method: "POST",
+        body: JSON.stringify({ instruction, mode, selectedText })
+      }
+    ),
+  bidDocumentSaveSection: (
+    workspaceId: string,
+    sectionId: string,
+    payload: {
+      content: string;
+      templateBlocks?: Record<string, unknown>[];
+      templateTables?: Record<string, unknown>[];
+      contentMatchesTemplate?: boolean;
+    }
+  ) =>
     request<{ bidDocument: BidDocument }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}`,
-      { method: "PUT", body: JSON.stringify({ content }) }
+      { method: "PUT", body: JSON.stringify(payload) }
     ),
+  bidDocumentTemplatePreview: async (workspaceId: string, sectionId: string) => {
+    const response = await fetch(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/sections/${encodeURIComponent(sectionId)}/template-preview`
+    );
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `请求失败：${response.status}`);
+    }
+    return response.blob();
+  },
   bidDocumentExport: (workspaceId: string, mode: BidMode) =>
-    request<{ files: { name: string; url: string }[]; message: string }>(
+    request<{
+      files: { name: string; url: string }[];
+      message: string;
+      bidDocument?: BidDocument;
+      copiedTemplateCount?: number;
+      exportWarnings?: string[];
+    }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/export`,
       { method: "POST", body: JSON.stringify({ mode }) }
     ),
   proofread: (workspaceId: string) =>
-    request<ProofreadResult>(`/api/workspaces/${encodeURIComponent(workspaceId)}/proofread`)
+    request<ProofreadResult>(`/api/workspaces/${encodeURIComponent(workspaceId)}/proofread`),
+  complianceReview: (workspaceId: string) =>
+    request<ComplianceReviewResult & { bidDocument: BidDocument }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/compliance-review`,
+      { method: "POST", body: JSON.stringify({}) }
+    )
 };

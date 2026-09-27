@@ -64,15 +64,15 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8793
+python run.py
 ```
 
-后端地址：`http://127.0.0.1:8793`
+后端默认地址：`http://127.0.0.1:8797`。如需修改端口，可设置 `TENDER_AGENT_PORT` 环境变量；开发热重载可设置 `TENDER_AGENT_RELOAD=1`。
 
 健康检查：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8793/api/health
+Invoke-RestMethod http://127.0.0.1:8797/api/health
 ```
 
 ### 3.3 启动前端
@@ -85,7 +85,7 @@ npm install
 npm run dev
 ```
 
-前端默认地址：`http://127.0.0.1:5173`
+前端默认地址：`http://127.0.0.1:5173`。Vite 默认将 `/api` 和 `/runtime` 代理到 `http://127.0.0.1:8797`；可用 `VITE_PORT` 和 `VITE_API_TARGET` 覆盖。
 
 Vite 会将 `/api` 请求代理到后端。代理配置位于 `frontend/vite.config.ts`。
 

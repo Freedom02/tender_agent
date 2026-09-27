@@ -55,6 +55,22 @@ const selectedLibrary = computed(
   () => props.libraries.find((library) => library.key === props.selectedLibraryKey) || props.libraries[0] || null
 );
 
+function planningSourceKey(doc?: BidDocument | null): string {
+  if (doc?.planningSource) return doc.planningSource;
+  if (doc?.planningStatus === "pending") return "unplanned";
+  return doc?.planSource || "";
+}
+
+function planningSourceLabel(doc?: BidDocument | null): string {
+  const source = planningSourceKey(doc);
+  if (source === "unplanned") return "解析完成，待生成目录";
+  if (source === "pi_agent") return "Pi 智能体目录";
+  if (source === "cloud_agent") return "云端智能体目录";
+  if (source === "tender_document") return "招标文件格式目录";
+  if (source === "builtin_template") return "本地标准模板目录";
+  return "目录来源待确认";
+}
+
 const analyzedWorkspaces = computed(() =>
   [...props.workspaces].sort((a, b) => {
     const aFine = a.reasoning?.fineReview?.rows?.length || 0;
@@ -93,15 +109,29 @@ const industries = [
 const chapterTree = computed(() => {
   const plan = bidDocument.value?.plan || [];
   if (!plan.length) return [];
+  const nodes = new Map<string, { id: string; label: string; section: (typeof plan)[number]; children: unknown[] }>();
+  const roots: { id: string; label: string; section: (typeof plan)[number]; children: unknown[] }[] = [];
+  plan.forEach((section, index) => {
+    nodes.set(section.sectionId || `section-${index}`, {
+      id: section.sectionId || `section-${index}`,
+      label: section.title || `第 ${index + 1} 章`,
+      section,
+      children: []
+    });
+  });
+  plan.forEach((section, index) => {
+    const id = section.sectionId || `section-${index}`;
+    const node = nodes.get(id);
+    const parentId = String(section.parentSectionId || "");
+    const parent = parentId ? nodes.get(parentId) : undefined;
+    if (node && parent) parent.children.push(node);
+    else if (node) roots.push(node);
+  });
   return [
     {
       id: "root",
       label: props.project?.title || "响应文件",
-      children: plan.map((section, index) => ({
-        id: section.sectionId || `section-${index}`,
-        label: section.title || `第 ${index + 1} 章`,
-        section
-      }))
+      children: roots
     }
   ];
 });
@@ -121,7 +151,7 @@ const deviationTables = computed<Array<{ key: string; title: string; rows: Devia
 
 function sectionStatusType(status?: string): "success" | "warning" | "danger" | "info" {
   const value = (status || "").toLowerCase();
-  if (["完成", "已生成", "generated", "done", "complete", "success", "planned"].includes(value))
+  if (["完成", "已生成", "generated", "done", "complete", "success"].includes(value))
     return "success";
   if (["生成中", "待生成", "pending", "generating"].includes(value)) return "warning";
   if (["缺失", "missing", "失败", "failed", "error"].includes(value)) return "danger";
@@ -133,7 +163,7 @@ const STATUS_NAMES: Record<string, string> = {
   pending: "待生成",
   generating: "生成中",
   missing: "缺失",
-  planned: "已规划",
+  planned: "正文待撰写",
 };
 
 function statusName(status?: string): string {
@@ -475,12 +505,12 @@ function onFileChange(event: Event) {
                 </div>
                 <el-tag size="small" type="info" effect="plain">{{ bidDocument.plan.length }} 章</el-tag>
                 <el-tag
-                  v-if="bidDocument.planSource"
+                  v-if="planningSourceKey(bidDocument)"
                   size="small"
-                  :type="bidDocument.planSource === 'tender_document' ? 'success' : 'info'"
+                  :type="planningSourceKey(bidDocument) === 'unplanned' ? 'warning' : planningSourceKey(bidDocument) === 'pi_agent' ? 'success' : 'info'"
                   effect="plain"
                 >
-                  {{ bidDocument.planSource === 'tender_document' ? '招标文件目录' : '内置模板' }}
+                  {{ planningSourceLabel(bidDocument) }}
                 </el-tag>
               </div>
             </template>

@@ -40,6 +40,7 @@ const {
   loadBootstrap,
   runSearch,
   analyzeProject,
+  adoptWorkspace,
   updateFineReviewStatus,
   markSelectedRead,
   saveFollowUp,
@@ -89,6 +90,11 @@ function openWorkspace() {
   activeTab.value = "workspace";
 }
 
+function reanalyzeCurrent() {
+  const projectId = selectedWorkspace.value?.projectId || selectedProjectId.value;
+  if (projectId) void analyzeProject(projectId, false);
+}
+
 
 function onBidDocumentUpdated(doc: BidDocument) {
   if (selectedWorkspace.value) {
@@ -111,9 +117,13 @@ function preReview(item: CatalogItem) {
 }
 
 function selectMatchingWorkspace(workspace: Workspace) {
-  selectedWorkspaceId.value = workspace.id;
-  selectedProjectId.value = workspace.projectId;
+  adoptWorkspace(workspace, workspace.project);
   importKind.value = workspace.reasoning.fineReview ? "tender_document" : "notice";
+}
+
+function adoptCloudWorkspace(payload: { workspace: Workspace; project: CatalogItem }) {
+  adoptWorkspace(payload.workspace, payload.project);
+  activeTab.value = "workspace";
 }
 
 onMounted(loadBootstrap);
@@ -157,6 +167,7 @@ onMounted(loadBootstrap);
       v-else-if="activeTab === 'matching'"
       :workspace="selectedWorkspace"
       :workspaces="workspaces"
+      :config="config"
       :import-form="importForm"
       :import-file="importFile"
       :input-kind="importKind"
@@ -164,8 +175,10 @@ onMounted(loadBootstrap);
       @evaluate="importDocument"
       @file-selected="importFile = $event"
       @update:input-kind="importKind = $event"
-      @update-fine-status="updateFineReviewStatus($event.rowId, $event.status)"
+      @save-config="saveConfig($event)"
+      @update-fine-status="updateFineReviewStatus($event.rowId, $event.status, $event.uncertaintyReason, $event.responseValue, $event.materialBindings)"
       @open-workspace="openWorkspace"
+      @reanalyze="reanalyzeCurrent"
       @select-workspace="selectMatchingWorkspace"
     />
 
@@ -184,6 +197,7 @@ onMounted(loadBootstrap);
       @update:selected-library-key="libraryForm.key = $event"
       @update:bid-document="onBidDocumentUpdated"
       @select-workspace="selectMatchingWorkspace"
+      @cloud-workspace-ready="adoptCloudWorkspace"
       @file-selected="importFile = $event"
       @evaluate="importDocument"
       @update:input-kind="importKind = $event"

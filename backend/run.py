@@ -23,4 +23,16 @@ import uvicorn
 
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8793, reload=True)
+    port = int(os.getenv("TENDER_AGENT_PORT", "8797"))
+    reload_enabled = os.getenv("TENDER_AGENT_RELOAD", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    uvicorn.run(
+        "app.main:app",
+        host="127.0.0.1",
+        port=port,
+        reload=reload_enabled,
+    )

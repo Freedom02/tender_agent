@@ -45,7 +45,7 @@ tender_agent/
 │  │  ├─ tender_matching/  # 解析层 + 提取层 + 匹配层（agent_bridge / document_parser / document_fine_matching / document_matching / eligibility …）
 │  │  ├─ tender_monitor/   # 招标监控（adapters / custom_site / scheduler / service）
 │  │  └─ wecom/         # 企业微信
-│  ├─ run.py            # 启动入口（127.0.0.1:8793）
+│  ├─ run.py            # 启动入口（127.0.0.1:8797）
 │  └─ requirements.txt
 ├─ runtime/             # 运行时数据：catalog.json、workspaces.json、libraries/、projects/ 等（不提交 Git）
 ├─ docs/                # 开发文档、本体文档、API 清单
@@ -69,10 +69,10 @@ pip install -r requirements.txt
 python run.py
 ```
 
-后端默认监听 `http://127.0.0.1:8793`，健康检查：
+后端默认监听 `http://127.0.0.1:8797`，健康检查：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8793/api/health
+Invoke-RestMethod http://127.0.0.1:8797/api/health
 ```
 
 ### 2. 启动前端（开发）
@@ -85,7 +85,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 `http://127.0.0.1:5173/`，Vite 将 `/api` 与 `/runtime` 代理到后端 `8793`。
+浏览器打开 `http://127.0.0.1:5173/`，Vite 将 `/api` 与 `/runtime` 代理到后端 `8797`。
 
 ### 3. 生产构建
 

@@ -24,7 +24,7 @@ const activeSections = ref<string[]>([]);
 
 function statusTagType(status?: string): 'success' | 'warning' | 'danger' | 'info' {
   const s = (status || "").toLowerCase();
-  if (["完成", "已生成", "generated", "done", "complete", "success", "planned"].includes(s)) return "success";
+  if (["完成", "已生成", "generated", "done", "complete", "success"].includes(s)) return "success";
   if (["生成中", "待生成", "pending", "generating"].includes(s)) return "warning";
   if (["缺失", "missing", "失败", "failed", "error"].includes(s)) return "danger";
   return "info";
@@ -34,7 +34,7 @@ const STATUS_NAMES: Record<string, string> = {
   pending: "待生成",
   generating: "生成中",
   missing: "缺失",
-  planned: "已规划",
+  planned: "正文待撰写",
 };
 function statusName(status?: string): string {
   return STATUS_NAMES[status || ""] || status || "待生成";

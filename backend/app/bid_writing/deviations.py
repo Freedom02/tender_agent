@@ -20,6 +20,7 @@ from .schemas import (
     DEVIATION_TABLE_TITLES,
     build_deviation_row,
     deviation_table_for,
+    requirement_domain,
 )
 
 # 风险清单 detail 的最大字符数（requirement + suggestion 截断长度）
@@ -35,6 +36,12 @@ def _rows(fine_review: dict[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+def _evidence_values(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value] if value not in (None, "") else []
+
+
 def build_deviation_tables(fine_review: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """把 fineReview.rows 派生为技术/商务两张偏离表。
 
@@ -48,10 +55,26 @@ def build_deviation_tables(fine_review: dict[str, Any]) -> dict[str, list[dict[s
     }
     for row in _rows(fine_review):
         deviation_row = build_deviation_row(row)
+        category = requirement_domain(row)
         # 保留原始匹配状态：风险等级需区分「不满足」与「部分满足/待补材料」，
         # 二者均映射为同一偏离值「负偏离」，仅靠 deviation 无法区分。
         deviation_row["status"] = str(row.get("status") or "待澄清")
-        table = deviation_table_for(str(row.get("category") or "other"))
+        has_evidence_refs = any(
+            any(value not in (None, "") for value in _evidence_values(row.get(key)))
+            for key in (
+                "matchedObjectIds",
+                "matchedMaterialIds",
+                "evidenceIds",
+                "evidenceItems",
+                "matchedObjects",
+            )
+        )
+        if deviation_row["status"] == "满足" and not has_evidence_refs:
+            deviation_row["deviation"] = DEVIATION_PENDING
+            deviation_row["suggestion"] = (
+                "匹配结果缺少可追溯的 M3 材料，请重新核验后再确认无偏离。"
+            )
+        table = deviation_table_for(category)
         tables[table].append(deviation_row)
     return tables
 

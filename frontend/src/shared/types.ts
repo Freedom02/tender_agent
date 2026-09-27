@@ -44,6 +44,14 @@ export interface CatalogItem {
   decision?: string;
   analysisText?: string;
   analysisPreview?: string;
+  document?: {
+    kind?: string;
+    name?: string;
+    fileName?: string;
+    parseMethod?: string;
+    warnings?: string[];
+    [key: string]: unknown;
+  };
   workspaceId?: string;
   followUp?: boolean;
   followUpStatus?: string;
@@ -140,7 +148,26 @@ export interface ReasoningRow {
   sourceStage?: "announcement" | "tender_document" | string;
   kind: string;
   category?: string;
+  requirementClass?: "evidence" | "rejection" | "writing" | "compliance" | "fill" | string;
+  contentType?: string;
+  directTypeHits?: string[];
+  inheritedType?: string;
+  typeHits?: string[];
+  primaryRoute?: string;
+  secondaryRoutes?: string[];
+  matchDomain?: string;
+  decisionImpact?: string;
+  granularity?: string;
+  reviewRequired?: boolean;
+  reviewMode?: string;
+  reviewReason?: string;
+  classificationSource?: string;
+  productName?: string;
+  targetType?: string;
+  sourceColumn?: string;
   module?: string;
+  targetModule?: string;
+  targetModuleLabel?: string;
   section?: string;
   rawText?: string;
   normalizedRequirement?: string;
@@ -150,11 +177,19 @@ export interface ReasoningRow {
   responseType?: string;
   sourceFileId?: string;
   sourceLocator?: string;
+  source?: Record<string, any>;
+  downloadText?: string;
+  templateId?: string;
+  templateType?: string;
   requirement: string;
   sourceText?: string;
   mandatory?: boolean;
   isRejection?: boolean;
   status: string;
+  uncertaintyReason?: string;
+  responseValue?: string;
+  technicalAlignment?: Record<string, any>;
+  gaps?: string[];
   evidence: string;
   evidenceItems?: Array<{
     id: string;
@@ -189,12 +224,42 @@ export interface ReasoningRow {
   manualStatus?: string;
   statusSource?: "模型/规则" | "人工审核" | string;
   reviewStatus?: string;
+  supplementedMaterials?: Array<{
+    rid: string;
+    className?: string;
+    objectId?: string;
+    label?: string;
+    evidencePath?: string;
+  }>;
 }
 
 export interface RiskItem {
   level: string;
   title: string;
   detail: string;
+}
+
+export interface ReviewOutputModule {
+  domain?: string;
+  targetModule?: string;
+  targetModuleLabel?: string;
+  primaryRoute?: string;
+  handlingMode?: string;
+  ignored?: boolean;
+  count?: number;
+  items?: Array<Record<string, any>>;
+  source?: Record<string, any>;
+  warnings?: string[];
+}
+
+export interface ReviewOutput {
+  schemaVersion?: string;
+  producer?: string;
+  source?: Record<string, any>;
+  document?: Record<string, any>;
+  modules?: Record<string, ReviewOutputModule>;
+  summary?: Record<string, any>;
+  matchStage?: Record<string, any>;
 }
 
 export interface ReasoningResult {
@@ -226,10 +291,21 @@ export interface ReasoningResult {
   };
   extraction?: {
     method: "llm" | "rule" | string;
+    provider?: string;
     modelUsed?: string;
     warning?: string;
     warnings?: string[];
+    stats?: Record<string, unknown>;
+    analysisPack?: Record<string, any>;
+    documentMap?: Record<string, any>;
+    reviewOutput?: ReviewOutput;
+    agentStatus?: string;
+    fallbackMode?: string;
+    errors?: string[];
   };
+  analysisPack?: Record<string, any>;
+  documentMap?: Record<string, any>;
+  reviewOutput?: ReviewOutput;
   eligibility?: {
     eligibilityScore: number;
     eligibilityStatus: string;
@@ -255,6 +331,7 @@ export interface FineReviewResult {
   recommendation: string;
   clauseCount: number;
   statusCounts: Record<string, number>;
+  classCounts?: Record<string, number>;
   summary?: MatchSummary;
   hardBlockers: Array<{
     requirementId: string;
@@ -269,12 +346,24 @@ export interface FineReviewResult {
     detail: string;
     sourceLocator?: string;
   }>;
+  pendingMaterialList?: Array<MatchRiskReference & { importance?: string; evidenceNeed?: string }>;
   extraction: {
     method: "llm" | "rule" | string;
+    provider?: string;
     modelUsed?: string;
     warning?: string;
     warnings?: string[];
+    stats?: Record<string, unknown>;
+    analysisPack?: Record<string, any>;
+    documentMap?: Record<string, any>;
+    reviewOutput?: ReviewOutput;
+    agentStatus?: string;
+    fallbackMode?: string;
+    errors?: string[];
   };
+  analysisPack?: Record<string, any>;
+  documentMap?: Record<string, any>;
+  reviewOutput?: ReviewOutput;
 }
 
 export interface MatchRiskReference {
@@ -287,6 +376,8 @@ export interface MatchRiskReference {
 export interface MatchSummary {
   totalRequirementCount: number;
   statusCounts: Record<string, number>;
+  classCounts?: Record<string, number>;
+  evidenceStatusCounts?: Record<string, number>;
   mandatoryCount: number;
   mandatoryClosedCount: number;
   mandatoryClosureRate: number;
@@ -297,8 +388,14 @@ export interface MatchSummary {
   rejectionCount: number;
   rejectionRiskCount: number;
   hardBlockerCount: number;
-  pendingMaterialCount: number;
+  pendingMaterialCount?: number;
   pendingClarificationCount: number;
+  rejectionPendingCount?: number;
+  rejectionSafeCount?: number;
+  writing?: { total: number; done: number; rate: number };
+  compliance?: { total: number; done: number; rate: number };
+  fill?: { total: number; done: number; rate: number };
+  uncertainCount?: number;
   notSatisfiedCount: number;
 }
 
@@ -309,6 +406,12 @@ export interface Workspace {
   title: string;
   project: CatalogItem;
   reasoning: ReasoningResult;
+  parseBundleRef?: {
+    parseBundleId: string;
+    schemaVersion: string;
+    provider: string;
+    artifact: string;
+  };
   auditRecords?: AuditRecord[];
   draft: string;
   draftVersion: number;
@@ -366,6 +469,13 @@ export interface BootstrapResponse {
   libraries: LibrarySummary[];
   reminders: Record<string, unknown>[];
   automation: Record<string, any>;
+  agentRuntime?: {
+    provider: string;
+    piEnabled: boolean;
+    piProvider: string;
+    piModel: string;
+    backendPid?: number;
+  };
   workspaces: Workspace[];
 }
 
@@ -464,19 +574,96 @@ export interface ImportResult {
 
 export type BidMode = "open" | "secret";
 
+export interface SubmissionStructure {
+  mode: "single" | "separate" | "unspecified";
+  confidence: "explicit" | "inferred" | "unknown";
+  hasExplicitFormat?: boolean;
+  sourceLocator: string;
+  volumes: {
+    volumeId: string;
+    title: string;
+    order: number;
+    required: boolean;
+    sourceLocator: string;
+    formatItemIds: string[];
+    items?: {
+      formatItemId: string;
+      title: string;
+      order: number;
+      required: boolean;
+      conditional?: boolean;
+      conditionText?: string;
+      itemType?: string;
+      responseType?: string;
+      templateType?: string;
+      templateId?: string;
+      sourceLocator?: string;
+      sourceSectionId?: string;
+    }[];
+  }[];
+  warnings: string[];
+}
+
 export interface BidSection {
   sectionId: string;
   title: string;
   source: string;
   kind: string;
+  nodeType?: "volume" | "format_item";
+  volumeId?: string;
+  formatItemId?: string;
+  itemType?: string;
+  conditional?: boolean;
+  conditionText?: string;
+  structureSource?: string;
+  parentSectionId?: string;
+  level?: number;
+  order?: number;
+  required?: boolean;
+  responseType?: string;
   content: string;
   status: string;
   blanksToFill?: string[];
   templateOrigin?: string;
   templateText?: string;
   requirementIds?: string[];
+  evaluationIds?: string[];
+  templateId?: string;
+  templateFragmentId?: string;
+  templateType?: string;
+  templateCopyMode?: string;
+  templateStatus?: string;
+  templateFieldCount?: number;
+  templateLockedBlockCount?: number;
+  templateTableCount?: number;
+  templateBlocks?: Record<string, unknown>[];
+  templateTables?: Record<string, unknown>[];
+  templateStyle?: Record<string, unknown>;
+  templateResponseTable?: Record<string, unknown>;
+  templateFillProvider?: string;
+  templateFillStatus?: string;
+  templateFieldValues?: Record<string, unknown>[];
+  templateCellValues?: Record<string, unknown>[];
+  templateFillWarnings?: string[];
+  templateFillError?: string;
+  contentMatchesTemplate?: boolean;
+  templateEditFallback?: boolean;
+  sourceSectionId?: string;
   sourceRefs?: Record<string, unknown>[];
   sourceLocator?: string;
+  materialMatches?: Record<string, unknown>[];
+  unmatchedMaterialRequirementIds?: string[];
+  writingPlan?: Record<string, unknown>;
+  agentResults?: Record<string, unknown>[];
+  provider?: string;
+  phase?: string;
+  draftProvider?: "dify" | "local_fallback" | string;
+  cloudDraftError?: string;
+  rewriteProvider?: string;
+  rewriteOperation?: string;
+  rewriteWarnings?: string[];
+  rewriteSourceRefs?: Record<string, unknown>[];
+  editHistory?: Record<string, unknown>[];
 }
 
 export interface DeviationRow {
@@ -492,6 +679,7 @@ export interface DeviationRow {
 
 export interface BidDocument {
   plan: BidSection[];
+  submissionStructure?: SubmissionStructure;
   deviationTables: {
     technical: DeviationRow[];
     commercial: DeviationRow[];
@@ -500,9 +688,186 @@ export interface BidDocument {
   status: string;
   planSource?: string;
   planSourceDetail?: string;
+  planningSource?: string;
+  planningSourceDetail?: string;
+  parseProvider?: string;
+  parseSourceDetail?: string;
+  planningProvider?: string;
+  planningStatus?: string;
+  planningModel?: string;
+  planningFallbackReason?: string;
+  planningWarnings?: string[];
+  requirementCoverage?: Record<string, unknown>[];
+  uncoveredRequirements?: Record<string, unknown>[];
+  duplicatedRequirements?: Record<string, unknown>[];
+  requirementMappingStatus?: string;
+  requirementMapBatchCount?: number;
+  requirementMappingWarnings?: string[];
+  agentResults?: Record<string, unknown>[];
+  templateFragments?: Record<string, unknown>[];
+  templateFragmentsArtifact?: string;
+  copiedTemplateCount?: number;
+  exportWarnings?: string[];
+  lastExportMode?: BidMode;
+  exportedAt?: string;
+  complianceReview?: ComplianceReviewResult;
 }
 
 export interface ProofreadResult {
   report: string;
   riskItems: RiskItem[];
+}
+
+export interface ComplianceRiskItem extends RiskItem {
+  riskId?: string;
+  category?: string;
+  sectionId?: string;
+  requirementId?: string;
+  evaluationId?: string;
+  sourceLocator?: string;
+  suggestion?: string;
+  sourceRefs?: Record<string, unknown>[];
+}
+
+export interface ComplianceCoverage {
+  requirementTotal: number;
+  requirementCovered: number;
+  mandatoryTotal: number;
+  mandatoryCovered: number;
+  evaluationTotal: number;
+  evaluationCovered: number;
+  uncoveredRequirementIds?: string[];
+  uncoveredEvaluationIds?: string[];
+  contentSectionIds?: string[];
+}
+
+export interface ComplianceReviewResult {
+  status: "pass" | "needs_review" | "failed" | "stale" | string;
+  summary: string;
+  coverage: ComplianceCoverage;
+  riskItems: ComplianceRiskItem[];
+  baselineRiskItems?: ComplianceRiskItem[];
+  baselineProofread?: ProofreadResult;
+  warnings: string[];
+  provider: string;
+  phase?: string;
+  agentResults?: Record<string, unknown>[];
+  reviewedAt?: string;
+  staleAt?: string;
+}
+
+// ---------------- 云端智能体解析 ----------------
+
+export interface CloudProjectMeta {
+  projectName: string;
+  projectCode: string;
+  tendererName: string;
+  agencyName: string;
+  budget: string;
+  deadline: string;
+  [key: string]: unknown;
+}
+
+export interface CloudOutlineItem {
+  sectionId: string;
+  title: string;
+  kind: string;
+  source: string;
+  requirementIds: string[];
+  [key: string]: unknown;
+}
+
+export interface CloudRequirementItem {
+  id: string;
+  category: string;
+  requirement: string;
+  mandatory: boolean;
+  sourceLocator: string;
+  status: string;
+  [key: string]: unknown;
+}
+
+export interface CloudParseResult {
+  projectMeta: CloudProjectMeta;
+  outline: CloudOutlineItem[];
+  requirements: CloudRequirementItem[];
+  evaluationItems: Record<string, unknown>[];
+  riskItems: Record<string, unknown>[];
+  documentBlocks?: Record<string, unknown>;
+  documentStructure?: Record<string, unknown>;
+  bidFormatSpec?: Record<string, unknown>;
+  submissionStructure?: SubmissionStructure;
+  parseReviewReport?: Record<string, unknown>;
+  agentResults?: Record<string, unknown>[];
+  provider?: string;
+  warnings: string[];
+}
+
+export type CloudRunStatus =
+  | "created"
+  | "uploading"
+  | "uploaded"
+  | "parsing"
+  | "outline_ready"
+  | "waiting_outline_confirmation"
+  | "generating_sections"
+  | "reviewing"
+  | "waiting_export_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | string;
+
+export interface CloudBidRun {
+  runId: string;
+  workspaceId: string;
+  projectId: string;
+  provider?: string;
+  providerSource?: string;
+  backendPid?: number;
+  status: CloudRunStatus;
+  phase: string;
+  progress: number;
+  currentAgent?: string;
+  currentAgentStatus?: string;
+  createdAt: string;
+  updatedAt: string;
+  difyTaskId?: string;
+  difyWorkflowRunId?: string;
+  parseBundleId?: string;
+  parseBundleArtifact?: string;
+  workflowType: string;
+  originalFilename: string;
+  inputArtifact?: string;
+  outputArtifact?: string;
+  error?: string | null;
+  materialized?: boolean;
+  result?: CloudParseResult | null;
+}
+
+export interface ParseBundle {
+  parseBundleId: string;
+  schemaVersion: string;
+  provider: string;
+  status: string;
+  projectId: string;
+  workspaceId: string;
+  createdAt: string;
+  updatedAt: string;
+  artifactPath?: string;
+  sourceFile: Record<string, unknown>;
+  documentBlocks: Record<string, unknown>;
+  documentStructure: Record<string, unknown>;
+  projectMeta: Record<string, unknown>;
+  requirements: Record<string, unknown>[];
+  evaluationItems: Record<string, unknown>[];
+  bidFormatSpec: Record<string, unknown>;
+  submissionStructure: SubmissionStructure;
+  rawOutline: Record<string, unknown>[];
+  riskItems: Record<string, unknown>[];
+  parseReviewReport: Record<string, unknown>;
+  artifacts: Record<string, unknown>[];
+  warnings: string[];
+  agentResults: Record<string, unknown>[];
+  rawProviderResult: Record<string, unknown>;
 }

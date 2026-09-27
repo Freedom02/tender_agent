@@ -123,6 +123,7 @@ export function useAppState() {
     if (!selectedWorkspaceId.value && workspaces.value.length) {
       const latest = workspaces.value[workspaces.value.length - 1];
       selectedWorkspaceId.value = latest.id;
+      selectedProjectId.value = latest.project?.id || latest.projectId || selectedProjectId.value;
       if (latest.reasoning?.fineReview?.rows?.length) {
         importKind.value = "tender_document";
       }
@@ -194,6 +195,28 @@ export function useAppState() {
     } finally {
       busy.value = false;
     }
+  }
+
+  function adoptWorkspace(workspace: Workspace, project?: CatalogItem) {
+    const projectValue = project || workspace.project;
+    if (projectValue) {
+      const projectIndex = catalog.value.findIndex((item) => item.id === projectValue.id);
+      if (projectIndex >= 0) {
+        catalog.value[projectIndex] = { ...catalog.value[projectIndex], ...projectValue };
+      } else {
+        catalog.value.unshift(projectValue);
+      }
+      selectedProjectId.value = projectValue.id;
+    }
+
+    const workspaceIndex = workspaces.value.findIndex((item) => item.id === workspace.id);
+    if (workspaceIndex >= 0) {
+      workspaces.value[workspaceIndex] = workspace;
+    } else {
+      workspaces.value.push(workspace);
+    }
+    selectedWorkspaceId.value = workspace.id;
+    importKind.value = "tender_document";
   }
 
   async function markSelectedRead() {
@@ -329,11 +352,25 @@ export function useAppState() {
     }
   }
 
-  async function updateFineReviewStatus(rowId: string, status: string) {
+  async function updateFineReviewStatus(
+    rowId: string,
+    status: string,
+    uncertaintyReason = "",
+    responseValue?: string,
+    materialBindings?: Array<Record<string, unknown>>
+  ) {
     if (!selectedWorkspace.value || !rowId) return;
     busy.value = true;
     try {
-      const result = await api.updateFineReviewStatus(selectedWorkspace.value.id, rowId, status);
+      const result = await api.updateFineReviewStatus(
+        selectedWorkspace.value.id,
+        rowId,
+        status,
+        uncertaintyReason,
+        "当前用户",
+        responseValue,
+        materialBindings
+      );
       const index = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (index >= 0) workspaces.value[index] = result.workspace;
       else workspaces.value.push(result.workspace);
@@ -563,6 +600,7 @@ export function useAppState() {
     loadBootstrap,
     runSearch,
     analyzeProject,
+    adoptWorkspace,
     updateFineReviewStatus,
     markSelectedRead,
     saveFollowUp,

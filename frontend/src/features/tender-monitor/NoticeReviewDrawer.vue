@@ -96,7 +96,7 @@ function needLabel(category?: string) {
           <p class="form-hint">公告资格粗匹配；项目相关性 {{ relevanceScore }} 分。</p>
           <div class="catalog-meta">
             <el-tag size="small" effect="plain">
-              {{ extraction?.method?.includes("llm") ? "大模型 + 规则校验" : "规则抽取" }}
+              {{ extraction?.provider === "workbuddy-agent" ? "WorkBuddy 智能体" : extraction?.method?.includes("llm") ? "大模型 + 规则校验" : "规则抽取" }}
             </el-tag>
             <el-tag v-if="extraction?.modelUsed" size="small" effect="plain">
               {{ extraction.modelUsed }}

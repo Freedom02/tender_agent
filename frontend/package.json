@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
+    "docx-preview": "^0.4.1",
     "element-plus": "^2.13.0",
     "lucide-vue-next": "^0.468.0",
     "vue": "^3.5.0"

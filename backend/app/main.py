@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .api.bid_writing import create_router as create_bid_writing_router
+from .api.cloud_agent import create_router as create_cloud_agent_router
 from .api.config import create_router as create_config_router
 from .api.materials import create_router as create_materials_router
 from .api.monitoring import create_router as create_monitoring_router
@@ -22,6 +23,7 @@ from .api.notifications import create_router as create_notifications_router
 from .api.ontology import create_router as create_ontology_router
 from .api.wecom import create_router as create_wecom_router
 from .store import Store
+from .cloud_agent.run_service import CloudRunService
 from .tender_monitor.service import search_catalog
 from .tender_monitor.scheduler import monitoring_loop
 
@@ -29,6 +31,7 @@ from .tender_monitor.scheduler import monitoring_loop
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 store = Store(ROOT)
+cloud_run_service = CloudRunService(ROOT)
 
 
 @asynccontextmanager
@@ -63,6 +66,7 @@ app.include_router(create_notifications_router(store))
 app.include_router(create_ontology_router(store))
 app.include_router(create_wecom_router(store))
 app.include_router(create_bid_writing_router(store))
+app.include_router(create_cloud_agent_router(cloud_run_service, store))
 
 
 class SearchPayload(BaseModel):
@@ -84,6 +88,9 @@ class FineReviewStatusPayload(BaseModel):
     rowId: str = Field(min_length=1)
     status: str = Field(min_length=1)
     reviewer: str = "当前用户"
+    uncertaintyReason: str = ""
+    responseValue: str | None = None
+    materialBindings: list[dict[str, Any]] | None = None
 
 
 class AskPayload(BaseModel):
@@ -222,7 +229,15 @@ def save_draft(workspace_id: str, payload: DraftPayload) -> dict[str, Any]:
 @app.post("/api/workspaces/{workspace_id}/fine-review/status")
 def update_fine_review_status_api(workspace_id: str, payload: FineReviewStatusPayload) -> dict[str, Any]:
     try:
-        result = store.update_fine_review_row(workspace_id, payload.rowId, payload.status, payload.reviewer)
+        result = store.update_fine_review_row(
+            workspace_id,
+            payload.rowId,
+            payload.status,
+            payload.reviewer,
+            payload.uncertaintyReason,
+            payload.responseValue,
+            payload.materialBindings,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result:

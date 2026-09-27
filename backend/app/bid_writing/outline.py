@@ -2,7 +2,7 @@
 """从招标文件「投标文件格式/响应文件组成」章节抽取响应目录并做确定性分类。
 
 输入 document.sections（document_structure.build_section_tree 产物，每项含
-sectionType / title / text / sourceLocator）。若招标文件给出了明确的响应文件
+sectionType / heading / text / startLocator）。若招标文件给出了明确的响应文件
 目录/格式，则该目录是标书章节规划的权威来源；否则上层回退到固定模板。
 
 职责边界：
@@ -22,6 +22,21 @@ _FORMAT_TITLE_TERMS = (
     "投标文件格式", "响应文件格式", "投标文件组成", "响应文件组成",
     "投标文件编制", "响应文件编制", "文件编制要求", "投标文件目录",
     "响应文件目录", "投标文件的构成", "响应文件的构成",
+)
+
+# 格式模板子章节名：这些是投标人要提交的"文书/表格"名称。文档结构分类器（document_structure）
+# 目前只把"投标文件格式/响应文件格式"这类**章标题**判成 document_format，而章内的
+# 模板子章节（投标函/授权书/响应表/一览表…）常被误判成 other/commercial/technical，
+# 导致响应目录抽取漏项。这里按标题关键词兜底收集，与 sectionType 无关。
+_FORMAT_ITEM_TERMS = (
+    "投标函", "响应函", "投标书", "响应书",
+    "承诺书", "承诺函",
+    "授权委托书", "授权书", "委托书", "单位授权书",
+    "法定代表人身份证明", "法定代表人资格证明",
+    "投标保证金", "保证金",
+    "资格及资信", "资信证明",
+    "响应表", "一览表", "明细表", "报价表", "报价单",
+    "偏离表", "封面格式", "索引",
 )
 
 # title 关键词 -> (sectionId, source, kind)。顺序敏感：先特后泛。
@@ -70,8 +85,11 @@ def _find_format_sections(sections: list[Any]) -> list[dict[str, Any]]:
         if section.get("sectionType") == DOCUMENT_FORMAT_TYPE:
             found.append(section)
             continue
-        title = _norm(str(section.get("title") or ""))
+        title = _norm(str(section.get("heading") or ""))
         if any(_norm(term) in title for term in _FORMAT_TITLE_TERMS):
+            found.append(section)
+            continue
+        if any(_norm(term) in title for term in _FORMAT_ITEM_TERMS):
             found.append(section)
     return found
 
@@ -94,7 +112,7 @@ def extract_response_outline(sections: list[Any], ai: dict[str, Any]) -> dict[st
     if not format_sections:
         return None
     source_detail = " / ".join(
-        str(s.get("title") or s.get("sourceLocator") or "投标文件格式") for s in format_sections[:3]
+        str(s.get("heading") or s.get("startLocator") or "投标文件格式") for s in format_sections[:3]
     )
     raw_text = "\n\n".join(str(s.get("text") or "") for s in format_sections).strip()
     if not raw_text:
@@ -129,10 +147,14 @@ def _extract_via_llm(raw_text: str, ai: dict[str, Any]) -> list[dict[str, Any]]:
     system = (
         "你是招标文件解析助手。请从「投标文件格式/响应文件组成」内容中，"
         "抽取投标人需要提交的响应文件目录条目（章节标题）。"
+        "只抽取文书/表格类标题，例如：投标函、承诺书、授权委托书、"
+        "法定代表人身份证明、资格及资信证明文件、投标保证金、开标一览表、"
+        "报价明细表、标的说明一览表、技术和服务要求响应表、商务条件响应表、"
+        "偏离表、封面、索引等。不要抽取正文句子、编制说明条款或签署盖章规则。"
         "只抽取原文明确列出的条目，不补充、不合并、不编造。"
         '输出 JSON 数组，每项形如 {"title":"章节标题"}。'
     )
-    user = f"「投标文件格式/组成」原文：\n\n{raw_text[:6000]}"
+    user = f"「投标文件格式/组成」原文：\n\n{raw_text[:20000]}"
     result = call_openai_compatible(
         ai,
         [
@@ -191,7 +213,7 @@ def _extract_via_rules(raw_text: str) -> list[dict[str, Any]]:
         if not line or len(line) > 60:
             continue
         m = re.match(
-            r"^\s*(?:第[一二三四五六七八九十\d]+[章篇部分节]|[\(\[]?\d+[\)\]、.．]\s*|[-—–*·•]\s*)+(.+)$",
+            r"^\s*(?:第[一二三四五六七八九十\d]+[章篇部分节]|[\(\[]?\d+[\)\]、.．]\s*|[\(\[]?[一二三四五六七八九十]+[\)\]、.．]\s*|[-—–*·•]\s*)+(.+)$",
             line,
         )
         if not m:

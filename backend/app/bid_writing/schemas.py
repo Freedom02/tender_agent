@@ -37,6 +37,79 @@ SECTION_KIND_TECHNICAL = "technical"     # 技术标书
 SECTION_KIND_DEVIATION = "deviation"     # 偏离表
 SECTION_KIND_ATTACHMENT = "attachment"   # 附件
 
+# 撰写画像：同一套编排接口下，按章节领域切换提示词和材料范围。
+WRITING_PROFILE_TECHNICAL = "technical"
+WRITING_PROFILE_COMMERCIAL = "commercial"
+WRITING_PROFILE_TEMPLATE = "template"
+WRITING_PROFILE_ATTACHMENT = "attachment"
+
+# knowledge 中允许注入各类撰写智能体的材料分组。
+# 业绩、人员、资质等可以被多个画像引用，但不会复制底层材料。
+WRITING_PROFILE_MATERIAL_KEYS: dict[str, tuple[str, ...]] = {
+    WRITING_PROFILE_TECHNICAL: (
+        "products",
+        "capabilities",
+        "qualifications",
+        "credentials",
+        "projectReferences",
+        "personnel",
+    ),
+    WRITING_PROFILE_COMMERCIAL: (
+        "qualifications",
+        "credentials",
+        "projectReferences",
+        "personnel",
+        "financialRecords",
+    ),
+    WRITING_PROFILE_TEMPLATE: (
+        "products",
+        "capabilities",
+        "qualifications",
+        "credentials",
+        "projectReferences",
+        "personnel",
+        "financialRecords",
+    ),
+    WRITING_PROFILE_ATTACHMENT: (
+        "qualifications",
+        "credentials",
+        "projectReferences",
+        "personnel",
+        "financialRecords",
+        "products",
+        "capabilities",
+    ),
+}
+
+
+def resolve_writing_profile(section: dict[str, Any] | None) -> str:
+    """根据章节来源和类型选择撰写画像。"""
+
+    value = section if isinstance(section, dict) else {}
+    source = str(value.get("source") or "").strip()
+    kind = str(value.get("kind") or "").strip()
+    response_type = str(value.get("responseType") or "").strip()
+    if kind == SECTION_KIND_ATTACHMENT or source == SECTION_SOURCE_ATTACHMENT:
+        return WRITING_PROFILE_ATTACHMENT
+    if (
+        kind == SECTION_KIND_DEVIATION
+        or source in {SECTION_SOURCE_TEMPLATE, SECTION_SOURCE_COPIED_TEMPLATE, SECTION_SOURCE_TABLE}
+        or response_type in {"fixed_form", "table", "deviation", "attachment"}
+    ):
+        return WRITING_PROFILE_TEMPLATE
+    if kind == SECTION_KIND_COMMERCIAL:
+        return WRITING_PROFILE_COMMERCIAL
+    return WRITING_PROFILE_TECHNICAL
+
+
+def material_keys_for_writing_profile(profile: str) -> tuple[str, ...]:
+    """返回画像允许使用的 knowledge 分组。"""
+
+    return WRITING_PROFILE_MATERIAL_KEYS.get(
+        str(profile or "").strip(),
+        WRITING_PROFILE_MATERIAL_KEYS[WRITING_PROFILE_TECHNICAL],
+    )
+
 # 偏离类型（五个取值，偏离表与校对共用）
 DEVIATION_NONE = "无偏离"
 DEVIATION_POSITIVE = "正偏离"
@@ -62,6 +135,41 @@ DEVIATION_TABLE_TITLES: dict[str, str] = {
     DEVIATION_TABLE_TECHNICAL: "技术规格偏离表",
     DEVIATION_TABLE_COMMERCIAL: "商务偏离表",
 }
+
+
+_REQUIREMENT_DOMAINS = {
+    "qualification",
+    "performance",
+    "personnel",
+    "financial",
+    "credit",
+    "region",
+    "compliance",
+    "technical",
+    "service_plan",
+    "commercial",
+    "document",
+    "pricing",
+    "contract",
+    "rejection",
+    "evaluation",
+    "project_info",
+    "template",
+    "other",
+}
+
+
+def requirement_domain(row: dict[str, Any] | None) -> str:
+    """Read the legacy category or the target-oriented matching domain."""
+    value = row if isinstance(row, dict) else {}
+    candidates = [
+        str(value.get(key) or "").strip().lower()
+        for key in ("category", "targetModule", "matchDomain")
+    ]
+    for candidate in candidates:
+        if candidate in _REQUIREMENT_DOMAINS - {"other"}:
+            return candidate
+    return next((candidate for candidate in candidates if candidate), "other")
 
 
 def deviation_table_for(category: str) -> str:
@@ -96,15 +204,47 @@ def build_section(
     *,
     kind: str = SECTION_KIND_TECHNICAL,
     requirement_ids: list[str] | None = None,
+    parent_section_id: str = "",
+    level: int = 1,
+    order: int = 0,
+    required: bool = True,
+    response_type: str = "",
     content: str = "",
     source_refs: list[dict[str, Any]] | None = None,
     status: str = "pending",
 ) -> dict[str, Any]:
+    normalized_level = max(int(level or 1), 1)
+    normalized_order = max(int(order or 0), 0)
+    normalized_response_type = response_type.strip() if isinstance(response_type, str) else ""
+    if not normalized_response_type:
+        normalized_response_type = (
+            "fixed_form"
+            if source in {SECTION_SOURCE_TEMPLATE, SECTION_SOURCE_COPIED_TEMPLATE}
+            else "table"
+            if source in {SECTION_SOURCE_TABLE, "deviation"} or kind == SECTION_KIND_DEVIATION
+            else "attachment"
+            if source == SECTION_SOURCE_ATTACHMENT or kind == SECTION_KIND_ATTACHMENT
+            else "chapter_text"
+        )
+    writing_profile = resolve_writing_profile(
+        {
+            "source": source,
+            "kind": kind,
+            "responseType": normalized_response_type,
+        }
+    )
     return {
         "sectionId": section_id,
         "title": title,
         "source": source,
         "kind": kind,
+        "writingProfile": writing_profile,
+        "materialScopes": list(material_keys_for_writing_profile(writing_profile)),
+        "parentSectionId": str(parent_section_id or ""),
+        "level": normalized_level,
+        "order": normalized_order,
+        "required": bool(required),
+        "responseType": normalized_response_type,
         "requirementIds": list(requirement_ids or []),
         "content": content,
         "sourceRefs": list(source_refs or []),
@@ -121,7 +261,7 @@ def build_deviation_row(comparison_row: dict[str, Any]) -> dict[str, Any]:
     偏离判断只读 comparison 的 status/reason/evidence，不重新生成、不调用 LLM。
     """
     status = str(comparison_row.get("status") or "待澄清")
-    category = str(comparison_row.get("category") or "other")
+    category = requirement_domain(comparison_row)
     return {
         "requirementId": str(comparison_row.get("requirementId") or comparison_row.get("id") or ""),
         "category": category,
@@ -152,9 +292,26 @@ def build_bid_document(
         "status": "planned",
         "version": 1,
         "generatedAt": "",
-        "planSource": "builtin_template",
+        "planSource": "unplanned",
         "planSourceDetail": "",
+        "planningSource": "unplanned",
+        "planningSourceDetail": "",
+        "parseProvider": "",
+        "parseSourceDetail": "",
+        "planningProvider": "",
+        "planningStatus": "",
+        "planningModel": "",
+        "planningFallbackReason": "",
         "plan": [],
+        "requirementCoverage": [],
+        "uncoveredRequirements": [],
+        "duplicatedRequirements": [],
+        "requirementMappingStatus": "pending",
+        "requirementMapBatchCount": 0,
+        "requirementMappingWarnings": [],
+        "agentResults": [],
+        "templateFragments": [],
+        "templateFragmentsArtifact": "",
         "deviationTables": {
             DEVIATION_TABLE_TECHNICAL: [],
             DEVIATION_TABLE_COMMERCIAL: [],

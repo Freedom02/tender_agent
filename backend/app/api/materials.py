@@ -25,16 +25,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..document_recognition.ontology_defs import (
-    CLASS_SCHEMA, FACT_KEY_BY_CLASS as _FACT_KEY_BY_CLASS, REL_MAPPING, RUNTIME_FIELDS,
+    CLASS_SCHEMA, CLASS_CN, FACT_KEY_BY_CLASS as _FACT_KEY_BY_CLASS, REL_MAPPING, RUNTIME_FIELDS, camel_to_snake,
 )
 from ..document_recognition.storage import FACT_LIST_KEYS, RELATIONSHIPS, build_edges, build_profile
 from ..importers import ExcelImporter
-from ..m3.sync import build_m3_client, read_facts_from_m3, read_organization_from_m3, sync_facts_to_m3
+from ..m3.sync import build_m3_client, read_facts_from_m3, read_organization_from_m3, reuse_existing_products, sync_facts_to_m3
 
 # 8 个本体类的导出列：从 CLASS_SCHEMA（唯一来源）派生 = 本体字段 + 各类运行时辅助字段
 _CLASS_FIELDS: dict[str, list[str]] = {
@@ -56,6 +56,30 @@ _RELATIONSHIP_MAPPINGS: list[dict[str, str]] = [
     }
     for n, f, t, sp, sf, tp, tj in REL_MAPPING
 ]
+
+_CLASS_BY_SNAKE: dict[str, str] = {camel_to_snake(cls): cls for cls in CLASS_SCHEMA}
+_FACT_KEY_TO_CLASS: dict[str, str] = {v: k for k, v in _FACT_KEY_BY_CLASS.items()}
+_CLASS_CN_BY_SNAKE: dict[str, str] = {
+    camel_to_snake(cls): CLASS_CN.get(cls, (camel_to_snake(cls), ""))[0]
+    for cls in CLASS_SCHEMA
+}
+_ID_FIELD_BY_CLASS: dict[str, str] = {
+    camel_to_snake(cls): camel_to_snake(next(n for n, _, is_pk in attrs if is_pk))
+    for cls, attrs in CLASS_SCHEMA.items()
+}
+_ID_PREFIX_BY_CLASS: dict[str, str] = {
+    "qualification_certificate": "qc",
+    "performance_case": "perf",
+    "staff_member": "staff",
+    "financial_evidence": "fin",
+    "technical_product": "prd",
+    "technical_parameter": "param",
+    "credential": "cred",
+}
+_VALID_FIELDS_BY_CLASS: dict[str, set[str]] = {
+    camel_to_snake(cls): {camel_to_snake(n) for n, _, _ in attrs}
+    for cls, attrs in CLASS_SCHEMA.items()
+}
 
 # 受控词表（V0.3 重构：删除 materialGroup/capabilityType/ipType/certificationType，
 # 新增 enterpriseSize/credentialType）
@@ -432,20 +456,15 @@ def create_router(store: Any) -> APIRouter:
             headers={"Content-Disposition": 'attachment; filename="company-materials.md"'},
         )
 
-    @router.post("/api/materials/import")
-    def import_material_package(payload: MaterialPackagePayload) -> dict[str, Any]:
-        """一步导入：ZIP → 解析 → 直接 upsert 进 M3。
+    def _m3_sync_failed(facts: dict[str, Any], m3_sync: dict[str, Any]) -> bool:
+        """M3 同步整体失败判定：有待写入数据，却一个对象都没写进去（通常是 M3 服务不可用）。"""
+        has_data = bool(facts.get("organization")) or any(bool(facts.get(key)) for key in FACT_LIST_KEYS)
+        if not has_data:
+            return False
+        return int(m3_sync.get("objects") or 0) == 0
 
-        本地不再落 company-materials.json，只保留证明材料文件（evidencePath 相对路径指向）。
-        如需预览后再确认，使用 /api/materials/import/preview + confirm。
-        """
-        if not payload.fileBase64:
-            raise HTTPException(status_code=400, detail="缺少 fileBase64（模板包 ZIP）")
-        try:
-            raw = base64.b64decode(payload.fileBase64)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="fileBase64 解码失败") from exc
-
+    def _import_raw(raw: bytes) -> dict[str, Any]:
+        """解析 ZIP 字节流 → upsert 进 M3 → 返回导入结果（base64 与 multipart 共用）。"""
         importer = ExcelImporter(store.runtime_root)
         try:
             result = importer.import_zip(raw)
@@ -462,14 +481,275 @@ def create_router(store: Any) -> APIRouter:
                 org = None
             if org:
                 facts["organization"] = org
+        # 产品级防重：与库内已有产品同名/同别名的复用库内对象，只写新参数（2026-09-20）
+        reused_products = reuse_existing_products(m3, facts, result["warnings"])
+        result["stats"]["technical_product_reused"] = len(reused_products)
         m3_sync = sync_facts_to_m3(m3, facts)
+        if _m3_sync_failed(facts, m3_sync):
+            raise HTTPException(
+                status_code=502,
+                detail="企业数据写入 M3 图库失败：" + "；".join(m3_sync.get("warnings", [])[:3]),
+            )
         store._refresh_company_from_m3(force=True)
+
+        # profile 用库内全量事实构建（含本次复用的既有产品）；M3 读失败退回导入 facts
+        try:
+            profile_facts = read_facts_from_m3(m3)
+        except Exception:
+            profile_facts = facts
 
         return {
             "stats": result["stats"],
             "warnings": result["warnings"],
             "m3Sync": m3_sync,
-            "profile": build_profile(facts),
+            "profile": build_profile(profile_facts),
+        }
+
+    def _next_evidence_folder(class_name: str, object_id: str) -> tuple[str, Path]:
+        """证据文件夹 = 类目录 + 事实业务主键，证据 ↔ 事实一一对应。
+
+        导入流程用「序号」作文件夹名（序号 = 事实 ID 序号，三者同源）；手动单条用
+        业务主键（如 param-manual-xxx）作文件夹名：1:1 对应事实、且与导入的数字
+        序号命名空间隔离，避免全局 max+1 计数器与导入序号碰撞/串号。
+        """
+        class_cn = _CLASS_CN_BY_SNAKE.get(class_name, class_name)
+        root = Path(store.runtime_root).resolve()
+        # 业务主键已被 M3Client.rid 约束为 [A-Za-z0-9._-]+，可直接作目录名
+        safe_id = str(object_id) or "fact"
+        folder = root / "libraries" / "company" / "证明材料" / class_cn / safe_id
+        folder.mkdir(parents=True, exist_ok=True)
+        rel = folder.relative_to(root).as_posix() + "/"
+        return rel, folder
+
+    def _safe_ext(filename: str) -> str:
+        suffix = Path(filename or "").suffix.lower()
+        if re.fullmatch(r"\.[a-z0-9]{1,12}", suffix):
+            return suffix
+        return ".bin"
+
+    def _safe_stem(filename: str) -> str:
+        """保留原文件名主体（中文/字母/数字/括号），替换路径不安全字符。"""
+        stem = Path(filename or "").stem
+        stem = re.sub(r"[^\w.\-\u4e00-\u9fff()（）【】\[\]]+", "_", stem).strip("._ ")
+        return stem or "file"
+
+    def _next_file_index(folder: Path) -> int:
+        """取证据文件夹内已有文件开头数字的最大值 + 1，追加不覆盖。"""
+        indices = []
+        for item in folder.iterdir():
+            if item.is_file() and (m := re.match(r"^(\d+)", item.stem)):
+                indices.append(int(m.group(1)))
+        return (max(indices) + 1) if indices else 1
+
+    def _relations_for_manual_fact(class_name: str, fields: dict[str, Any], object_id: str) -> list[dict[str, str]]:
+        """按本体约定生成手动单条事实需要创建的关系边。"""
+        org_id = str(fields.get("organization_id") or "org-001")
+        edges: list[dict[str, str]] = []
+
+        def add(rel: str, source_class: str, source_id: str, target_class: str, target_id: str) -> None:
+            if source_id and target_id:
+                edges.append({
+                    "rel": rel,
+                    "sourceClass": source_class,
+                    "sourceId": source_id,
+                    "targetClass": target_class,
+                    "targetId": target_id,
+                })
+
+        if class_name == "qualification_certificate":
+            add("holds", "organization", org_id, class_name, object_id)
+        elif class_name == "performance_case":
+            add("completes", "organization", org_id, class_name, object_id)
+        elif class_name == "staff_member":
+            add("employs", "organization", org_id, class_name, object_id)
+        elif class_name == "financial_evidence":
+            add("provides_financial_evidence", "organization", org_id, class_name, object_id)
+        elif class_name == "technical_product":
+            add("owns_product", "organization", org_id, class_name, object_id)
+        elif class_name == "technical_parameter":
+            add("has_parameter", "technical_product", str(fields.get("product_id") or ""), class_name, object_id)
+        elif class_name == "credential":
+            add("owns_credential", "organization", org_id, class_name, object_id)
+            add("certified_by", "technical_product", str(fields.get("product_id") or ""), class_name, object_id)
+        return edges
+
+    def _create_manual_edges(m3: Any, edges: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[str]]:
+        created: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for edge in edges:
+            try:
+                src_rid = m3.rid(edge["sourceClass"], edge["sourceId"])
+                tgt_rid = m3.rid(edge["targetClass"], edge["targetId"])
+                m3.create_edge(edge["rel"], src_rid, tgt_rid)
+                matched = m3.match_edges(src_rid, edge=edge["rel"], direction="out")
+                found = any(tgt_rid in json.dumps(item, ensure_ascii=False) for item in matched)
+                # M3 graph edge shape differs across versions; create success is authoritative, match count is diagnostic.
+                created.append({**edge, "checked": bool(matched), "matchedCount": len(matched), "targetFound": found})
+            except Exception as exc:
+                warnings.append(
+                    f"边 {edge['rel']} {edge['sourceClass']}/{edge['sourceId']}→"
+                    f"{edge['targetClass']}/{edge['targetId']} 创建或回查失败：{str(exc)[:160]}"
+                )
+        return created, warnings
+
+    @router.post("/api/materials/import")
+    def import_material_package(payload: MaterialPackagePayload) -> dict[str, Any]:
+        """一步导入（base64 JSON，适合小文件）：ZIP → 解析 → 直接 upsert 进 M3。"""
+        if not payload.fileBase64:
+            raise HTTPException(status_code=400, detail="缺少 fileBase64（模板包 ZIP）")
+        try:
+            raw = base64.b64decode(payload.fileBase64)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="fileBase64 解码失败") from exc
+        return _import_raw(raw)
+
+    @router.post("/api/materials/import/upload")
+    async def import_material_package_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+        """一步导入（multipart 文件直传，适合大文件）：浏览器流式上传，不转 base64。"""
+        if not file.filename or not file.filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="请上传 .zip 文件")
+        raw = await file.read()
+        return _import_raw(raw)
+
+    @router.post("/api/materials/facts/{class_name}/with-evidence")
+    async def create_fact_with_evidence(
+        class_name: str,
+        fields: str = Form("{}"),
+        files: list[UploadFile] = File(default=[]),
+    ) -> dict[str, Any]:
+        """手动新增单条材料事实：保存证明文件 → 写 M3 对象 → 建关系边。
+
+        fields 使用 snake_case 字段名，与 `/api/ontology/meta` 返回的字段一致。
+        """
+        if class_name == "organization":
+            raise HTTPException(status_code=400, detail="企业基本信息请使用编辑企业信息，不走证明文件导入")
+        if class_name not in _CLASS_BY_SNAKE or class_name not in _ID_PREFIX_BY_CLASS:
+            raise HTTPException(status_code=404, detail=f"未知材料类别：{class_name}")
+        try:
+            raw_fields = json.loads(fields or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="fields 不是合法 JSON") from exc
+        if not isinstance(raw_fields, dict):
+            raise HTTPException(status_code=400, detail="fields 必须是 JSON 对象")
+
+        valid_fields = _VALID_FIELDS_BY_CLASS[class_name]
+        pk_field = _ID_FIELD_BY_CLASS[class_name]
+        object_id = str(raw_fields.get(pk_field) or f"{_ID_PREFIX_BY_CLASS[class_name]}-manual-{uuid4().hex[:10]}")
+
+        if class_name == "technical_parameter" and not raw_fields.get("product_id"):
+            raise HTTPException(status_code=400, detail="技术参数必须选择所属产品")
+
+        evidence_path = ""
+        if files:
+            evidence_path, folder = _next_evidence_folder(class_name, object_id)
+            file_index = _next_file_index(folder)
+            for upload in files:
+                content = await upload.read()
+                if not content:
+                    continue
+                target = folder / f"{file_index}_{_safe_stem(upload.filename or '')}{_safe_ext(upload.filename or '')}"
+                target.write_bytes(content)
+                file_index += 1
+
+        clean: dict[str, Any] = {}
+        for key, value in raw_fields.items():
+            if key in valid_fields and key != pk_field and value not in (None, ""):
+                clean[key] = value
+        clean.setdefault("organization_id", "org-001")
+        if evidence_path:
+            clean["evidence_path"] = evidence_path
+            clean["evidence_updated_at"] = _now_iso().split("T")[0]
+
+        m3 = build_m3_client(store)
+        try:
+            item = m3.upsert_object(class_name, clean, object_id)
+        except M3Error as exc:
+            raise HTTPException(status_code=502, detail=f"M3 对象写入失败：{exc}") from exc
+
+        edges = _relations_for_manual_fact(class_name, clean, object_id)
+        created_edges, edge_warnings = _create_manual_edges(m3, edges)
+        try:
+            store._refresh_company_from_m3(force=True)
+        except Exception:
+            pass
+        return {
+            "item": item,
+            "objectId": object_id,
+            "rid": m3.rid(class_name, object_id),
+            "className": class_name,
+            "evidencePath": evidence_path,
+            "files": [{"name": f.name, "url": f"/runtime/{evidence_path}{f.name}", "size": f.stat().st_size}
+                      for f in sorted((Path(store.runtime_root) / evidence_path).iterdir())] if evidence_path else [],
+            "relations": created_edges,
+            "warnings": edge_warnings,
+        }
+
+    @router.post("/api/materials/facts/{class_name}/{object_id}/attach-evidence")
+    async def attach_evidence_to_fact(
+        class_name: str,
+        object_id: str,
+        files: list[UploadFile] = File(default=[]),
+    ) -> dict[str, Any]:
+        """给已有事实补证据：保存文件 → 回写 evidencePath/evidenceUpdatedAt → 同步 M3。"""
+        if class_name == "organization":
+            raise HTTPException(status_code=400, detail="企业基本信息不使用证明文件")
+        if class_name not in _CLASS_BY_SNAKE or class_name not in _ID_PREFIX_BY_CLASS:
+            raise HTTPException(status_code=404, detail=f"未知材料类别：{class_name}")
+        if not files:
+            raise HTTPException(status_code=400, detail="请选择要上传的证明文件")
+
+        m3 = build_m3_client(store)
+        try:
+            existing = m3.get_object(class_name, object_id)
+        except M3Error as exc:
+            raise HTTPException(status_code=502, detail=f"M3 读取失败：{exc}") from exc
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"对象不存在：{class_name}/{object_id}")
+
+        root = Path(store.runtime_root).resolve()
+        existing_path = str(existing.get("evidence_path") or "").strip()
+        if existing_path:
+            folder = (root / existing_path).resolve()
+            if root != folder and root not in folder.parents:
+                raise HTTPException(status_code=400, detail="证据路径非法")
+            folder.mkdir(parents=True, exist_ok=True)
+            evidence_path = existing_path
+        else:
+            evidence_path, folder = _next_evidence_folder(class_name, object_id)
+        file_index = _next_file_index(folder)
+        for upload in files:
+            content = await upload.read()
+            if not content:
+                continue
+            target = folder / f"{file_index}_{_safe_stem(upload.filename or '')}{_safe_ext(upload.filename or '')}"
+            target.write_bytes(content)
+            file_index += 1
+
+        merged = dict(existing)
+        merged["evidence_path"] = evidence_path
+        merged["evidence_updated_at"] = _now_iso().split("T")[0]
+        valid_fields = _VALID_FIELDS_BY_CLASS[class_name]
+        pk_field = _ID_FIELD_BY_CLASS[class_name]
+        clean = {
+            k: v for k, v in merged.items()
+            if k in valid_fields and k != pk_field and v not in (None, "")
+        }
+        try:
+            item = m3.upsert_object(class_name, clean, object_id)
+        except M3Error as exc:
+            raise HTTPException(status_code=502, detail=f"M3 对象写入失败：{exc}") from exc
+        try:
+            store._refresh_company_from_m3(force=True)
+        except Exception:
+            pass
+        return {
+            "item": item,
+            "objectId": object_id,
+            "rid": m3.rid(class_name, object_id),
+            "className": class_name,
+            "evidencePath": evidence_path,
+            "files": [{"name": f.name, "url": f"/runtime/{evidence_path}{f.name}", "size": f.stat().st_size}
+                      for f in sorted((Path(store.runtime_root) / evidence_path).iterdir())] if evidence_path else [],
         }
 
     # ---- 预览-确认模式：预览存本地暂存，不写 M3；确认后才 upsert ----
@@ -547,15 +827,31 @@ def create_router(store: Any) -> APIRouter:
                 org = None
             if org:
                 facts["organization"] = org
+        # 产品级防重：与库内已有产品同名/同别名的复用库内对象，只写新参数（2026-09-20）
+        reused_products = reuse_existing_products(m3, facts, record["warnings"])
+        record["stats"]["technical_product_reused"] = len(reused_products)
         m3_sync = sync_facts_to_m3(m3, facts)
+        if _m3_sync_failed(facts, m3_sync):
+            # 保留暂存，供用户重试；不删除，避免数据在 M3 不可用时静默丢失
+            raise HTTPException(
+                status_code=502,
+                detail="企业数据写入 M3 图库失败（预览暂存已保留，可重试）："
+                + "；".join(m3_sync.get("warnings", [])[:3]),
+            )
         path.unlink(missing_ok=True)
         store._refresh_company_from_m3(force=True)
+
+        # profile 用库内全量事实构建（含本次复用的既有产品）；M3 读失败退回导入 facts
+        try:
+            profile_facts = read_facts_from_m3(m3)
+        except Exception:
+            profile_facts = facts
 
         return {
             "stats": record["stats"],
             "warnings": record["warnings"],
             "m3Sync": m3_sync,
-            "profile": build_profile(facts),
+            "profile": build_profile(profile_facts),
         }
 
     @router.delete("/api/materials/import/preview/{preview_id}")

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .client import M3Client, M3Error
@@ -89,6 +90,72 @@ def sync_facts_to_m3(m3: M3Client, facts: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"边 {e['relationName']} {e['fromId']}→{e['toId']} 失败：{str(err)[:160]}")
 
     return {"objects": objects, "edges": edges, "warnings": warnings}
+
+
+def reuse_existing_products(
+    m3: M3Client, facts: dict[str, Any], warnings: list[str]
+) -> list[dict[str, str]]:
+    """Reuse unambiguous same-name products already stored in M3."""
+    try:
+        existing = read_facts_from_m3(m3, ("technical_product",)).get("technical_product", [])
+    except Exception as exc:
+        warnings.append(f"库内技术产品读取失败，本次跳过产品级防重：{str(exc)[:160]}")
+        return []
+    if not existing:
+        return []
+
+    def normalize(value: Any) -> str:
+        return "".join(str(value or "").split()).lower()
+
+    def aliases(value: Any) -> list[str]:
+        return [part.strip() for part in re.split(r"[,，、;；/\s]+", str(value or "")) if part.strip()]
+
+    exact: dict[str, str] = {}
+    normalized: dict[str, set[str]] = {}
+    for product in existing:
+        product_id = str(product.get("productId") or "").strip()
+        name = str(product.get("productName") or "").strip()
+        if not product_id or not name:
+            continue
+        exact.setdefault(name, product_id)
+        for token in [name, *aliases(product.get("aliases"))]:
+            normalized.setdefault(normalize(token), set()).add(product_id)
+
+    reused: list[dict[str, str]] = []
+    ambiguous: list[str] = []
+    kept: list[dict[str, Any]] = []
+    for product in facts.get("technical_product", []):
+        name = str(product.get("productName") or "").strip()
+        product_id = str(product.get("productId") or "")
+        matched_id = exact.get(name) if name else None
+        if matched_id is None and name:
+            candidates = normalized.get(normalize(name), set())
+            if len(candidates) == 1:
+                matched_id = next(iter(candidates))
+            elif len(candidates) > 1:
+                ambiguous.append(name)
+        if not matched_id or not product_id:
+            kept.append(product)
+            continue
+        for key in ("technical_parameter", "credential"):
+            for row in facts.get(key, []):
+                if str(row.get("productId") or "") == product_id:
+                    row["productId"] = matched_id
+        reused.append({"productName": name, "reusedProductId": matched_id})
+
+    if facts.get("technical_product") is not None:
+        facts["technical_product"] = kept
+    if reused:
+        warnings.append(
+            f"技术产品 {len(reused)} 个与库内已有产品同名，已复用库内对象（不重复写入）："
+            + "、".join(item["productName"] for item in reused)
+        )
+    if ambiguous:
+        warnings.append(
+            f"技术产品 {len(ambiguous)} 个在库内匹配到多个产品，未复用、按新产品写入："
+            + "、".join(ambiguous)
+        )
+    return reused
 
 
 def build_m3_client(store: Any) -> M3Client:
