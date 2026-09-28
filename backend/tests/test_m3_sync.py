@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from backend.app.document_recognition.storage import FACT_LIST_KEYS
-from backend.app.m3.sync import read_facts_from_m3
+from backend.app.m3.sync import _row_to_camel, read_facts_from_m3
 
 
 class _FakeM3:
@@ -31,15 +31,11 @@ class ReadFactsFromM3Tests(unittest.TestCase):
         m3 = _FakeM3()
         facts = read_facts_from_m3(m3, keys=("qualification_certificate", "performance_case"))
 
-        # organization 始终读取
         self.assertIn("organization", facts)
-        # 指定的两类被读取
         self.assertIn("qualification_certificate", facts)
         self.assertIn("performance_case", facts)
-        # 未指定的类不出现
         self.assertNotIn("staff_member", facts)
         self.assertNotIn("credential", facts)
-        # 实际发起的查询只含 organization + 指定两类
         self.assertEqual(
             sorted(m3.calls),
             sorted(["organization", "qualification_certificate", "performance_case"]),
@@ -54,7 +50,28 @@ class ReadFactsFromM3Tests(unittest.TestCase):
     def test_invalid_key_raises(self) -> None:
         m3 = _FakeM3()
         with self.assertRaises(ValueError):
-            read_facts_from_m3(m3, keys=("qualifications",))  # 匹配层 key，非 fact 类名
+            read_facts_from_m3(m3, keys=("qualifications",))
+
+    def test_row_to_camel_restores_business_id_from_m3_rid(self) -> None:
+        product = _row_to_camel(
+            "technical_product",
+            {
+                "id": "tenderhub_technical_product:prd-1",
+                "product_name": "数字孪生平台",
+            },
+        )
+        parameter = _row_to_camel(
+            "technical_parameter",
+            {
+                "id": "tenderhub_technical_parameter:param-1",
+                "product_id": "prd-1",
+                "description": "支持三维场景加载",
+            },
+        )
+
+        self.assertEqual(product["productId"], "prd-1")
+        self.assertEqual(parameter["parameterId"], "param-1")
+        self.assertEqual(parameter["productId"], "prd-1")
 
 
 if __name__ == "__main__":

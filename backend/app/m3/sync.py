@@ -183,6 +183,10 @@ def _row_to_camel(class_snake: str, row: dict[str, Any]) -> dict[str, Any]:
             if snake in row and row[snake] is not None:
                 out[name] = row[snake]
         break
+    id_field = "organizationId" if class_snake == "organization" else ID_FIELD_BY_KEY.get(class_snake)
+    rid = str(row.get("id") or "")
+    if id_field and rid:
+        out.setdefault(id_field, rid.rsplit(":", 1)[-1])
     return out
 
 

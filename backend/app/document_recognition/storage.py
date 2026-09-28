@@ -327,7 +327,7 @@ def _fact_records(
         if not name:
             continue
         description = _join_fields(row, description_fields)
-        result.append({
+        record = {
             "id": str(row.get(id_field) or ""),
             "name": name,
             "description": description,
@@ -340,7 +340,14 @@ def _fact_records(
             "status": str(row.get("verificationStatus") or row.get("status") or ""),
             "validFrom": str(row.get("validFrom") or ""),
             "validUntil": str(row.get("validUntil") or ""),
-        })
+        }
+        if row.get("productId"):
+            record["productId"] = str(row["productId"])
+        if row.get("brand"):
+            record["brand"] = str(row["brand"])
+        if row.get("model"):
+            record["model"] = str(row["model"])
+        result.append(record)
     return result
 
 

@@ -42,6 +42,13 @@ def build_tech_units(ledger: dict[str, Any]) -> list[dict[str, Any]]:
     """
     products = [p for p in (ledger.get("products") or []) if isinstance(p, dict)]
     parameters = [p for p in (ledger.get("parameters") or []) if isinstance(p, dict)]
+    if not parameters:
+        # Store.company_knowledge exposes technical parameters as capability
+        # records; ignore the non-fact organization/service-scope vocabulary.
+        parameters = [
+            p for p in (ledger.get("capabilities") or [])
+            if isinstance(p, dict) and p.get("factKey") == "technical_parameter"
+        ]
     certificates = [c for c in (ledger.get("certificates") or []) if isinstance(c, dict)]
 
     params_by_product: dict[str, list[dict[str, Any]]] = {}
@@ -61,17 +68,26 @@ def build_tech_units(ledger: dict[str, Any]) -> list[dict[str, Any]]:
 
     units: list[dict[str, Any]] = []
     for product in products:
-        pid = _text(product.get("productId"))
+        pid = _text(product.get("productId") or product.get("id"))
+        unit_parameters = params_by_product.get(pid, [])
+        normalized_parameters = [
+            {
+                **parameter,
+                "parameterId": _text(parameter.get("parameterId") or parameter.get("id")),
+                "description": _text(parameter.get("description") or parameter.get("name")),
+            }
+            for parameter in unit_parameters
+        ]
         unit = {
             "productId": pid,
-            "productName": _text(product.get("productName")),
+            "productName": _text(product.get("productName") or product.get("name")),
             "aliases": _text(product.get("aliases")),
             "category": _text(product.get("category")),
             "brand": _text(product.get("brand")),
             "model": _text(product.get("model")),
             "description": _text(product.get("description")),
             "applicableScenario": _text(product.get("applicableScenario")),
-            "parameters": params_by_product.get(pid, []),
+            "parameters": normalized_parameters,
             "credentials": creds_by_product.get(pid, []),
         }
         unit["dataGap"] = _data_gap(unit)
