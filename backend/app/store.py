@@ -380,6 +380,9 @@ class Store:
 
     @staticmethod
     def default_config() -> dict[str, Any]:
+        # 公告匹配评分不在此处配置：相关性打分见 tender_matching/service.py（relevance-v2），
+        # 资格符合性打分见 tender_matching/eligibility.py；两套权重与阈值均内置于算法，
+        # 原先的 scoreWeights / decisionThresholds 与二者口径均不一致且无消费方，已移除。
         return {
             "profileName": "默认检索画像",
             "enabled": True,
@@ -387,16 +390,6 @@ class Store:
             "targetRegions": [],
             "includeKeywords": [],
             "excludeKeywords": [],
-            "scoreWeights": {
-                "qualification": 14,
-                "performance": 22,
-                "personnel": 14,
-                "region": 12,
-                "serviceType": 18,
-                "time": 10,
-                "documentReadiness": 10,
-            },
-            "decisionThresholds": {"recommend": 78, "review": 58},
             "ai": {"enabled": True, "provider": "auto", "model": "qwen2.5:7b"},
             "automation": {"enabled": True, "maxProjects": 10},
         }
@@ -1703,6 +1696,33 @@ class Store:
     # ------------------------------------------------------------------
     # 标书撰写模块（M3 产出层）：规划 / 生成 / 导出 / 校对
     # ------------------------------------------------------------------
+    def resolve_tender(self, workspace_id: str) -> dict[str, Any] | None:
+        """解析产物聚合入口（ResolvedTender）——撰写各工序的统一输入契约。
+
+        把散落在 fineReview / project.document.sections / project.parsed 的产物归一成
+        一个 ResolvedTender（composition / requirements / eval / projectMeta / company /
+        organization / knowledge / risk / summary），供目录规划、评标索引与正文工序
+        消费，避免下游各自散读深层字段导致口径漂移。
+        """
+        self._refresh_workspaces_from_disk()
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        reasoning = workspace.get("reasoning") if isinstance(workspace.get("reasoning"), dict) else {}
+        fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
+        project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+        ai = ensure_config(self.config).get("ai", {})
+        from .bid_writing.resolved_input import resolve_tender as build_resolved_tender
+
+        return build_resolved_tender(
+            fine_review,
+            project,
+            company={**(self.company or {}), "organization": self.organization or {}},
+            organization=self.organization or {},
+            knowledge=self.company_knowledge or {},
+            ai=ai,
+        )
+
     def plan_bid_document(self, workspace_id: str) -> dict[str, Any] | None:
         self._refresh_workspaces_from_disk()
         workspace = self.workspaces.get(workspace_id)
@@ -1716,12 +1736,13 @@ class Store:
 
         from .bid_writing.deviations import build_deviation_tables
         from .bid_writing.planning import (
+            complete_fallback_plan,
             minimal_bid_skeleton,
+            plan_from_eval,
             plan_from_outline,
         )
         from .bid_writing.volumes import plan_from_submission_structure
         from .bid_writing.schemas import build_bid_document
-        from .bid_writing.outline import extract_response_outline
         from .bid_writing.template_reuse import attach_templates
         from .bid_writing.template_fragments import (
             attach_template_fragments_to_plan,
@@ -1762,6 +1783,19 @@ class Store:
             else []
         )
         ai = ensure_config(self.config).get("ai", {})
+
+        # 解析产物统一契约（ResolvedTender）：目录规划、评标索引与正文工序的唯一输入来源。
+        resolved = self.resolve_tender(workspace_id) or {}
+        resolved_eval = resolved.get("eval") if isinstance(resolved.get("eval"), dict) else {}
+        eval_items = (
+            parse_bundle.get("evaluationItems")
+            if isinstance(parse_bundle.get("evaluationItems"), list)
+            and parse_bundle.get("evaluationItems")
+            else resolved_eval.get("items") or []
+        )
+        bid_doc["evaluationPlan"] = plan_from_eval(eval_items)
+        bid_doc["evaluationPlanTotal"] = resolved_eval.get("total")
+        bid_doc["evaluationMethod"] = str(resolved_eval.get("method") or "")
 
         pi_plan = self._plan_bid_document_with_pi(workspace_id, workspace, fine_review, project)
         pi_fallback_warnings = pi_plan.get("warnings", []) if pi_plan else []
@@ -1918,7 +1952,11 @@ class Store:
             and volume.get("items")
             for volume in submission_structure.get("volumes", [])
         )
-        outline = extract_response_outline(sections, ai)
+        outline = (
+            resolved.get("composition")
+            if isinstance(resolved.get("composition"), dict)
+            else {}
+        )
         if has_explicit_format_items:
             plan = attach_template_fragments_to_plan(
                 plan_from_submission_structure(submission_structure, fine_review),
@@ -1953,7 +1991,11 @@ class Store:
                 if isinstance(raw_outline, list) and raw_outline
                 else []
             )
-            fallback_plan = draft or minimal_bid_skeleton()
+            fallback_plan = (
+                complete_fallback_plan(draft, fine_review)
+                if draft
+                else minimal_bid_skeleton()
+            )
             plan = attach_template_fragments_to_plan(
                 fallback_plan,
                 template_fragments,

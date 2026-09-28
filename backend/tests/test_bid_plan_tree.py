@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from backend.app.bid_writing.plan_tree import normalize_plan_tree
-from backend.app.bid_writing.planning import plan_bid_document
+from backend.app.bid_writing.planning import plan_bid_document, plan_from_eval
 from backend.app.bid_writing.response_table import bind_response_table_requirements
 from backend.app.store import Store
 
@@ -223,3 +223,133 @@ class BidPlanTreeTests(unittest.TestCase):
         self.assertEqual([item["sectionId"] for item in result[:2]], ["root", "child"])
         self.assertEqual(result[1]["parentSectionId"], "root")
         self.assertEqual(result[1]["level"], 2)
+
+    def test_plan_from_eval_maps_scoring_points_to_fixed_sections(self) -> None:
+        result = plan_from_eval(
+            [
+                {
+                    "factor": "技术方案",
+                    "item": "技术响应程度",
+                    "score": 30,
+                    "criteria": "技术方案完整可行",
+                },
+                {
+                    "factor": "售后服务",
+                    "item": "售后响应",
+                    "score": 20,
+                    "criteria": "响应及时",
+                },
+                {
+                    "factor": "售后服务",
+                    "item": "备品备件",
+                    "score": 5,
+                    "criteria": "备件充足",
+                },
+            ]
+        )
+
+        by_section = {item["sectionId"]: item for item in result}
+        # 同一章节聚合多个评分点时只保留一条，score 累加
+        self.assertEqual(set(by_section), {"t-02", "t-05"})
+        self.assertEqual(by_section["t-02"]["score"], 30.0)
+        self.assertEqual(by_section["t-05"]["score"], 25.0)
+        self.assertIn("响应及时", by_section["t-05"]["criteria"])
+
+    def test_resolve_tender_aggregates_writing_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory))
+            store.initialize()
+            store.workspaces["workspace-1"] = {
+                "id": "workspace-1",
+                "projectId": "project-1",
+                "reasoning": {
+                    "fineReview": {
+                        "rows": [{"requirementId": "req-1", "category": "technical"}],
+                        "summary": {"total": 1},
+                        "hardBlockers": ["blk-1"],
+                    }
+                },
+                "project": {
+                    "title": "智慧园区项目",
+                    "parsed": {"projectName": "智慧园区项目", "projectCode": "SP-2026"},
+                    "document": {"sections": [], "tables": []},
+                },
+            }
+
+            resolved = store.resolve_tender("workspace-1")
+
+            assert resolved is not None
+            self.assertEqual(
+                [row["requirementId"] for row in resolved["requirements"]],
+                ["req-1"],
+            )
+            self.assertEqual(resolved["projectMeta"]["projectName"], "智慧园区项目")
+            self.assertEqual(resolved["projectMeta"]["projectCode"], "SP-2026")
+            self.assertEqual(resolved["risk"]["hardBlockers"], ["blk-1"])
+            self.assertEqual(resolved["summary"], {"total": 1})
+            self.assertEqual(resolved["composition"]["source"], "builtin_template")
+
+    def test_plan_bid_document_records_evaluation_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory))
+            store.initialize()
+            store.workspaces["workspace-1"] = {
+                "id": "workspace-1",
+                "projectId": "project-1",
+                "reasoning": {"fineReview": {"rows": []}},
+                "project": {
+                    "title": "智慧园区项目",
+                    "parsed": {"projectName": "智慧园区项目"},
+                    "document": {
+                        "sections": [
+                            {
+                                "sectionType": "evaluation",
+                                "heading": "第三章 评标办法",
+                                "text": "本项目采用综合评分法。",
+                            }
+                        ],
+                        "tables": [
+                            {
+                                "rows": [
+                                    {
+                                        "cells": [
+                                            {"text": "评分因素"},
+                                            {"text": "评分点"},
+                                            {"text": "分值"},
+                                            {"text": "评分标准"},
+                                        ]
+                                    },
+                                    {
+                                        "cells": [
+                                            {"text": "技术方案"},
+                                            {"text": "技术响应程度"},
+                                            {"text": "30分"},
+                                            {"text": "技术方案完整可行"},
+                                        ]
+                                    },
+                                    {
+                                        "cells": [
+                                            {"text": "售后服务"},
+                                            {"text": "售后响应"},
+                                            {"text": "20分"},
+                                            {"text": "响应及时"},
+                                        ]
+                                    },
+                                ]
+                            }
+                        ],
+                    },
+                },
+            }
+
+            result = store.plan_bid_document("workspace-1")
+
+            assert result is not None
+            bid_document = result["bidDocument"]
+            by_section = {
+                row["sectionId"]: row for row in bid_document["evaluationPlan"]
+            }
+            self.assertEqual(set(by_section), {"t-02", "t-05"})
+            self.assertEqual(by_section["t-02"]["score"], 30.0)
+            self.assertEqual(bid_document["evaluationPlanTotal"], 50.0)
+            self.assertEqual(bid_document["evaluationMethod"], "综合评分法")
