@@ -35,6 +35,7 @@ def resolve_tender(
     fine_review: dict[str, Any] | None,
     project: dict[str, Any] | None,
     *,
+    parse_bundle: dict[str, Any] | None = None,
     company: dict[str, Any] | None = None,
     organization: dict[str, Any] | None = None,
     knowledge: dict[str, Any] | None = None,
@@ -42,24 +43,43 @@ def resolve_tender(
 ) -> dict[str, Any]:
     """把上游各散落产物归一成一个 ResolvedTender dict。
 
-    ResolvedTender 结构：
-      {
-        "composition":  { "items": [...], "sourceDetail": str, "source": "tender_document"/"builtin_template" },
-        "requirements": [ comparison row, ... ],         # = fineReview.rows
-        "eval":         { "items": [...], "total": float|None, "method": str },
-        "projectMeta":  { "projectName", "projectCode", "tendererName", ... },
-        "company":      { ... },                          # 企业画像
-        "organization": { ... },                          # 原始组织 fact
-        "knowledge":    { ... },                          # M3 知识库
-        "risk":         { "hardBlockers":[...], "rejectionRisks":[...], "unresolvedMandatory":[...] },
-        "summary":      { ... },                          # fineReview.summary
-      }
+    ResolvedTender 是标书撰写的统一输入契约，覆盖两类输入：
+      - 语义归一字段：composition / requirements / eval / projectMeta / company /
+        organization / knowledge / risk / summary，供下游直接消费
+      - bundle 透传：完整 ParseBundle 原文（documentBlocks / submissionStructure /
+        templateFragments / rawOutline / riskItems …），供需要原始解析产物的工序读取
+
+    字段来源优先级（解析定稿优先，缺失时回退规则重抽）：
+      - requirements: fineReview.rows（撰写对标行）→ parse_bundle.requirements
+      - eval.items:    parse_bundle.evaluationItems → eval_parser.parse_eval_items
+      - projectMeta:   project.parsed 上叠加 parse_bundle.projectMeta 的非空字段
+      - composition:   仍由 project.document.sections 抽取；rawOutline 是另一类产物，
+                       由 planning 的目录回退分支单独消费，此处不混入
+      - risk:          fineReview 的风险信号 + parse_bundle.riskItems
+    每个字段的最终来源记录在 sources 里，便于定位口径漂移。
     """
     fine_review = fine_review if isinstance(fine_review, dict) else {}
     project = project if isinstance(project, dict) else {}
+    bundle = parse_bundle if isinstance(parse_bundle, dict) else {}
 
+    sources: dict[str, str] = {}
+
+    # ② 需求条款库：撰写对标用比较行优先，缺失回退解析阶段原始条款
     rows = fine_review.get("rows")
     rows = rows if isinstance(rows, list) else []
+    bundle_requirements = bundle.get("requirements")
+    bundle_requirements = (
+        bundle_requirements if isinstance(bundle_requirements, list) else []
+    )
+    if rows:
+        requirements = rows
+        sources["requirements"] = "fineReview"
+    elif bundle_requirements:
+        requirements = bundle_requirements
+        sources["requirements"] = "parse_bundle"
+    else:
+        requirements = []
+        sources["requirements"] = "empty"
 
     # ① 编制骨架（composition）：从招标文件「投标文件格式」抽取，失败回退固定模板
     document = project.get("document") if isinstance(project.get("document"), dict) else {}
@@ -78,14 +98,36 @@ def resolve_tender(
         "sourceDetail": (outline or {}).get("sourceDetail") or "",
         "source": "tender_document" if outline and outline.get("items") else "builtin_template",
     }
+    sources["composition"] = (
+        "extract_response_outline" if outline and outline.get("items") else "empty"
+    )
 
-    # ③ 评分要素（eval_items）：本包新增，从 evaluation 章节解析
+    # ③ 评分要素（eval_items）：解析定稿优先，缺失回退规则重抽
     try:
-        eval_result = parse_eval_items(sections, tables)
+        rule_eval = parse_eval_items(sections, tables)
     except Exception:
-        eval_result = {"items": [], "total": None, "method": "", "rawText": ""}
+        rule_eval = {"items": [], "total": None, "method": "", "rawText": ""}
+    bundle_eval = bundle.get("evaluationItems")
+    bundle_eval = bundle_eval if isinstance(bundle_eval, list) else []
+    if bundle_eval:
+        eval_result: dict[str, Any] = {
+            "items": bundle_eval,
+            "total": _sum_scores(bundle_eval),
+            "method": str((rule_eval or {}).get("method") or ""),
+            "source": "parse_bundle",
+            "rawText": (rule_eval or {}).get("rawText") or "",
+        }
+    else:
+        eval_result = {
+            "items": rule_eval.get("items") or [],
+            "total": rule_eval.get("total"),
+            "method": str((rule_eval or {}).get("method") or ""),
+            "source": "rules" if rule_eval.get("items") else "empty",
+            "rawText": (rule_eval or {}).get("rawText") or "",
+        }
+    sources["eval"] = eval_result["source"]
 
-    # ④ 项目元信息：project.parsed 归一到 projectMeta
+    # ④ 项目元信息：project.parsed 归一到 projectMeta，叠加 parse_bundle.projectMeta 非空字段
     parsed = project.get("parsed") if isinstance(project.get("parsed"), dict) else {}
     project_meta = {
         "projectName": _pick(parsed.get("projectName"), project.get("title")),
@@ -95,17 +137,26 @@ def resolve_tender(
         "budget": _pick(parsed.get("budget")),
         "title": _pick(project.get("title")),
     }
+    bundle_meta = bundle.get("projectMeta") if isinstance(bundle.get("projectMeta"), dict) else {}
+    overlaid = False
+    for key in ("projectName", "projectCode", "tendererName", "agencyName", "budget"):
+        if bundle_meta.get(key):
+            project_meta[key] = str(bundle_meta[key]).strip()
+            overlaid = True
+    sources["projectMeta"] = "parse_bundle" if overlaid else "project"
 
-    # 风险信号（proofread 直接读）
+    # 风险信号（proofread 直接读）：fineReview 三类信号 + 解析阶段 riskItems
     risk = {
         "hardBlockers": fine_review.get("hardBlockers") or [],
         "rejectionRisks": fine_review.get("rejectionRisks") or [],
         "unresolvedMandatory": fine_review.get("unresolvedMandatory") or [],
+        "riskItems": bundle.get("riskItems") if isinstance(bundle.get("riskItems"), list) else [],
     }
+    sources["risk"] = "fineReview+bundle"
 
     return {
         "composition": composition,
-        "requirements": rows,
+        "requirements": requirements,
         "eval": eval_result,
         "projectMeta": project_meta,
         "company": company if isinstance(company, dict) else {},
@@ -113,7 +164,20 @@ def resolve_tender(
         "knowledge": knowledge if isinstance(knowledge, dict) else {},
         "risk": risk,
         "summary": fine_review.get("summary") or {},
+        "bundle": bundle,
+        "sources": sources,
     }
+
+
+def _sum_scores(items: list[Any]) -> float | None:
+    total = 0.0
+    for item in items:
+        if isinstance(item, dict):
+            try:
+                total += float(item.get("score") or 0)
+            except (TypeError, ValueError):
+                continue
+    return round(total, 2) if total else None
 
 
 def _pick(*values: Any) -> str:

@@ -1696,7 +1696,9 @@ class Store:
     # ------------------------------------------------------------------
     # 标书撰写模块（M3 产出层）：规划 / 生成 / 导出 / 校对
     # ------------------------------------------------------------------
-    def resolve_tender(self, workspace_id: str) -> dict[str, Any] | None:
+    def resolve_tender(
+        self, workspace_id: str, parse_bundle: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """解析产物聚合入口（ResolvedTender）——撰写各工序的统一输入契约。
 
         把散落在 fineReview / project.document.sections / project.parsed 的产物归一成
@@ -1712,11 +1714,14 @@ class Store:
         fine_review = reasoning.get("fineReview") if isinstance(reasoning.get("fineReview"), dict) else {}
         project = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
         ai = ensure_config(self.config).get("ai", {})
+        if parse_bundle is None:
+            parse_bundle = self.get_parse_bundle(workspace_id) or {}
         from .bid_writing.resolved_input import resolve_tender as build_resolved_tender
 
         return build_resolved_tender(
             fine_review,
             project,
+            parse_bundle=parse_bundle,
             company={**(self.company or {}), "organization": self.organization or {}},
             organization=self.organization or {},
             knowledge=self.company_knowledge or {},
@@ -1785,15 +1790,9 @@ class Store:
         ai = ensure_config(self.config).get("ai", {})
 
         # 解析产物统一契约（ResolvedTender）：目录规划、评标索引与正文工序的唯一输入来源。
-        resolved = self.resolve_tender(workspace_id) or {}
+        resolved = self.resolve_tender(workspace_id, parse_bundle=parse_bundle) or {}
         resolved_eval = resolved.get("eval") if isinstance(resolved.get("eval"), dict) else {}
-        eval_items = (
-            parse_bundle.get("evaluationItems")
-            if isinstance(parse_bundle.get("evaluationItems"), list)
-            and parse_bundle.get("evaluationItems")
-            else resolved_eval.get("items") or []
-        )
-        bid_doc["evaluationPlan"] = plan_from_eval(eval_items)
+        bid_doc["evaluationPlan"] = plan_from_eval(resolved_eval.get("items") or [])
         bid_doc["evaluationPlanTotal"] = resolved_eval.get("total")
         bid_doc["evaluationMethod"] = str(resolved_eval.get("method") or "")
 

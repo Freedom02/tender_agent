@@ -353,3 +353,68 @@ class BidPlanTreeTests(unittest.TestCase):
             self.assertEqual(by_section["t-02"]["score"], 30.0)
             self.assertEqual(bid_document["evaluationPlanTotal"], 50.0)
             self.assertEqual(bid_document["evaluationMethod"], "综合评分法")
+
+    def test_resolve_tender_prefers_parse_bundle_over_rule_rederivation(self) -> None:
+        from backend.app.bid_writing.resolved_input import resolve_tender
+
+        fine_review = {
+            "rows": [{"requirementId": "req-fr", "category": "technical"}]
+        }
+        project = {
+            "title": "项目标题",
+            "parsed": {"projectName": "旧名称"},
+            "document": {"sections": [], "tables": []},
+        }
+        bundle = {
+            "requirements": [
+                {"requirementId": "req-bundle", "category": "qualification"}
+            ],
+            "evaluationItems": [
+                {
+                    "factor": "技术方案",
+                    "item": "技术响应",
+                    "score": 30,
+                    "criteria": "完整可行",
+                }
+            ],
+            "projectMeta": {"projectName": "新名称"},
+            "riskItems": [{"type": "rejection", "title": "风险项"}],
+            "rawOutline": [{"sectionId": "x-1", "title": "投标函"}],
+        }
+
+        resolved = resolve_tender(fine_review, project, parse_bundle=bundle, ai={})
+
+        # requirements 优先 fineReview.rows
+        self.assertEqual(
+            [row["requirementId"] for row in resolved["requirements"]],
+            ["req-fr"],
+        )
+        self.assertEqual(resolved["sources"]["requirements"], "fineReview")
+        # eval 优先 bundle.evaluationItems
+        self.assertEqual(resolved["eval"]["source"], "parse_bundle")
+        self.assertEqual(resolved["eval"]["total"], 30.0)
+        self.assertEqual(resolved["eval"]["items"][0]["item"], "技术响应")
+        # projectMeta 被 bundle.projectMeta 非空字段覆盖
+        self.assertEqual(resolved["projectMeta"]["projectName"], "新名称")
+        self.assertEqual(resolved["sources"]["projectMeta"], "parse_bundle")
+        # risk 透传 bundle.riskItems
+        self.assertEqual(resolved["risk"]["riskItems"], bundle["riskItems"])
+        # 完整 bundle 透传
+        self.assertEqual(resolved["bundle"], bundle)
+
+    def test_resolve_tender_falls_back_to_bundle_requirements_when_rows_empty(self) -> None:
+        from backend.app.bid_writing.resolved_input import resolve_tender
+
+        resolved = resolve_tender(
+            {"rows": []},
+            {"title": "项目标题", "document": {"sections": [], "tables": []}},
+            parse_bundle={
+                "requirements": [{"requirementId": "req-bundle", "category": "service"}]
+            },
+        )
+
+        self.assertEqual(
+            [row["requirementId"] for row in resolved["requirements"]],
+            ["req-bundle"],
+        )
+        self.assertEqual(resolved["sources"]["requirements"], "parse_bundle")
