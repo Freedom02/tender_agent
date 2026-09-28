@@ -91,10 +91,9 @@ const rewriteInstruction = ref("");
 
 const currentSectionId = ref("");
 const editorHtml = ref("");
-const templatePreviewRef = ref<HTMLElement | HTMLElement[] | null>(null);
-const templatePreviewLoading = ref(false);
-const templatePreviewFailedSectionId = ref("");
-let templatePreviewRequestId = 0;
+const editorLayoutRef = ref<{ $el?: HTMLElement } | null>(null);
+const editorColumnHeight = ref("");
+let editorColumnHeightFrame = 0;
 const collapsedNavSectionIds = ref<Set<string>>(new Set());
 const fileInput = ref<HTMLInputElement | null>(null);
 const cloudRun = ref<CloudBidRun | null>(null);
@@ -109,13 +108,6 @@ const inlineAddTargetId = ref("");
 const inlineAddMode = ref<"child" | "sibling">("child");
 const inlineAddTitle = ref("");
 const inlineAddTitleInput = ref<{ focus: () => void } | null>(null);
-const editorLayoutRef = ref<{ $el?: HTMLElement } | null>(null);
-const navigationViewportRef = ref<HTMLElement | null>(null);
-const documentViewportRef = ref<HTMLElement | null>(null);
-const navigationViewportStyle = ref<Record<string, string>>({});
-const documentViewportStyle = ref<Record<string, string>>({});
-let editorViewportFrame = 0;
-let editorLayoutResizeObserver: ResizeObserver | null = null;
 
 // ---- 从共享状态同步 bidDocument ----
 watch(
@@ -140,8 +132,31 @@ watch(
   { immediate: true }
 );
 
+function syncEditorColumnHeight() {
+  if (editorColumnHeightFrame) cancelAnimationFrame(editorColumnHeightFrame);
+  editorColumnHeightFrame = requestAnimationFrame(() => {
+    editorColumnHeightFrame = 0;
+    if (
+      activeStep.value !== 3 ||
+      window.innerWidth <= 991 ||
+      !editorLayoutRef.value?.$el
+    ) {
+      editorColumnHeight.value = "";
+      return;
+    }
+
+    const layoutTop = editorLayoutRef.value.$el.getBoundingClientRect().top;
+    const visibleTop = Math.max(16, layoutTop);
+    editorColumnHeight.value = `${Math.max(520, Math.floor(window.innerHeight - visibleTop))}px`;
+  });
+}
+
+const editorColumnStyle = computed(() =>
+  editorColumnHeight.value ? { height: editorColumnHeight.value } : {}
+);
+
 watch(activeStep, () => {
-  void nextTick(scheduleEditorViewportUpdate);
+  void nextTick(syncEditorColumnHeight);
 });
 
 const workspaceId = computed(() => props.workspace?.id || "");
@@ -466,7 +481,7 @@ const blanksToFill = computed(() => {
   return [...set];
 });
 const pendingSections = computed(() =>
-  plan.value.filter((s) => s.responseType !== "section_group" && !s.content?.trim())
+  plan.value.filter((s) => s.responseType !== "section_group" && !sectionHasContent(s))
 );
 const templateFragmentCount = computed(() => bidDocument.value?.templateFragments?.length || 0);
 
@@ -778,65 +793,6 @@ function sectionIndentStyle(section?: BidSection): Record<string, string> {
   return { paddingLeft: `${sectionIndentLevel(section) * 18}px` };
 }
 
-function getElementRef(value: { $el?: HTMLElement } | null): HTMLElement | null {
-  return value?.$el instanceof HTMLElement ? value.$el : null;
-}
-
-function clearEditorViewportStyles() {
-  navigationViewportStyle.value = {};
-  documentViewportStyle.value = {};
-}
-
-function updateEditorViewportStyles() {
-  const layout = getElementRef(editorLayoutRef.value);
-  if (
-    activeStep.value !== 3 ||
-    window.innerWidth <= 900 ||
-    !layout ||
-    !navigationViewportRef.value ||
-    !documentViewportRef.value
-  ) {
-    clearEditorViewportStyles();
-    return;
-  }
-
-  if (layout.getBoundingClientRect().top > 0) {
-    clearEditorViewportStyles();
-    return;
-  }
-
-  const fixedViewportStyle = (panel: HTMLElement): Record<string, string> => {
-    const rect = panel.getBoundingClientRect();
-    return {
-      position: "fixed",
-      top: "0",
-      right: "auto",
-      bottom: "0",
-      left: `${rect.left}px`,
-      width: `${rect.width}px`,
-      height: "auto",
-      boxSizing: "border-box",
-      zIndex: "5"
-    };
-  };
-
-  navigationViewportStyle.value = fixedViewportStyle(navigationViewportRef.value);
-  documentViewportStyle.value = fixedViewportStyle(documentViewportRef.value);
-}
-
-function scheduleEditorViewportUpdate() {
-  if (editorViewportFrame) cancelAnimationFrame(editorViewportFrame);
-  editorViewportFrame = requestAnimationFrame(() => {
-    editorViewportFrame = 0;
-    updateEditorViewportStyles();
-  });
-}
-
-function resetEditorViewportOnResize() {
-  clearEditorViewportStyles();
-  scheduleEditorViewportUpdate();
-}
-
 const projectInfo = computed<Record<string, string>>(() => {
   const p = props.project;
   if (!p) return {};
@@ -1030,22 +986,16 @@ async function startCloudParse() {
 }
 
 onMounted(() => {
-  window.addEventListener("scroll", scheduleEditorViewportUpdate, { passive: true });
-  window.addEventListener("resize", resetEditorViewportOnResize);
-  editorLayoutResizeObserver = new ResizeObserver(scheduleEditorViewportUpdate);
-  void nextTick(() => {
-    const layout = getElementRef(editorLayoutRef.value);
-    if (layout) editorLayoutResizeObserver?.observe(layout);
-    scheduleEditorViewportUpdate();
-  });
+  window.addEventListener("scroll", syncEditorColumnHeight, { passive: true });
+  window.addEventListener("resize", syncEditorColumnHeight);
+  void nextTick(syncEditorColumnHeight);
 });
 
 onBeforeUnmount(() => {
   stopCloudPolling();
-  window.removeEventListener("scroll", scheduleEditorViewportUpdate);
-  window.removeEventListener("resize", resetEditorViewportOnResize);
-  editorLayoutResizeObserver?.disconnect();
-  if (editorViewportFrame) cancelAnimationFrame(editorViewportFrame);
+  window.removeEventListener("scroll", syncEditorColumnHeight);
+  window.removeEventListener("resize", syncEditorColumnHeight);
+  if (editorColumnHeightFrame) cancelAnimationFrame(editorColumnHeightFrame);
 });
 
 // ---- 第一步 → 生成目录 ----
@@ -1479,157 +1429,65 @@ function hasVisualTemplate(section?: BidSection): boolean {
   );
 }
 
-function templatePreviewElement(): HTMLElement | null {
-  const value = templatePreviewRef.value;
-  if (Array.isArray(value)) {
-    return (value[0] as HTMLElement | undefined) || null;
-  }
-  return value;
-}
-
-function syncTemplatePreviewText(section: BidSection, target: HTMLElement) {
-  const blocks = asRecordList(section.templateBlocks);
-  target.querySelectorAll<HTMLElement>('span[id^="codex_tpl_p_"]').forEach((bookmark) => {
-    const match = /^codex_tpl_p_(\d+)$/.exec(bookmark.id);
-    if (!match) return;
-    const block = blocks.find(
-      (item) => numericValue(item.bodyChildIndex) === Number(match[1])
-    );
-    const paragraph = bookmark.closest("p") as HTMLElement | null;
-    if (block && paragraph) block.text = editableText(paragraph);
-  });
-
-  const tables = asRecordList(section.templateTables);
-  target.querySelectorAll<HTMLElement>('span[id^="codex_tpl_t_"]').forEach((bookmark) => {
-    const match = /^codex_tpl_t_(\d+)_r_(\d+)_c_(\d+)$/.exec(bookmark.id);
-    if (!match) return;
-    const table = tables[Number(match[1]) - 1];
-    if (!table) return;
-    const rowIndex = Number(match[2]);
-    const cellIndex = Number(match[3]);
-    const rows = asRecordList(table.rows);
-    let row = rows.find((item) => numericValue(item.rowIndex) === rowIndex);
-    if (!row) {
-      const prototype = rows[rows.length - 1];
-      if (!prototype) return;
-      row = {
-        ...prototype,
-        rowIndex,
-        cells: asRecordList(prototype.cells).map((cell) => ({ ...cell }))
-      };
-      rows.push(row);
-    }
-    const cells = asRecordList(row.cells);
-    let cell = cells.find((item) => numericValue(item.cellIndex) === cellIndex);
-    if (!cell) {
-      cell = { cellIndex };
-      cells.push(cell);
-    }
-    const tableCell = bookmark.closest("td,th") as HTMLElement | null;
-    if (tableCell) cell.filledText = editableText(tableCell);
-  });
-}
-
-async function renderTemplatePreview(sectionId: string) {
-  const section = plan.value.find((item) => item.sectionId === sectionId);
-  if (!section || !hasVisualTemplate(section) || !workspaceId.value) return;
-  const requestId = ++templatePreviewRequestId;
-  templatePreviewLoading.value = true;
-  templatePreviewFailedSectionId.value = "";
-  await nextTick();
-  const target = templatePreviewElement();
-  if (!target || currentSectionId.value !== sectionId) {
-    templatePreviewLoading.value = false;
-    return;
-  }
-  try {
-    const blob = await api.bidDocumentTemplatePreview(workspaceId.value, sectionId);
-    if (requestId !== templatePreviewRequestId || currentSectionId.value !== sectionId) return;
-    await renderAsync(blob, target, undefined, {
-      className: "codex-docx",
-      inWrapper: true,
-      breakPages: true,
-      ignoreWidth: false,
-      ignoreHeight: false,
-      renderHeaders: true,
-      renderFooters: true
-    });
-    target.setAttribute("data-template-preview-ready", "true");
-  } catch (error) {
-    if (requestId !== templatePreviewRequestId || currentSectionId.value !== sectionId) return;
-    templatePreviewFailedSectionId.value = sectionId;
-    ElMessage.warning((error as Error).message || "原始 Word 版式加载失败，已回退为结构化预览");
-  } finally {
-    if (requestId === templatePreviewRequestId) {
-      templatePreviewLoading.value = false;
-    }
-  }
+function sectionHasContent(section?: BidSection): boolean {
+  if (!section || section.responseType === "section_group") return false;
+  if (section.content?.trim()) return true;
+  return hasVisualTemplate(section);
 }
 
 function syncEditorFromSection(sectionId: string) {
   const section = plan.value.find((item) => item.sectionId === sectionId);
-  templatePreviewFailedSectionId.value = "";
   if (!section) {
     editorHtml.value = "";
-    templatePreviewRequestId += 1;
-    templatePreviewLoading.value = false;
     return;
   }
   editorHtml.value = hasVisualTemplate(section)
     ? renderTemplateFragment(section)
     : renderMarkdown(section.content || "");
-  if (hasVisualTemplate(section)) {
-    // 模板章节必须重新加载原始 DOCX，避免保存/切换后退回普通 HTML 丢失版式。
-    void nextTick(() => renderTemplatePreview(sectionId));
-  }
 }
 
 function updateSectionFromEditor(event: Event, section: BidSection) {
   const target = event.currentTarget as HTMLElement | null;
   if (!target) return;
   if (hasVisualTemplate(section)) {
-    if (target.querySelector('span[id^="codex_tpl_"]')) {
-      syncTemplatePreviewText(section, target);
-    } else {
-      const blocks = asRecordList(section.templateBlocks);
-      target.querySelectorAll<HTMLElement>("[data-template-block-index]").forEach((element) => {
-        const bodyChildIndex = Number(element.dataset.templateBlockIndex);
-        const block = blocks.find((item) => numericValue(item.bodyChildIndex) === bodyChildIndex);
-        if (block) block.text = editableText(element);
-      });
+    const blocks = asRecordList(section.templateBlocks);
+    target.querySelectorAll<HTMLElement>("[data-template-block-index]").forEach((element) => {
+      const bodyChildIndex = Number(element.dataset.templateBlockIndex);
+      const block = blocks.find((item) => numericValue(item.bodyChildIndex) === bodyChildIndex);
+      if (block) block.text = editableText(element);
+    });
 
-      const tables = asRecordList(section.templateTables);
-      target.querySelectorAll<HTMLElement>("table[data-template-table-id]").forEach((element) => {
-        const tableId = element.dataset.templateTableId || "";
-        const table = tables.find((item) => String(item.tableId || item.id || "") === tableId);
-        if (!table) return;
-        const rows = asRecordList(table.rows);
-        element.querySelectorAll<HTMLElement>("tr[data-template-row-index]").forEach((rowElement) => {
-          const rowIndex = Number(rowElement.dataset.templateRowIndex);
-          let row = rows.find((item) => numericValue(item.rowIndex) === rowIndex);
-          if (!row) {
-            const prototype = rows[rows.length - 1];
-            if (!prototype) return;
-            row = {
-              ...prototype,
-              rowIndex,
-              cells: asRecordList(prototype.cells).map((cell) => ({ ...cell }))
-            };
-            rows.push(row);
+    const tables = asRecordList(section.templateTables);
+    target.querySelectorAll<HTMLElement>("table[data-template-table-id]").forEach((element) => {
+      const tableId = element.dataset.templateTableId || "";
+      const table = tables.find((item) => String(item.tableId || item.id || "") === tableId);
+      if (!table) return;
+      const rows = asRecordList(table.rows);
+      element.querySelectorAll<HTMLElement>("tr[data-template-row-index]").forEach((rowElement) => {
+        const rowIndex = Number(rowElement.dataset.templateRowIndex);
+        let row = rows.find((item) => numericValue(item.rowIndex) === rowIndex);
+        if (!row) {
+          const prototype = rows[rows.length - 1];
+          if (!prototype) return;
+          row = {
+            ...prototype,
+            rowIndex,
+            cells: asRecordList(prototype.cells).map((cell) => ({ ...cell }))
+          };
+          rows.push(row);
+        }
+        const cells = asRecordList(row.cells);
+        rowElement.querySelectorAll<HTMLElement>("[data-template-cell-index]").forEach((cellElement) => {
+          const cellIndex = Number(cellElement.dataset.templateCellIndex);
+          let cell = cells.find((item) => numericValue(item.cellIndex) === cellIndex);
+          if (!cell) {
+            cell = { cellIndex };
+            cells.push(cell);
           }
-          const cells = asRecordList(row.cells);
-          rowElement.querySelectorAll<HTMLElement>("[data-template-cell-index]").forEach((cellElement) => {
-            const cellIndex = Number(cellElement.dataset.templateCellIndex);
-            let cell = cells.find((item) => numericValue(item.cellIndex) === cellIndex);
-            if (!cell) {
-              cell = { cellIndex };
-              cells.push(cell);
-            }
-            cell.filledText = editableText(cellElement);
-          });
+          cell.filledText = editableText(cellElement);
         });
       });
-    }
+    });
     section.content = htmlToMarkdown(target);
     section.contentMatchesTemplate = true;
   } else {
@@ -2369,12 +2227,13 @@ async function previewExport() {
     <!-- ============ 第三步：正文编辑 ============ -->
     <div v-else class="step-panel">
       <el-row ref="editorLayoutRef" class="editor-layout" :gutter="16">
-        <el-col class="editor-layout-col" :xs="24" :md="5">
-          <div
-            ref="navigationViewportRef"
-            class="nav-panel-viewport"
-            :style="navigationViewportStyle"
-          >
+        <el-col
+          class="editor-layout-col editor-navigation-col"
+          :style="editorColumnStyle"
+          :xs="24"
+          :md="5"
+        >
+          <div class="nav-panel-viewport">
             <el-card class="panel nav-panel" shadow="never">
               <template #header><span class="panel-title">章节导航</span></template>
               <div
@@ -2408,12 +2267,13 @@ async function previewExport() {
           </div>
         </el-col>
 
-        <el-col class="editor-layout-col" :xs="24" :md="13">
-          <div
-            ref="documentViewportRef"
-            class="word-page-wrap"
-            :style="documentViewportStyle"
-          >
+        <el-col
+          class="editor-layout-col editor-document-col"
+          :style="editorColumnStyle"
+          :xs="24"
+          :md="13"
+        >
+          <div class="word-page-wrap">
             <div class="word-page">
               <section
                 v-for="(sec, i) in plan"
@@ -2548,23 +2408,8 @@ async function previewExport() {
                     <el-button text size="small" :icon="RemoveFormatting" title="清除格式" @mousedown.prevent="applyEditorCommand('removeFormat')" />
                   </div>
                   <div
-                    v-if="hasVisualTemplate(sec) && templatePreviewFailedSectionId !== sec.sectionId"
-                    ref="templatePreviewRef"
-                    class="doc-rich-editor docx-template-editor"
-                    contenteditable="true"
-                    role="textbox"
-                    aria-multiline="true"
-                    :data-placeholder="sec.content ? '' : '点击此处输入正文，或使用上方按钮进行排版'"
-                    @input="updateSectionFromEditor($event, sec)"
-                    @keydown.ctrl.s.prevent="saveSection(sec.sectionId)"
-                  >
-                    <span v-if="templatePreviewLoading" class="template-preview-loading">
-                      正在加载原始 Word 版式…
-                    </span>
-                  </div>
-                  <div
-                    v-else
                     class="doc-rich-editor"
+                    :class="{ 'structured-template-editor': hasVisualTemplate(sec) }"
                     contenteditable="true"
                     role="textbox"
                     aria-multiline="true"
@@ -2617,8 +2462,11 @@ async function previewExport() {
                   <span>目录分组标题，下级章节在此分组内编排。</span>
                 </div>
                 <div v-else class="doc-body">
-                  <span v-if="!sec.content" class="doc-empty">（本章暂无内容，点击此处或左侧目录，然后「自动撰写 / 一键填充」）</span>
-                  <div v-else v-html="renderMarkdown(sec.content)"></div>
+                  <span v-if="!sectionHasContent(sec)" class="doc-empty">（本章暂无内容，点击此处或左侧目录，然后「自动撰写 / 一键填充」）</span>
+                  <div
+                    v-else
+                    v-html="hasVisualTemplate(sec) ? renderTemplateFragment(sec) : renderMarkdown(sec.content || '')"
+                  ></div>
                 </div>
               </section>
               <el-empty v-if="!plan.length" description="暂无目录，请先回到第二步编辑目录" :image-size="80" />
@@ -2871,14 +2719,21 @@ async function previewExport() {
   gap: 16px;
 }
 .editor-layout {
-  align-items: stretch;
+  --editor-sticky-top: 16px;
+  align-items: flex-start;
 }
 .editor-layout-col {
   display: flex;
   flex-direction: column;
-  height: 100vh;
   min-width: 0;
   min-height: 0;
+}
+.editor-navigation-col,
+.editor-document-col {
+  min-height: 520px;
+  position: sticky;
+  top: var(--editor-sticky-top);
+  align-self: flex-start;
 }
 .editor-layout-col > .nav-panel-viewport,
 .editor-layout-col > .word-page-wrap {
@@ -3443,20 +3298,22 @@ async function previewExport() {
   height: 100%;
   min-height: 0;
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   background: #ffffff;
   border-radius: 8px 8px 0 0;
   padding: 0;
   box-sizing: border-box;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .word-page {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   background: #ffffff;
   width: 100%;
   max-width: none;
   margin: 0 auto;
-  height: 100%;
   min-height: 100%;
   box-sizing: border-box;
   padding: 46px 54px 80px;
@@ -3684,45 +3541,21 @@ async function previewExport() {
 .doc-rich-editor :deep(.template-table th) {
   font-weight: 700;
 }
-.docx-template-editor {
-  padding: 0;
-  min-height: 520px;
-  overflow-x: auto;
-  background: #eef0f3;
-  font-size: initial;
-  line-height: initial;
+.structured-template-editor {
+  min-height: 320px;
+  padding-top: 8px;
+  background: #fff;
 }
-.docx-template-editor :deep(.codex-docx-wrapper) {
-  align-items: center;
-  min-width: max-content;
-  padding: 18px 20px 26px;
-  background: #eef0f3;
-}
-.docx-template-editor :deep(section.codex-docx) {
-  margin-bottom: 18px;
-  box-shadow: 0 1px 5px rgba(31, 35, 41, 0.16);
-}
-.docx-template-editor :deep(section.codex-docx:last-child) {
-  margin-bottom: 0;
-}
-.docx-template-editor :deep(p),
-.docx-template-editor :deep(td),
-.docx-template-editor :deep(th) {
-  caret-color: #1f2329;
-}
-.docx-template-editor :deep([id^="codex_tpl_"]) {
-  display: inline;
-}
-.template-preview-loading {
-  display: block;
-  padding: 28px;
-  color: #7b8491;
-  text-align: center;
-}
-@media (max-width: 900px) {
+@media (max-width: 991px) {
   .editor-layout-col {
     height: auto;
     min-height: 0;
+  }
+  .editor-navigation-col,
+  .editor-document-col {
+    height: auto;
+    min-height: 0;
+    position: static;
   }
   .nav-panel-viewport {
     height: auto;
