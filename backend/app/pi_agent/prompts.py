@@ -84,6 +84,9 @@ def _section_prompt_view(section: dict[str, Any], profile: str = "") -> dict[str
         "responseType",
         "requirementIds",
         "evaluationIds",
+        "evaluationScore",
+        "evaluationWeight",
+        "evaluationDepth",
         "templateId",
     )
     result = {

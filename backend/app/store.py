@@ -1746,6 +1746,7 @@ class Store:
             plan_from_eval,
             plan_from_outline,
         )
+        from .bid_writing.evaluation_strategy import attach_evaluation_strategy
         from .bid_writing.volumes import plan_from_submission_structure
         from .bid_writing.schemas import build_bid_document
         from .bid_writing.template_reuse import attach_templates
@@ -1835,6 +1836,11 @@ class Store:
             bid_doc["status"] = "planned"
             if pi_fallback_warnings:
                 bid_doc["planningWarnings"] = pi_fallback_warnings
+            attach_evaluation_strategy(
+                bid_doc,
+                resolved_eval.get("items") or [],
+                method=str(resolved_eval.get("method") or ""),
+            )
             workspace["bidDocument"] = bid_doc
             self.persist_runtime()
             return {"bidDocument": bid_doc, "workspace": workspace}
@@ -1941,6 +1947,11 @@ class Store:
             existing_bid_doc["templateFragmentsArtifact"] = str(
                 parse_bundle.get("templateFragmentsArtifact") or ""
             )
+            attach_evaluation_strategy(
+                existing_bid_doc,
+                resolved_eval.get("items") or [],
+                method=str(resolved_eval.get("method") or ""),
+            )
             workspace["bidDocument"] = existing_bid_doc
             self.persist_runtime()
             return {"bidDocument": existing_bid_doc, "workspace": workspace}
@@ -2038,6 +2049,11 @@ class Store:
         )
         bid_doc["deviationTables"] = build_deviation_tables(fine_review)
         bid_doc["status"] = "planned"
+        attach_evaluation_strategy(
+            bid_doc,
+            resolved_eval.get("items") or [],
+            method=str(resolved_eval.get("method") or ""),
+        )
         workspace["bidDocument"] = bid_doc
         self.persist_runtime()
         return {"bidDocument": bid_doc, "workspace": workspace}

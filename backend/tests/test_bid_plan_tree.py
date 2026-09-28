@@ -418,3 +418,62 @@ class BidPlanTreeTests(unittest.TestCase):
             ["req-bundle"],
         )
         self.assertEqual(resolved["sources"]["requirements"], "parse_bundle")
+
+    def test_build_evaluation_strategy_maps_score_to_depth(self) -> None:
+        from backend.app.bid_writing.evaluation_strategy import (
+            build_evaluation_strategy,
+        )
+
+        sections = [
+            {"sectionId": "t-02", "title": "技术方案"},
+            {"sectionId": "t-04", "title": "质量保证措施"},
+        ]
+        eval_items = [
+            {"factor": "技术方案", "item": "技术响应", "score": 40, "criteria": "完整"},
+            {"factor": "技术方案", "item": "功能设计", "score": 30, "criteria": "可行"},
+            {"factor": "质量保证", "item": "质保措施", "score": 10, "criteria": "健全"},
+            {"factor": "售后服务", "item": "售后响应", "score": 20, "criteria": "及时"},
+        ]
+
+        strategy = build_evaluation_strategy(eval_items, sections, method="综合评分法")
+
+        self.assertEqual(strategy["method"], "综合评分法")
+        self.assertEqual(strategy["total"], 100.0)
+        self.assertEqual(set(strategy["bySection"]), {"t-02", "t-04"})
+        self.assertEqual(strategy["bySection"]["t-02"]["score"], 70.0)
+        self.assertEqual(strategy["bySection"]["t-02"]["depth"], "primary")
+        self.assertEqual(strategy["bySection"]["t-04"]["depth"], "regular")
+        self.assertEqual(strategy["depthPolicy"]["t-02"], "primary")
+        # 售后服务评分点落不到规划章节 → 未归位，但保留目标章节便于排查
+        self.assertEqual(len(strategy["unmapped"]), 1)
+        self.assertEqual(strategy["unmapped"][0]["targetSectionId"], "t-05")
+
+    def test_attach_evaluation_strategy_annotates_plan_sections(self) -> None:
+        from backend.app.bid_writing.evaluation_strategy import (
+            attach_evaluation_strategy,
+        )
+
+        bid_document = {
+            "plan": [
+                {"sectionId": "t-02", "title": "技术方案"},
+                {"sectionId": "t-04", "title": "质量保证措施"},
+                {"sectionId": "d-01", "title": "技术规格偏离表"},
+            ]
+        }
+        eval_items = [
+            {"factor": "技术方案", "item": "技术响应", "score": 40, "criteria": "完整"},
+            {"factor": "技术方案", "item": "功能设计", "score": 30, "criteria": "可行"},
+            {"factor": "质量保证", "item": "质保措施", "score": 10, "criteria": "健全"},
+        ]
+
+        attach_evaluation_strategy(bid_document, eval_items, method="综合评分法")
+
+        by_id = {row["sectionId"]: row for row in bid_document["plan"]}
+        self.assertEqual(by_id["t-02"]["evaluationScore"], 70.0)
+        self.assertEqual(by_id["t-02"]["evaluationWeight"], 0.875)
+        self.assertEqual(by_id["t-02"]["evaluationDepth"], "primary")
+        self.assertEqual(len(by_id["t-02"]["evaluationIds"]), 2)
+        self.assertEqual(by_id["t-04"]["evaluationDepth"], "regular")
+        # 偏离表没有评分点 → 不打评分注解
+        self.assertNotIn("evaluationScore", by_id["d-01"])
+        self.assertEqual(bid_document["evaluationStrategy"]["total"], 80.0)
