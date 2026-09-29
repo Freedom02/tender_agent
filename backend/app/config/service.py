@@ -105,6 +105,11 @@ def default_ai_config() -> dict[str, Any]:
         "model": "",
         "organizationId": "",
         "configured": False,
+        # Pi 智能体（目录规划 / 正文撰写 / 模板填表）专用模型与提供方。
+        # 留空时 model 回退到上面的 model（与匹配模块同一模型）、provider 回退到
+        # 内置 company-ai 映射；环境变量 PI_MODEL / PI_PROVIDER 仍可覆盖。
+        "piModel": "",
+        "piProvider": "",
         # 外部智能体（WorkBuddy）作为**提取层 Provider** 的通道配置。
         # 默认关闭：SDK / 授权未就绪时打开，会让每次分析都白等一轮超时再回退。
         # 逐键的含义见 `tender_matching/agent_bridge.py` 的模块注释与 DEFAULT_CONFIG。

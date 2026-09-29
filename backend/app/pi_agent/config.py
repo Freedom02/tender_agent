@@ -74,17 +74,22 @@ class PiConfig:
         explicit_model = os.getenv("PI_MODEL", "").strip()
         explicit_api_key = _usable_secret(os.getenv("PI_API_KEY", ""))
 
-        # The project already has a configured OpenAI-compatible enterprise
-        # endpoint. Pi knows it as company-ai through ~/.pi/agent/models.json.
-        provider = explicit_provider or (
+        # 模型/提供方的灵活改动点：agent-config.json 的 ai 段（piModel / piProvider），
+        # 由 POST /api/config 与前端“AI 配置”维护；环境变量 PI_MODEL / PI_PROVIDER
+        # 仅作部署级覆盖。解析优先级：
+        #   provider: PI_PROVIDER > ai.piProvider > (company-ai，当有密钥 + baseUrl)
+        #   model:    PI_MODEL    > ai.piModel    > ai.model（与匹配模块同一模型）
+        # 不再硬编码任何具体模型名；三者都为空时交给 pi CLI 自身的默认模型。
+        config_provider = str(project_ai.get("piProvider") or "").strip()
+        config_model = str(project_ai.get("piModel") or "").strip()
+        shared_model = str(project_ai.get("model") or "").strip()
+
+        provider = explicit_provider or config_provider or (
             "company-ai"
             if project_api_key and str(project_ai.get("baseUrl") or "").strip()
             else ""
         )
-        model = explicit_model or (
-            str(project_ai.get("piModel") or "").strip()
-            or ("gpt-5.5" if provider == "company-ai" else "")
-        )
+        model = explicit_model or config_model or shared_model
         return cls(
             enabled=_env_bool("PI_ENABLED", True),
             command=os.getenv("PI_COMMAND", "pi").strip() or "pi",
