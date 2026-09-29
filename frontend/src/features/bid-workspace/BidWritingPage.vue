@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { renderAsync } from "docx-preview";
 import {
   ArrowDown,
@@ -65,6 +65,7 @@ const emit = defineEmits<{
   "cloud-workspace-ready": [payload: { workspace: Workspace; project: CatalogItem }];
   evaluate: [];
   "update:input-kind": [kind: "notice" | "tender_document"];
+  "delete-workspace": [workspace: Workspace];
 }>();
 
 // ---- 状态 ----
@@ -429,6 +430,19 @@ function isWorkspaceParsed(workspace: Workspace): boolean {
   );
 }
 
+// 历史项目区只保留两类项目：
+//   1) 匹配模块解析过的完整招标文件（document.kind === "tender_document"）
+//   2) 标书工作台上传的项目（dataOrigin === "cloud_agent"，经 /api/bid-runs 上传解析）
+// 仅做过公告匹配（监控爬取的公告、匹配模块只导入公告而未做招标文件细匹配）的项目不再进入历史项目区。
+function isBidHistoryWorkspace(workspace: Workspace): boolean {
+  // 已经生成过标书目录的项目始终保留，避免用户丢失正在编辑的标书
+  if (workspace.bidDocument?.plan?.length) return true;
+  // 匹配模块解析过的完整招标文件
+  if (workspace.project?.document?.kind === "tender_document") return true;
+  // 标书工作台上传的项目（防御性判断，materialize 产物一定带 tender_document）
+  return String(workspace.project?.dataOrigin || "") === "cloud_agent";
+}
+
 const historyWorkspaces = computed(() => {
   const query = historyQuery.value.trim().toLowerCase();
   return [...props.workspaces]
@@ -438,11 +452,12 @@ const historyWorkspaces = computed(() => {
       const matchesQuery = !query || title.includes(query) || projectId.includes(query);
       const hasPlan = Boolean(workspace.bidDocument?.plan?.length);
       const isParsed = isWorkspaceParsed(workspace);
+      const eligible = isBidHistoryWorkspace(workspace);
       const matchesFilter =
         historyFilter.value === "all" ||
         (historyFilter.value === "with_plan" && hasPlan) ||
         (historyFilter.value === "parsed" && isParsed);
-      return matchesQuery && matchesFilter;
+      return eligible && matchesQuery && matchesFilter;
     })
     .sort((a, b) => {
       const aSelected = a.id === props.workspace?.id ? 1 : 0;
@@ -455,6 +470,25 @@ const historyWorkspaces = computed(() => {
 const selectedHistoryWorkspace = computed(
   () => historyWorkspaces.value.find((workspace) => workspace.id === selectedHistoryWorkspaceId.value) || null
 );
+
+async function confirmDeleteWorkspace(item: Workspace) {
+  const label = item.title || item.project?.title || item.projectId || "该项目";
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「${label}」？将同时删除它的目录、章节内容、解析产物和关联抓取项目，删除后不可恢复。`,
+      "删除项目",
+      {
+        type: "warning",
+        confirmButtonText: "删除",
+        cancelButtonText: "取消",
+        confirmButtonClass: "el-button--danger",
+      }
+    );
+  } catch {
+    return;
+  }
+  emit("delete-workspace", item);
+}
 
 function historyStatus(workspace: Workspace): string {
   if (workspace.bidDocument?.plan?.length) return "目录已保存";
@@ -1855,14 +1889,17 @@ async function previewExport() {
           </el-radio-group>
         </div>
         <div v-if="historyWorkspaces.length" class="history-list">
-          <button
+          <div
             v-for="item in historyWorkspaces"
             :key="item.id"
-            type="button"
             class="history-item"
             :class="{ active: item.id === selectedHistoryWorkspaceId }"
+            role="button"
+            tabindex="0"
             :aria-pressed="item.id === selectedHistoryWorkspaceId"
             @click="selectedHistoryWorkspaceId = item.id"
+            @keydown.enter.prevent="selectedHistoryWorkspaceId = item.id"
+            @keydown.space.prevent="selectedHistoryWorkspaceId = item.id"
           >
             <span class="history-main">
               <span class="history-title">{{ item.title || item.project.title }}</span>
@@ -1876,8 +1913,18 @@ async function previewExport() {
                 {{ historyStatus(item) }}
               </el-tag>
               <el-icon v-if="item.id === selectedHistoryWorkspaceId" class="history-selected-icon"><Check /></el-icon>
+              <el-button
+                :icon="Trash2"
+                size="small"
+                text
+                type="danger"
+                :disabled="busy"
+                title="删除该项目"
+                aria-label="删除该项目"
+                @click.stop="confirmDeleteWorkspace(item)"
+              />
             </span>
-          </button>
+          </div>
         </div>
         <el-empty v-else description="没有符合条件的历史项目" :image-size="64" />
         <div v-if="selectedHistoryWorkspace" class="history-selection">

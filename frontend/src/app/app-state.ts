@@ -434,6 +434,49 @@ export function useAppState() {
     }
   }
 
+  async function deleteWorkspace(workspaceId: string) {
+    const target = workspaces.value.find((item) => item.id === workspaceId);
+    busy.value = true;
+    try {
+      const result = await api.deleteWorkspace(workspaceId);
+      const removedProjects = new Set<string>([
+        ...(result?.removedProjects || []),
+        ...(target?.projectId ? [String(target.projectId)] : []),
+      ]);
+      workspaces.value = workspaces.value.filter((item) => item.id !== workspaceId);
+      if (removedProjects.size) {
+        catalog.value = catalog.value.filter((item) => !removedProjects.has(String(item.id)));
+        reminders.value = reminders.value.filter(
+          (item) => !removedProjects.has(String(item.projectId))
+        );
+      }
+      if (bootstrap.value) {
+        bootstrap.value = {
+          ...bootstrap.value,
+          catalog: catalog.value,
+          workspaces: workspaces.value,
+          reminders: reminders.value
+        };
+      }
+      if (selectedWorkspaceId.value === workspaceId) {
+        const fallback = workspaces.value[workspaces.value.length - 1];
+        selectedWorkspaceId.value = fallback?.id || "";
+        if (fallback) {
+          selectedProjectId.value =
+            fallback.project?.id || fallback.projectId || selectedProjectId.value;
+        }
+      }
+      if (selectedProjectId.value && removedProjects.has(selectedProjectId.value) && catalog.value.length) {
+        selectedProjectId.value = catalog.value[0].id;
+      }
+      ElMessage.success("项目及其关联数据已删除");
+    } catch (error) {
+      ElMessage.error((error as Error).message);
+    } finally {
+      busy.value = false;
+    }
+  }
+
   async function runAutomation() {
     busy.value = true;
     try {
@@ -632,6 +675,7 @@ export function useAppState() {
     saveConfig,
     testAiConnection,
     refreshPiPreflight,
+    deleteWorkspace,
     runAutomation,
     runMonitoring,
     updateMonitorSite,

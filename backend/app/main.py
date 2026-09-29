@@ -243,6 +243,15 @@ def workspace(workspace_id: str) -> dict[str, Any]:
     return result
 
 
+@app.delete("/api/workspaces/{workspace_id}")
+def delete_workspace(workspace_id: str) -> dict[str, Any]:
+    """彻底删除一个项目：工作区 + 关联抓取项目 + 跟进提醒 + runtime 解析产物。"""
+    result = store.delete_workspace(workspace_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="未找到工作台")
+    return {"success": True, **result}
+
+
 @app.post("/api/workspaces/{workspace_id}/draft")
 def save_draft(workspace_id: str, payload: DraftPayload) -> dict[str, Any]:
     result = store.save_draft(workspace_id, payload.draft)

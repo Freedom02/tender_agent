@@ -206,6 +206,16 @@ export const api = {
       body: JSON.stringify({ config: { ai } })
     }),
   piPreflight: () => request<Record<string, any>>("/api/config/pi/preflight"),
+  deleteWorkspace: (workspaceId: string) =>
+    request<{
+      success: boolean;
+      workspaceId: string;
+      projectId: string;
+      title: string;
+      removedProjects: string[];
+      removedReminders: number;
+      removedArtifacts: string[];
+    }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "DELETE" }),
   monitoringStatus: () => request<MonitoringStatus>("/api/monitoring/status"),
   runMonitoring: (siteId = "") =>
     request<MonitoringRunResult>("/api/monitoring/run", {

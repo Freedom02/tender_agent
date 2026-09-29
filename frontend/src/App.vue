@@ -54,6 +54,7 @@ const {
   saveConfig,
   testAiConnection,
   refreshPiPreflight,
+  deleteWorkspace,
   runAutomation,
   runMonitoring,
   updateMonitorSite,
@@ -181,6 +182,7 @@ onMounted(loadBootstrap);
       @open-workspace="openWorkspace"
       @reanalyze="reanalyzeCurrent"
       @select-workspace="selectMatchingWorkspace"
+      @delete-workspace="deleteWorkspace($event.id)"
     />
 
     <BidWritingPage
@@ -198,6 +200,7 @@ onMounted(loadBootstrap);
       @update:selected-library-key="libraryForm.key = $event"
       @update:bid-document="onBidDocumentUpdated"
       @select-workspace="selectMatchingWorkspace"
+      @delete-workspace="deleteWorkspace($event.id)"
       @cloud-workspace-ready="adoptCloudWorkspace"
       @file-selected="importFile = $event"
       @evaluate="importDocument"

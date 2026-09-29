@@ -19,11 +19,12 @@ import {
   Sparkles,
   Table2,
   Upload,
+  Trash2,
   Wrench,
   X,
   Archive
 } from "lucide-vue-next";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../../services/api";
 import type { MaterialFact, MatchSummary, ReasoningRow, ReviewOutput, Workspace } from "../../shared/types";
 
@@ -49,6 +50,7 @@ const emit = defineEmits<{
   openWorkspace: [];
   reanalyze: [];
   selectWorkspace: [workspace: Workspace];
+  deleteWorkspace: [workspace: Workspace];
 }>();
 
 type ModuleKey =
@@ -349,6 +351,25 @@ const extractionMode = ref<"builtin" | "workbuddy_agent_mcp">("builtin");
 const fileName = computed(() => props.importFile?.name || "");
 const historyWorkspaces = computed(() => [...props.workspaces].reverse());
 const auditRecords = computed(() => props.workspace?.auditRecords || []);
+
+async function confirmDeleteWorkspace(item: Workspace) {
+  const label = item.title || item.project?.title || item.projectId || "该项目";
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「${label}」？将同时删除它的匹配结果、解析产物和关联抓取项目，删除后不可恢复。`,
+      "删除项目",
+      {
+        type: "warning",
+        confirmButtonText: "删除",
+        cancelButtonText: "取消",
+        confirmButtonClass: "el-button--danger",
+      }
+    );
+  } catch {
+    return;
+  }
+  emit("deleteWorkspace", item);
+}
 const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
 
 const fineReview = computed(() => props.workspace?.reasoning.fineReview || null);
@@ -1925,13 +1946,16 @@ watch(
           </template>
 
           <div v-if="historyWorkspaces.length" class="match-history-list">
-            <button
+            <div
               v-for="item in historyWorkspaces"
               :key="item.id"
-              type="button"
               class="match-history-item"
               :class="{ 'match-history-item--active': item.id === workspace?.id }"
+              role="button"
+              tabindex="0"
               @click="emit('selectWorkspace', item)"
+              @keydown.enter.prevent="emit('selectWorkspace', item)"
+              @keydown.space.prevent="emit('selectWorkspace', item)"
             >
               <span class="match-history-item-main">
                 <strong>{{ item.title || item.project.title || "未命名项目" }}</strong>
@@ -1952,9 +1976,19 @@ watch(
                 >
                   {{ item.reasoning.fineReview?.score ?? item.reasoning.eligibility?.eligibilityScore ?? item.reasoning.score }}
                 </el-tag>
+                <el-button
+                  :icon="Trash2"
+                  size="small"
+                  text
+                  type="danger"
+                  :disabled="busy"
+                  title="删除该项目"
+                  aria-label="删除该项目"
+                  @click.stop="confirmDeleteWorkspace(item)"
+                />
                 <el-icon><ChevronRight /></el-icon>
               </span>
-            </button>
+            </div>
           </div>
           <el-empty v-else description="暂无历史匹配项目" />
         </el-card>

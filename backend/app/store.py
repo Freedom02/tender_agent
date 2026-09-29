@@ -4,6 +4,7 @@ import os
 import hashlib
 import json
 import re
+import shutil
 import time
 from copy import deepcopy
 from datetime import date, datetime
@@ -85,6 +86,11 @@ class Store:
         self.libraries_path = self.runtime_root / "libraries.json"
         self.config_path = root / "agent-config.json"
         self.workspaces_path = self.runtime_root / "workspaces.json"
+        # 已删除工作区的墓碑。persist_runtime 只做合并、从不删键：若另一个后端进程
+        # （或热重载前后的旧进程）手里还留着已删工作区的旧副本，它下一次落盘会把
+        # 删掉的项目重新合并回来。墓碑用于在所有合并路径上强制剔除这些 id。
+        self.deleted_workspaces_path = self.runtime_root / "workspaces-deleted.json"
+        self.deleted_workspaces: set[str] = set()
         self.catalog: list[dict[str, Any]] = []
         self.libraries: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
@@ -108,6 +114,11 @@ class Store:
         self.reminders = read_json(self.runtime_root / "reminders.json", [])
         self.runs = read_json(self.runtime_root / "automation-runs.json", [])
         self.workspaces = read_json(self.workspaces_path, {})
+        self.deleted_workspaces = {
+            str(item) for item in (read_json(self.deleted_workspaces_path, []) or []) if str(item)
+        }
+        for deleted_id in self.deleted_workspaces:
+            self.workspaces.pop(deleted_id, None)
         self._workspace_snapshot = deepcopy(self.workspaces)
         # 兼容旧版本工作区：补齐 fineReview 缺失字段，避免前端渲染崩溃。
         repaired_bid_documents = False
@@ -512,6 +523,8 @@ class Store:
                     or workspace != previous
                 ):
                     merged_workspaces[workspace_id] = deepcopy(workspace)
+            for deleted_id in self.deleted_workspaces:
+                merged_workspaces.pop(deleted_id, None)
             write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
             write_json(self.runtime_root / "automation-runs.json", self.runs[-50:])
             write_json(self.workspaces_path, merged_workspaces, compact=True)
@@ -527,6 +540,8 @@ class Store:
         但一个字节都没落盘，下一次读取又回到旧状态（例如 plan_bid_document 返回了 15 章目录，
         紧接着按同一引用查章节却查不到，接口回 404）。此处改为就地更新以保留对象身份。
         """
+        for deleted_id in self.deleted_workspaces:
+            self.workspaces.pop(deleted_id, None)
         for workspace_id in [key for key in self.workspaces if key not in merged_workspaces]:
             del self.workspaces[workspace_id]
         for workspace_id, value in merged_workspaces.items():
@@ -554,8 +569,96 @@ class Store:
                     or workspace != previous
                 ):
                     merged_workspaces[workspace_id] = deepcopy(workspace)
+            for deleted_id in self.deleted_workspaces:
+                merged_workspaces.pop(deleted_id, None)
             self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
+
+    def persist_deleted_workspaces(self) -> None:
+        write_json(self.deleted_workspaces_path, sorted(self.deleted_workspaces))
+
+    def delete_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        """彻底删除一个项目：工作区记录 + 关联抓取项目 + 跟进提醒 + runtime 解析产物。
+
+        返回被删内容的摘要；工作区不存在时返回 None（由调用方转成 404）。
+        """
+        workspace = self.workspaces.get(workspace_id)
+        if not isinstance(workspace, dict):
+            return None
+
+        project_id = str(workspace.get("projectId") or "").strip()
+        embedded = workspace.get("project") if isinstance(workspace.get("project"), dict) else {}
+        title = str(workspace.get("title") or embedded.get("title") or "")
+
+        # 1) 工作区注册表：先落墓碑，再在同一把锁下从磁盘真删。
+        #    不能走 persist_runtime —— 它基于磁盘副本做合并，只增不删。
+        self.deleted_workspaces.add(workspace_id)
+        self.persist_deleted_workspaces()
+        self.workspaces.pop(workspace_id, None)
+        self._workspace_snapshot.pop(workspace_id, None)
+        lock_path = self.runtime_root / ".store-runtime.lock"
+        with runtime_file_lock(lock_path):
+            disk_workspaces = read_json(self.workspaces_path, {})
+            if not isinstance(disk_workspaces, dict):
+                disk_workspaces = {}
+            disk_workspaces.pop(workspace_id, None)
+            write_json(self.workspaces_path, disk_workspaces, compact=True)
+
+        # 2) 关联抓取项目：workspaceId 反查 + projectId 正查，两个方向都下挂
+        removed_projects: list[str] = []
+        kept_catalog: list[dict[str, Any]] = []
+        for item in self.catalog:
+            if not isinstance(item, dict):
+                kept_catalog.append(item)
+                continue
+            item_id = str(item.get("id") or "")
+            linked = item.get("workspaceId") == workspace_id or (
+                bool(project_id) and item_id == project_id
+            )
+            if linked:
+                if item_id:
+                    removed_projects.append(item_id)
+            else:
+                kept_catalog.append(item)
+        if removed_projects:
+            self.catalog = kept_catalog
+            self.persist_catalog()
+
+        # 3) 跟进提醒：挂在被删项目上的提醒一并清掉，避免留下悬空条目
+        touched = set(removed_projects)
+        if project_id:
+            touched.add(project_id)
+        removed_reminders = 0
+        if touched:
+            kept_reminders = [
+                item
+                for item in self.reminders
+                if str((item or {}).get("projectId") or "") not in touched
+            ]
+            removed_reminders = len(self.reminders) - len(kept_reminders)
+            if removed_reminders:
+                self.reminders = kept_reminders
+                write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
+
+        # 4) 该项目的 runtime 解析产物目录（runtime/projects/<projectId>）
+        removed_artifacts: list[str] = []
+        if project_id:
+            safe_project_id = re.sub(r"[^A-Za-z0-9_.-]", "_", project_id)
+            # unassigned 是多个项目共用的兜底目录，不能连带删除
+            if safe_project_id and safe_project_id != "unassigned":
+                target = self.runtime_root / "projects" / safe_project_id
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                    removed_artifacts.append(str(target.relative_to(self.root)).replace("\\", "/"))
+
+        return {
+            "workspaceId": workspace_id,
+            "projectId": project_id,
+            "title": title,
+            "removedProjects": removed_projects,
+            "removedReminders": removed_reminders,
+            "removedArtifacts": removed_artifacts,
+        }
 
     def save_parse_bundle(self, value: dict[str, Any]) -> dict[str, Any]:
         """校验并保存标准 ParseBundle，同时返回规范化后的 JSON 数据。"""
