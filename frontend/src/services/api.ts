@@ -196,6 +196,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  importMaterialsFile: async (file: File) => {
+    // multipart 直传，不转 base64，支持大文件（避免 2GB 内存爆炸）
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const response = await fetch("/api/materials/import/upload", { method: "POST", body: fd });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `请求失败：${response.status}`);
+    }
+    return response.json() as Promise<ImportResult>;
+  },
   getMaterialProfile: () => request<MaterialProfile>("/api/materials/profile"),
   saveConfig: (config: Record<string, unknown>) =>
     request<{ config: Record<string, unknown> }>("/api/config", {
