@@ -1499,6 +1499,35 @@ class Store:
     def import_document(self, name: str, content: bytes, mime_type: str, document_kind: str = "notice") -> dict[str, Any]:
         if len(content) > 100 * 1024 * 1024:
             raise ValueError("招标文件需小于100MB")
+        # 同一份文件重复导入时复用已有条目：避免生成重复的 catalog 条目与工作区，
+        # 也省掉一次完整解析（大文件解析本身很贵）。按 contentHash + kind 判重；
+        # kind 不同（招标公告 vs 完整招标文件）视为两种导入意图，各自保留。
+        content_hash = hashlib.sha256(content).hexdigest()
+        kind = "tender_document" if document_kind == "tender_document" else "notice"
+        duplicate = next(
+            (
+                entry
+                for entry in self.catalog
+                if isinstance(entry, dict)
+                and entry.get("dataOrigin") == "local_upload"
+                and isinstance(entry.get("document"), dict)
+                and entry["document"].get("contentHash") == content_hash
+                and entry["document"].get("kind") == kind
+            ),
+            None,
+        )
+        if duplicate is not None:
+            return {
+                "item": self.with_preview(duplicate),
+                "file": {
+                    "name": name,
+                    "parseStatus": "该文件已导入过，已复用既有条目",
+                    "parseMethod": str(duplicate["document"].get("parseMethod") or ""),
+                    "warnings": [],
+                    "extractedTextLength": len(str(duplicate.get("analysisText") or "")),
+                },
+                "duplicated": True,
+            }
         parsed_file = self.extract_document_content(name, content, mime_type)
         text = parsed_file["text"].strip()
         if len(text) < 20:
@@ -1515,7 +1544,6 @@ class Store:
         target = source_dir / f"{project_id}-{safe_name}"
         target.write_bytes(content)
         parsed = self.parse_tender(text, "本地上传")
-        kind = "tender_document" if document_kind == "tender_document" else "notice"
         item = {
             "id": project_id,
             "title": parsed["projectName"] if parsed["projectName"] != "未识别" else Path(name).stem,
@@ -1533,7 +1561,7 @@ class Store:
                 "name": name,
                 "storagePath": str(target.relative_to(self.root)).replace("\\", "/"),
                 "mimeType": mime_type or "application/octet-stream",
-                "contentHash": hashlib.sha256(content).hexdigest(),
+                "contentHash": content_hash,
                 "parseMethod": parsed_file["parseMethod"],
                 "warnings": parsed_file["warnings"],
                 "segments": parsed_file["segments"],
