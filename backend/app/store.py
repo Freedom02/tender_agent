@@ -515,8 +515,28 @@ class Store:
             write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
             write_json(self.runtime_root / "automation-runs.json", self.runs[-50:])
             write_json(self.workspaces_path, merged_workspaces, compact=True)
-            self.workspaces = merged_workspaces
+            self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
+
+    def _install_workspaces(self, merged_workspaces: dict[str, Any]) -> None:
+        """就地安装工作区表，保留每个工作区 dict 的对象身份。
+
+        历史实现是 `self.workspaces = merged`（整体换新字典），会让调用方已经持有的
+        `workspace = self.workspaces.get(id)` 引用变成孤儿：调用方随后的写入既不会被本进程
+        其它读取看到，也不会被 persist_runtime 遍历到。表现为接口返回的目录/正文完全正确，
+        但一个字节都没落盘，下一次读取又回到旧状态（例如 plan_bid_document 返回了 15 章目录，
+        紧接着按同一引用查章节却查不到，接口回 404）。此处改为就地更新以保留对象身份。
+        """
+        for workspace_id in [key for key in self.workspaces if key not in merged_workspaces]:
+            del self.workspaces[workspace_id]
+        for workspace_id, value in merged_workspaces.items():
+            current = self.workspaces.get(workspace_id)
+            if isinstance(current, dict) and isinstance(value, dict):
+                if current is not value:
+                    current.clear()
+                    current.update(value)
+            else:
+                self.workspaces[workspace_id] = value
 
     def _refresh_workspaces_from_disk(self) -> None:
         """Merge external process changes without losing local dirty records."""
@@ -534,7 +554,7 @@ class Store:
                     or workspace != previous
                 ):
                     merged_workspaces[workspace_id] = deepcopy(workspace)
-            self.workspaces = merged_workspaces
+            self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
 
     def save_parse_bundle(self, value: dict[str, Any]) -> dict[str, Any]:
