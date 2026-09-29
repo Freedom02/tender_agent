@@ -235,7 +235,18 @@ def infer_evidence_category(text: str) -> str:
         )
     ):
         return "financial"
-    if any(term in value for term in ("类似业绩", "类似项目", "项目业绩", "合同业绩", "业绩合同", "案例")):
+    if any(
+        term in value
+        for term in (
+            "类似业绩",
+            "类似项目",
+            "项目业绩",
+            "合同业绩",
+            "业绩合同",
+            "业绩案例",
+            "案例证明",
+        )
+    ):
         return "performance"
     if has_personnel_signal(value):
         return "personnel"

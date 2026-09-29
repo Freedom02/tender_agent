@@ -412,7 +412,7 @@ def _looks_like_heading(segment: dict[str, Any]) -> bool:
     if (
         not style_signal
         and DECIMAL_PATTERN.match(text)
-        and len(re.sub(r"[\d\s,，.．]", "", text)) <= 4
+        and len(re.sub(r"[\d\s,，.．]", "", text)) <= 2
     ):
         return False
     if (
@@ -442,7 +442,12 @@ def _looks_like_heading(segment: dict[str, Any]) -> bool:
         )
         if any(hint in tail[:24] for hint in REQUIREMENT_HINTS) and len(text) > 24:
             return False
-    if not style_signal and re.search(r"[。！？；]$", text):
+    # ``text`` has already been NFKC-normalised by ``_clean_heading``, so the
+    # full-width forms ``；！？`` arrive here as ``;!?``.  Matching only the
+    # full-width class left every list item that ends with a semicolon
+    # ("3）项目团队配备（格式在附件）；") looking like a heading, which then
+    # swallowed the following sibling sections.  Cover both widths.
+    if not style_signal and re.search(r"[。！？；!?;]$", text):
         return False
     return True
 
@@ -561,6 +566,62 @@ def _section_text(segments: list[dict[str, Any]], start: int, end: int) -> str:
     )
 
 
+def _heading_span_length(
+    index: int,
+    headings: list[dict[str, Any]],
+    total_segments: int,
+) -> int:
+    """Number of segments a heading covers, before its next peer."""
+
+    level = int(headings[index]["level"])
+    for next_candidate in headings[index + 1 :]:
+        if int(next_candidate["level"]) <= level:
+            return int(next_candidate["position"]) - int(headings[index]["position"])
+    return total_segments - int(headings[index]["position"])
+
+
+def _drop_duplicated_major_headings(
+    headings: list[dict[str, Any]],
+    total_segments: int,
+) -> list[dict[str, Any]]:
+    """Keep one section per document-level heading.
+
+    A chapter title such as "第二部分 前附表及投标人须知" is regularly quoted a
+    second time inside another chapter's 编制说明, where it is a cross-reference
+    rather than a new chapter.  Accepting that duplicate builds a phantom root
+    that re-parents every following sibling section (the 投标文件格式 forms end
+    up under 投标人须知).  The genuine occurrence is the one that actually spans
+    content, so the widest span wins and only exact repeats are considered.
+    """
+
+    grouped: dict[str, list[int]] = {}
+    for index, candidate in enumerate(headings):
+        if int(candidate.get("level") or 0) > 1:
+            continue
+        key = re.sub(r"\s+", "", str(candidate.get("heading") or "")).upper()
+        if not key:
+            continue
+        grouped.setdefault(key, []).append(index)
+
+    dropped: set[int] = set()
+    for positions in grouped.values():
+        if len(positions) < 2:
+            continue
+        spans = {
+            index: _heading_span_length(index, headings, total_segments)
+            for index in positions
+        }
+        keep = max(spans, key=lambda index: (spans[index], -index))
+        dropped.update(index for index in positions if index != keep)
+    if not dropped:
+        return headings
+    return [
+        candidate
+        for index, candidate in enumerate(headings)
+        if index not in dropped
+    ]
+
+
 def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
     normalized_segments = [
         segment for segment in segments
@@ -590,6 +651,8 @@ def build_section_tree(segments: list[dict[str, Any]]) -> dict[str, Any]:
                 ),
             }
         )
+
+    headings = _drop_duplicated_major_headings(headings, len(normalized_segments))
 
     sections: list[dict[str, Any]] = []
     for index, candidate in enumerate(headings):

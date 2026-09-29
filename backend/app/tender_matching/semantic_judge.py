@@ -460,58 +460,16 @@ def recall_tech_units(
     return selected
 
 
-def _tech_result_from_data(
-    data: Any,
-    available_units: list[dict[str, Any]] | None = None,
-) -> dict[str, Any] | None:
+def _tech_result_from_data(data: Any) -> dict[str, Any] | None:
     """把 LLM 对齐输出 JSON 转成 match_result（4 态 + coverage/gaps/matchedUnits）。"""
     if not isinstance(data, dict):
         return None
     covered = [str(x).strip() for x in (data.get("coveredPoints") or []) if str(x or "").strip()]
     gaps = [str(x).strip() for x in (data.get("gaps") or []) if str(x or "").strip()]
-    raw_units = [u for u in (data.get("matchedUnits") or []) if isinstance(u, dict)]
-    unit_index = {
-        str(unit.get("productId") or "").strip(): unit
-        for unit in available_units or []
-        if isinstance(unit, dict) and str(unit.get("productId") or "").strip()
-    }
-    matched_units: list[dict[str, Any]] = []
-    if available_units is None:
-        matched_units = raw_units
-    else:
-        for raw_unit in raw_units:
-            product_id = str(raw_unit.get("productId") or "").strip()
-            candidate = unit_index.get(product_id)
-            if candidate is None:
-                continue
-            candidate_params = {
-                str(param.get("parameterId") or "").strip()
-                for param in candidate.get("parameters") or []
-                if isinstance(param, dict) and str(param.get("parameterId") or "").strip()
-            }
-            raw_params = raw_unit.get("matchedParams") or []
-            if not isinstance(raw_params, list):
-                raw_params = [raw_params]
-            valid_params = [
-                str(value).strip()
-                for value in raw_params
-                if str(value or "").strip() in candidate_params
-            ]
-            matched_units.append(
-                {
-                    **raw_unit,
-                    "productId": product_id,
-                    "matchedParams": valid_params,
-                }
-            )
+    matched_units = [u for u in (data.get("matchedUnits") or []) if isinstance(u, dict)]
     try:
         coverage = min(max(float(data.get("coverage", 0.0)), 0.0), 1.0)
     except (TypeError, ValueError):
-        coverage = 0.0
-
-    if available_units is not None and not matched_units:
-        gaps = list(dict.fromkeys([*gaps, *covered, "未关联到可核验的企业产品或技术参数"]))
-        covered = []
         coverage = 0.0
 
     matched_fact_ids: list[str] = []
@@ -658,8 +616,8 @@ def judge_technical_requirements(
             temperature=0,
         )
         arr = extract_json_list(result.get("content", "")) if result.get("success") else []
-        for local_idx, (item, data) in enumerate(zip(chunk, arr)):
-            res = _tech_result_from_data(data, units_chunk[local_idx])
+        for item, data in zip(chunk, arr):
+            res = _tech_result_from_data(data)
             if res:
                 # 给前端补友好产品名和对应产品参数正文（LLM 只回 ID）。
                 _enrich_matched_units(res, tech_units)

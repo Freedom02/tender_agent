@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -210,15 +212,69 @@ def create_router(store: Any = None) -> APIRouter:
         except M3Error as e:
             raise HTTPException(502, f"M3 错误：{e}")
 
+    # 类名 → 中文名（删除时的依赖提示用）
+    _CLASS_CN_BY_SNAKE: dict[str, str] = {
+        camel_to_snake(cls): cn for cls, (cn, _) in CLASS_CN.items()
+    }
+
     @router.delete("/classes/{class_name}/{object_id}")
     def delete_object(class_name: str, object_id: str) -> dict[str, Any]:
-        """删除对象（级联删除其所有关系边）。"""
+        """删除对象（级联删除所有关系边）。
+
+        技术产品删前检查参数/证照依赖；删后清理其证据文件夹。
+        """
         _validate_class(class_name)
+
+        # ── 依赖检查：仅 technical_product 查参数与证照引用（外键 RESTRICT）──
+        if class_name == "technical_product":
+            deps: list[str] = []
+            for dep_class in ("technical_parameter", "credential"):
+                try:
+                    found = client().list_objects(dep_class, limit=500, where={"product_id": object_id})
+                except M3Error:
+                    continue
+                if found:
+                    cn = _CLASS_CN_BY_SNAKE.get(dep_class, dep_class)
+                    deps.append(f"{cn}: {len(found)} 条")
+            if deps:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该产品下还有关联数据：{'；'.join(deps)}。请先逐一删除关联记录，再删除产品。",
+                )
+
+        # ── 删前读取证据路径（删完对象就拿不到了）──
+        evidence = ""
+        try:
+            obj = client().get_object(class_name, object_id)
+            evidence = (obj or {}).get("evidence_path") or (obj or {}).get("evidencePath", "")
+        except M3Error:
+            pass
+
+        # ── 删 M3 对象（级联删边）──
         try:
             ok = client().delete_object(class_name, object_id)
         except M3Error as e:
             raise HTTPException(502, f"M3 错误：{e}")
-        return {"deleted": ok, "class": class_name, "id": object_id}
+
+        # ── 删证据文件夹（路径必须落在 runtime_root 下，防穿越）──
+        evidence_deleted = False
+        if evidence and store is not None:
+            try:
+                root = Path(store.runtime_root).resolve()
+                base = (root / evidence).resolve()
+                if base != root and base.is_relative_to(root) and base.is_dir():
+                    shutil.rmtree(base, ignore_errors=True)
+                    evidence_deleted = True
+            except Exception:
+                pass
+
+        return {
+            "deleted": ok,
+            "class": class_name,
+            "id": object_id,
+            "evidenceDeleted": evidence_deleted,
+            "evidencePath": evidence or None,
+        }
 
     # ===================================================== 对象关系查询
     @router.get("/objects/{class_name}/{object_id}/relations")

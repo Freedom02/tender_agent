@@ -34,7 +34,10 @@ from .tech_units import build_tech_units
 
 TARGET_PROCESSING_SCHEMA_VERSION = "tender-targets/1.0"
 SOURCE_VIEW_SCHEMA_VERSION = "tender-source-view/1.0"
-SOURCE_VIEW_TARGETS = {"commercial", "evaluation", "template"}
+SOURCE_VIEW_TARGETS = {"commercial", "evaluation", "template", "rejection"}
+# Targets rendered as key-value info grids (project_info), not source text or
+# match cards. Previously fell through to the misleading "risk_items" label.
+INFO_DISPLAY_TARGETS = {"project_info"}
 
 # Rejection terms that are context-dependent — they only signal a real
 # invalidity risk when the surrounding clause is actually about a bid /
@@ -520,6 +523,26 @@ def _quantity(text: str) -> tuple[str, str]:
     return _text(match.group(1), 40), _text(match.group(2), 40)
 
 
+def _quantity_from_cells(cells: list[str]) -> tuple[str, str]:
+    """按「数字 + 计量单位」形态扫描单元格，替代「取最后两列」的列下标假设。
+
+    采购清单行如「…| 数字孪生数据接口平台 | 1.00（套） | 260,000.00 | …」中，
+    数量值不带「数量:」前缀，原兜底取 cells[-2]/cells[-1] 会拿到「否|否」这类标志位。
+    """
+    unit_tokens = (
+        "平方米", "㎡", "台套", "人次", "公里", "千米", "吨",
+        "套", "台", "件", "个", "项", "批", "张", "只", "把", "间", "米", "节", "册", "本",
+    )
+    pattern = re.compile(
+        r"^\s*([0-9]+(?:\.[0-9]+)?)\s*[（(]?\s*(" + "|".join(unit_tokens) + r")\s*[）)]?\s*$"
+    )
+    for cell in cells:
+        match = pattern.search(str(cell or "").strip())
+        if match:
+            return _text(match.group(1), 40), _text(match.group(2), 40)
+    return "", ""
+
+
 def _parameter_text(segment: Mapping[str, Any], cells: list[str]) -> str:
     table_type = _text(segment.get("tableRequirementType"), 60)
     preferred = []
@@ -610,8 +633,8 @@ def _technical_items(
         cells = _table_cells(segment)
         fields = _product_fields(segment, cells)
         quantity, unit = _quantity(source_text)
-        if not quantity and len(cells) >= 4:
-            quantity, unit = _text(cells[-2], 40), _text(cells[-1], 40)
+        if not quantity:
+            quantity, unit = _quantity_from_cells(cells)
         clauses = _split_technical_clauses(segment, cells)
         for clause_index, (requirement_number, clause) in enumerate(
             clauses,
@@ -642,6 +665,43 @@ def _technical_items(
     return items
 
 
+def _is_commitment_qualification(text: str) -> bool:
+    """资格项是否属「承诺函/声明函」型：编制《投标（响应）函》时按要求填写并
+    签章即可，而非需要外部可核验证书的「证书」型。"""
+    value = _compact(text)
+    if any(term in value for term in ("承诺函", "声明函", "承诺书", "承诺并签章", "承诺并加盖")):
+        return True
+    if "按要求填写" in value and "签章" in value:
+        return True
+    if re.search(r"(?:提供|出具|提交)\s*声明", value):
+        return True
+    return False
+
+
+def _is_qualification_noise(text: str) -> bool:
+    """资格目标内的噪声：表头行、交叉引用、注释、评标/开标程序段。
+
+    按形态识别，不枚举具体审查项名：
+      - 表头行：含「序号」+「审查」的列头（数据行是 1/2/3…）
+      - 交叉引用：「详见招标文件第X章」
+      - 注释：「注：…」
+      - 程序段：评标委员会/开标/停止评标等评审流程描述，非投标人资格要求。
+    """
+    value = _compact(text)
+    if "序号" in value and "审查" in value:
+        return True
+    if value.startswith("详见") and re.search(r"第[一二三四五六七八九十0-9]+章", value):
+        return True
+    if value.startswith("注：") or value.startswith("注:"):
+        return True
+    if any(
+        term in value
+        for term in ("评标委员会", "停止评标", "开标完成", "资格审查报告", "少数服从多数")
+    ):
+        return True
+    return False
+
+
 def _qualification_items(
     segment_ids: list[str],
     indexes: Mapping[str, Any],
@@ -670,6 +730,8 @@ def _qualification_items(
         for clause in _split_clauses(source_text):
             if len(_compact(clause)) < 8:
                 continue
+            if _is_qualification_noise(clause):
+                continue
             item = _base_item(
                 item_id=f"qualification-{len(items) + 1:04d}",
                 target_key="qualification",
@@ -679,10 +741,14 @@ def _qualification_items(
                 indexes=indexes,
                 confidence=0.76 if segment.get("tableId") else 0.66,
             )
+            is_commitment = _is_commitment_qualification(clause)
             item.update(
                 {
                     "matchDomain": "qualification",
-                    "evidenceNeed": "企业资格/证明材料",
+                    "evidenceNeed": (
+                        "承诺函（投标响应函）" if is_commitment else "企业资格/证明材料"
+                    ),
+                    "isCommitment": is_commitment,
                 }
             )
             items.append(item)
@@ -760,9 +826,9 @@ def _template_type(text: str) -> str:
         return "commitment"
     if "授权委托" in value or "法定代表人" in value:
         return "authorization"
-    if "报价表" in value or "分项报价" in value:
+    if "报价表" in value or "分项报价" in value or "开标一览" in value:
         return "price_schedule"
-    if "技术偏离" in value:
+    if "技术偏离" in value or "服务偏离" in value:
         return "technical_deviation"
     if "商务偏离" in value:
         return "commercial_deviation"
@@ -880,21 +946,32 @@ def _template_range_items(
             continue
         segment = segment_map[segment_ids[0]]
         range_set = set(segment_ids)
-        section_id = ""
-        for candidate_id in expanded_section_ids:
-            candidate = indexes["sectionMap"].get(candidate_id) or {}
-            candidate_segments = {
+        # The range's own owning section wins over ``expandedSectionIds``: the
+        # expanded set holds the chapter root, which spans the whole chapter, so
+        # resolving through it first would title a sub-range with the chapter
+        # heading instead of the heading of the section that range actually is.
+        section_id = _id(source_range.get("sectionId"))
+        if section_id and not range_set.intersection(
+            {
                 _id(value)
-                for value in candidate.get("segmentIds") or []
+                for value in (
+                    indexes["sectionMap"].get(section_id, {}).get("segmentIds") or []
+                )
             }
-            if range_set.intersection(candidate_segments):
-                section_id = candidate_id
-                break
-        section_id = (
-            section_id
-            or _id(source_range.get("sectionId"))
-            or _section_id(_owner_section(segment_ids[0], indexes) or {})
-        )
+        ):
+            section_id = ""
+        if not section_id:
+            section_id = _section_id(_owner_section(segment_ids[0], indexes) or {})
+        if not section_id:
+            for candidate_id in expanded_section_ids:
+                candidate = indexes["sectionMap"].get(candidate_id) or {}
+                candidate_segments = {
+                    _id(value)
+                    for value in candidate.get("segmentIds") or []
+                }
+                if range_set.intersection(candidate_segments):
+                    section_id = candidate_id
+                    break
         section = indexes.get("sectionMap", {}).get(section_id) or {}
         title = _text(
             section.get("heading")
@@ -2017,11 +2094,11 @@ def build_target_analysis_pack(
             module["displayMode"] = (
                 "ignored"
                 if key == "contract"
-                else (
-                    "match_items"
-                    if key in MATCH_STAGE_TARGETS
-                    else "risk_items"
-                )
+                else "match_items"
+                if key in MATCH_STAGE_TARGETS
+                else "info_items"
+                if key in INFO_DISPLAY_TARGETS
+                else "risk_items"
             )
         if key == "contract":
             module["items"] = []
@@ -2430,7 +2507,10 @@ def _target_requirement_contract(
         if _text(value, 120)
     ]
     is_rejection = target_key == "rejection"
-    requirement_class = "rejection" if is_rejection else "evidence"
+    is_commitment = bool(target_item.get("isCommitment"))
+    requirement_class = (
+        "rejection" if is_rejection else ("writing" if is_commitment else "evidence")
+    )
     target_label = TARGET_META[target_key]["label"]
     source = (
         dict(target_item.get("source"))
@@ -2489,7 +2569,11 @@ def _target_requirement_contract(
             else (
                 "product_or_capability"
                 if target_key == "technical"
-                else "qualification_certificate"
+                else (
+                    "承诺函（投标响应函）"
+                    if is_commitment
+                    else "qualification_certificate"
+                )
             )
         ),
         "responseType": (
@@ -2588,6 +2672,81 @@ def _public_row(row: dict[str, Any], target_key: str) -> dict[str, Any]:
     return row
 
 
+_STATUS_SCORE = {
+    "满足": 100.0,
+    "部分满足": 78.0,
+    "待补材料": 50.0,
+    "不满足": 0.0,
+}
+
+
+def _evidence_coverage_score(rows: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+    """按「产品/品目聚合」计算证据覆盖率，替代逐条参数平均。
+
+    旧口径 ``满足/总条数`` 把 118 条技术参数当成 118 个独立需求，分母被撑大、
+    分被压低，且「待补材料」一律记 0 分（与 SCORE_BY_STATUS 的 50 分矛盾）。
+    新口径：
+      - 技术条按 productName 聚合成产品级分（先对每产品的参数取均值，再对产品取均值）；
+      - 资格条按条目级取均值（资格项本身是粗粒度）；
+      - 「待补材料」按 50 分计入（未核验≠不满足）。
+    返回 (score, breakdown) 供前端展示产品级覆盖率。
+    """
+    tech_rows = [
+        r
+        for r in rows
+        if r.get("targetModule") == "technical"
+        and r.get("requirementClass") == "evidence"
+    ]
+    qual_rows = [
+        r
+        for r in rows
+        if r.get("targetModule") == "qualification"
+        and r.get("requirementClass") == "evidence"
+    ]
+
+    def _item_score(status: str) -> float:
+        return _STATUS_SCORE.get(status, 50.0)
+
+    breakdown: dict[str, Any] = {"products": [], "qualification": None}
+
+    tech_score = 0.0
+    if tech_rows:
+        by_product: dict[str, list[float]] = defaultdict(list)
+        for row in tech_rows:
+            pn = _text(row.get("productName") or "未命名产品", 120)
+            by_product[pn].append(_item_score(str(row.get("status") or "待补材料")))
+        product_scores: list[dict[str, Any]] = []
+        for pn, scores in by_product.items():
+            avg = sum(scores) / len(scores)
+            product_scores.append(
+                {"productName": pn, "paramCount": len(scores), "score": round(avg)}
+            )
+        product_scores.sort(key=lambda x: -x["score"])
+        breakdown["products"] = product_scores
+        tech_score = sum(p["score"] for p in product_scores) / len(product_scores)
+
+    qual_score = 0.0
+    if qual_rows:
+        qual_score = sum(
+            _item_score(str(r.get("status") or "待补材料")) for r in qual_rows
+        ) / len(qual_rows)
+        breakdown["qualification"] = {
+            "itemCount": len(qual_rows),
+            "score": round(qual_score),
+        }
+
+    # 技术 22 / 资格 18 权重（对齐 WEIGHTS）
+    if tech_rows and qual_rows:
+        score = round((22.0 * tech_score + 18.0 * qual_score) / 40.0)
+    elif tech_rows:
+        score = round(tech_score)
+    elif qual_rows:
+        score = round(qual_score)
+    else:
+        score = 0
+    return score, breakdown
+
+
 def _target_summary(
     rows: list[dict[str, Any]],
     extraction: Mapping[str, Any],
@@ -2618,15 +2777,10 @@ def _target_summary(
     total_match = sum(
         1
         for row in rows
-        if row.get("targetModule") in {"technical", "qualification"}
+        if row.get("requirementClass") == "evidence"
+        and row.get("targetModule") in {"technical", "qualification"}
     )
-    satisfied = sum(
-        1
-        for row in rows
-        if row.get("targetModule") in {"technical", "qualification"}
-        and row.get("status") == "满足"
-    )
-    score = round(satisfied * 100 / total_match) if total_match else 0
+    score, coverage_breakdown = _evidence_coverage_score(rows)
     if hard_blockers:
         decision = "不建议参与"
     elif pending:
@@ -2650,6 +2804,7 @@ def _target_summary(
             if row.get("risk") not in {"低", ""}
         ][:50],
         "score": score,
+        "coverageBreakdown": coverage_breakdown,
         "decision": decision,
         "recommendation": decision,
         "clauseCount": len(rows),
@@ -2778,22 +2933,27 @@ def build_target_fine_review(
             )
             status_source = str(raw_match.get("statusSource") or "目标匹配")
         else:
-            strategy = _match_kind(text)
-            raw = deterministic_match(text, strategy, dict(company_knowledge))
-            status, matched_ids, reason, evidences, extras = _status_result(
-                raw,
-                company=company_knowledge,
-            )
-            if raw is None:
-                status = "待补材料"
-                reason = "资格审查目标已定位，但企业资料中暂未找到可直接核验的证据。"
-            status_source = "目标规则匹配"
+            if target_key == "qualification" and item.get("isCommitment"):
+                status = "待编制"
+                matched_ids, reason, evidences, extras = [], "承诺函类：编制《投标（响应）函》时按要求填写并签章即可，无需外部证书。", [], {}
+                status_source = "承诺函判定"
+            else:
+                strategy = _match_kind(text)
+                raw = deterministic_match(text, strategy, dict(company_knowledge))
+                status, matched_ids, reason, evidences, extras = _status_result(
+                    raw,
+                    company=company_knowledge,
+                )
+                if raw is None:
+                    status = "待补材料"
+                    reason = "资格审查目标已定位，但企业资料中暂未找到可直接核验的证据。"
+                status_source = "目标规则匹配"
         facts = _facts_by_ids(company_knowledge, matched_ids)
         matched_objects = [
             {"id": _fact_id(fact), "name": _fact_name(fact)}
             for fact in facts
         ]
-        requirement_class = "evidence"
+        requirement_class = "writing" if item.get("isCommitment") else "evidence"
         row = build_comparison(
             contract,
             status=status,
@@ -2802,13 +2962,17 @@ def build_target_fine_review(
             evidences=evidences,
             risk=(
                 "低"
-                if status == "满足"
+                if status in {"满足", "待编制"}
                 else ("高" if status == "不满足" else "中")
             ),
             suggestion=(
                 "已找到对应企业证据，请复核原件和适用范围。"
                 if status == "满足"
-                else "请补充或核验企业材料后再确认。"
+                else (
+                    "编制《投标（响应）函》时按要求填写并签章即可，无需外部证书。"
+                    if status == "待编制"
+                    else "请补充或核验企业材料后再确认。"
+                )
             ),
             status_source=status_source,
         )
@@ -2830,21 +2994,48 @@ def build_target_fine_review(
         for item in match_stage_items
         if item.get("targetModule") in RISK_CHECK_TARGETS
     ]
+    def _rejection_severity(text: str) -> tuple[str, str, str]:
+        """按形态分级：投标人直接否决条件（投标无效/无效投标）vs 采购/程序性。
+        返回 (risk, reason, suggestion)。"""
+        value = _compact(text)
+        if "投标无效" in value or "无效投标" in value:
+            # 否定式保护条款（“不得…直接作无效投标处理”）→ 非否决条件
+            if re.search(r"不得[^。；]{0,20}(?:作无效投标|无效投标|投标无效)", value):
+                return (
+                    "低",
+                    "程序性保护条款：要求先澄清/说明/补正，不得直接作无效投标处理，非投标否决条件。",
+                    "无需特别处理，了解即可。",
+                )
+            return (
+                "高",
+                "投标无效/无效投标的直接条件 —— 若触发将导致投标被否决，需重点核查投标响应是否满足。",
+                "逐条核对是否触发该无效情形，必要时调整投标响应以避免触发。",
+            )
+        if any(term in value for term in ("废标", "终止采购", "不足3家", "不足三家")):
+            return (
+                "低",
+                "采购层面的废标/终止采购情形（非投标人自身可规避），供参考。",
+                "关注废标情形是否可能发生，但不影响投标人自身资格判定。",
+            )
+        return ("低", "程序性说明或评标规则描述，仅供参考。", "无需特别处理，了解即可。")
+
     for item in rejection_items:
         contract = _target_requirement_contract(
             item,
             target_key="rejection",
             source_file_id=source_file_id,
         )
+        item_text = str(item.get("text") or item.get("rawText") or "")
+        risk_level, rreason, rsuggestion = _rejection_severity(item_text)
         row = build_comparison(
             contract,
             status="待核查",
-            reason="全文规则命中废标/无效/否决风险词，需人工核对原文适用条件。",
+            reason=rreason,
             matched_objects=[],
             evidences=[],
-            risk="中",
-            suggestion="请确认该条款是否对本项目投标方式和企业主体实际触发。",
-            status_source="全文正则",
+            risk=risk_level,
+            suggestion=rsuggestion,
+            status_source="全文正则分级",
         )
         row["targetModule"] = "rejection"
         row["requirementClass"] = "rejection"

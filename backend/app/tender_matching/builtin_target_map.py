@@ -677,6 +677,8 @@ _REJECTION_TERMS: tuple[str, ...] = (
     "不合格",
     "作无效处理",
     "视为无效",
+    "审查不通过",
+    "评审不通过",
 )
 _REJECTION_CANDIDATE_TERMS: tuple[str, ...] = tuple(
     dict.fromkeys(
@@ -1117,23 +1119,21 @@ def _section_can_expand(
         direct_only=True,
     )
     if target_key == "evaluation":
-        # "评标办法" chapters often contain committee procedure, opening
-        # procedure and invalid-bid clauses.  Scoring segments are recalled
-        # below; only an explicitly named scoring section may be expanded.
-        allowed = {
-            "评分标准",
-            "评分办法",
-            "评分细则",
-            "评分因素",
-            "评审因素",
-            "评审标准",
-            "评标方法和标准",
-            "综合评分",
-            "技术评分",
-            "商务评分",
-            "价格评分",
-        }
-        return any(_compact(term) in _section_heading_blob(section) for term in allowed)
+        # 「评标办法」章节常混有评标委员会/开标/无效投标等程序性内容，只展开
+        # “明确打分子章节”。用「评分/评标/评审 + 打分指标词」组合识别标题变体，
+        # 覆盖「评分标准 / 评标细则及标准 / 评审因素 / 综合评分」等，且不命中裸「评标办法」。
+        compact = _compact(_section_heading_blob(section))
+        return bool(
+            re.search(
+                r"(?:评分|评审)[^，。、]{0,4}(?:标准|细则|办法|方法|因素|分值|权重|得分|规则)",
+                compact,
+            )
+            or re.search(
+                r"评标[^，。、]{0,6}(?:标准|细则|因素|分值|权重|得分|规则)",
+                compact,
+            )
+            or re.search(r"(?:综合|技术|商务|价格)评分", compact)
+        )
     if target_key == "contract":
         heading = _section_heading_blob(section)
         if _is_contract_reference_heading(heading):
@@ -2868,6 +2868,15 @@ def _target_review_limits(ai: Mapping[str, Any]) -> dict[str, int]:
             6,
         ),
         "minSplitSegments": 4,
+        # 章节级复核是每份文档一次的大请求（思维链模型实测约 70~100 秒），
+        # 段级 45 秒预算必然超时，单独放宽。
+        "sectionTimeoutSeconds": _bounded_ai_int(
+            ai,
+            "targetReviewSectionTimeoutSeconds",
+            180,
+            30,
+            300,
+        ),
     }
 
 
@@ -3697,6 +3706,243 @@ def _enforce_target_ownership_and_contiguity(
     return summary
 
 
+# ── section-level LLM review（补漏）────────────────────────────────
+# 上面的段落级复核只能打磨规则已经选中的“歧义段”，是“修边”，补不了漏：它的
+# 复核范围由规则选择推导而来，规则整块漏掉的目标（例如「第三部分 采购清单及
+# 技术要求」是个只有标题的空壳章，真正的技术要求藏在一个被判定为 basic 的兄弟
+# 章里），复核输入是空的，永远救不回来。
+#
+# 本通道把整份“章节清单”（标题、层级、段数、当前归属）交给模型，让它为那些
+# 当前没有任何内容目标认领的章节重新分配归属。为保证安全，它是纯增量的：
+#   * 只“认领”当前未被任何内容目标（technical/qualification/commercial/
+#     evaluation/contract/template）拥有的段，绝不从任何目标身上搬走或删除；
+#   * template 是权威可下载区块，project_info/rejection 是全文抽取，都不接受
+#     新增，只作为上下文让模型避开；
+#   * 一个章节被两个目标同时认领时，交回规则，本次不改；
+#   * 模型只输出 sectionId，不输出文本，精确定位导出不受影响；失败即回退规则。
+_SECTION_REVIEW_APPLY_KEYS: tuple[str, ...] = (
+    "technical",
+    "qualification",
+    "commercial",
+    "evaluation",
+    "contract",
+)
+_SECTION_REVIEW_CONTENT_KEYS: tuple[str, ...] = (
+    "technical",
+    "qualification",
+    "commercial",
+    "evaluation",
+    "contract",
+    "template",
+)
+_SECTION_REVIEW_MAX_SECTIONS = 240
+_SECTION_REVIEW_MAX_SECTIONS_PER_TARGET = 60
+_SECTION_REVIEW_MAX_ADDED_SEGMENTS = 600
+
+
+def _section_review_inventory(
+    indexes: Mapping[str, Any],
+    claimed: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Bounded section inventory in document order.
+
+    When ``claimed`` is given, only sections that still hold at least one
+    segment no content target owns are included -- the review is a pure
+    gap-filling pass, so already-assigned chapters are just noise (and they
+    dominate the reasoning-token budget of a thinking model).
+    """
+
+    claimed = claimed or set()
+    rows: list[dict[str, Any]] = []
+    for section_id, section in (indexes.get("sectionMap") or {}).items():
+        heading = _text(section.get("heading"), 120)
+        if not heading:
+            continue
+        segment_ids = [
+            sid for sid in _section_segment_ids(section, indexes)
+            if sid in indexes.get("segmentMap", {})
+        ]
+        if not segment_ids:
+            continue
+        free = [sid for sid in segment_ids if sid not in claimed]
+        if not free:
+            continue
+        rows.append(
+            {
+                "sectionId": section_id,
+                "heading": heading,
+                "level": int(section.get("level") or 0),
+                "segCount": len(segment_ids),
+                "freeCount": len(free),
+                "position": min(
+                    indexes["positions"].get(sid, 0) for sid in segment_ids
+                ),
+            }
+        )
+    rows.sort(key=lambda row: row["position"])
+    truncated = 0
+    if len(rows) > _SECTION_REVIEW_MAX_SECTIONS:
+        # 请求预算而非文档上限：段数多的章节优先保留（它们最可能是正文块）。
+        rows.sort(key=lambda row: (-row["segCount"], row["position"]))
+        truncated = len(rows) - _SECTION_REVIEW_MAX_SECTIONS
+        rows = rows[:_SECTION_REVIEW_MAX_SECTIONS]
+        rows.sort(key=lambda row: row["position"])
+    return rows, truncated
+
+
+def _section_review_prompt(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    target_lines = "\n".join(
+        f"- {key}（{_module(key).get('label')}）：{_module(key).get('description')}"
+        for key in _SECTION_REVIEW_CONTENT_KEYS
+    )
+    system = (
+        "你是招标文件章节归属复核员。\n"
+        "输入是一份招标文件的章节清单，每行格式：章节ID | 层级 | 段数 | 标题。\n"
+        "请判断每个章节的正文属于下列哪一个目标模块：\n"
+        f"{target_lines}\n"
+        "要求：\n"
+        "1. 只输出你确信归属的章节；不确定就不要输出。\n"
+        "2. 一个章节最多归属一个模块。\n"
+        "3. 目录、封面、前言、报名须知等无归属章节不要输出。\n"
+        "4. 警惕“空壳章节”：某个类型章只有 1 段（只有标题），而紧随其后的相邻"
+        "大章节才是真正内容，应把真正的内容章节归入对应模块。\n"
+        "5. 只输出 JSON，不要任何解释文字。\n"
+        '输出格式：{"assignments":{"technical":["SEC-0012"],"commercial":["SEC-0040"]},'
+        '"reason":"简短理由"}'
+    )
+    lines = [
+        f'{row["sectionId"]} | L{row["level"]} | 段数={row["segCount"]} | {row["heading"]}'
+        for row in rows
+    ]
+    user = "章节清单：\n" + "\n".join(lines)
+    return system, user
+
+
+def _llm_review_sections(
+    targets: list[dict[str, Any]],
+    indexes: Mapping[str, Any],
+    ai: Mapping[str, Any],
+    diagnostics: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Additive section reassignment.  Never moves or deletes; only claims
+    segments that no content target currently owns."""
+
+    diagnostics["llmSectionReviewCalled"] = False
+    diagnostics["llmSectionReviewSuccess"] = False
+    diagnostics["llmSectionReviewAddedSegments"] = 0
+    diagnostics["llmSectionReviewAddedSections"] = 0
+    diagnostics["llmSectionReviewError"] = ""
+    if not _llm_ready(ai) or not targets:
+        return targets
+
+    # 内容目标当前拥有的段：这些段不允许被认领（只能补“漏”）。
+    claimed: set[str] = set()
+    for target in targets:
+        if str(target.get("targetModule") or "") in _SECTION_REVIEW_CONTENT_KEYS:
+            for segment_id in target.get("segmentIds") or []:
+                if segment_id in indexes["segmentMap"]:
+                    claimed.add(segment_id)
+
+    rows, truncated = _section_review_inventory(indexes, claimed)
+    diagnostics["llmSectionReviewSectionCount"] = len(rows)
+    diagnostics["llmSectionReviewTruncated"] = truncated
+    if not rows:
+        return targets
+
+    system, user = _section_review_prompt(rows)
+    limits = _target_review_limits(ai)
+    max_tokens = min(max(int(limits["maxTokens"]), 2600), 8000)
+    diagnostics["llmSectionReviewCalled"] = True
+    result = call_openai_compatible(
+        {**dict(ai), "timeoutSeconds": limits["sectionTimeoutSeconds"]},
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=max_tokens,
+        temperature=0,
+        max_attempts=limits["maxAttempts"],
+    )
+    if not result.get("success"):
+        diagnostics["llmSectionReviewError"] = _text(result.get("error"), 300)
+        return targets
+
+    payload = _json_object(str(result.get("content") or ""))
+    assignments = (payload or {}).get("assignments")
+    if not isinstance(assignments, dict):
+        diagnostics["llmSectionReviewError"] = "未返回可解析的章节归属 JSON"
+        return targets
+    diagnostics["llmSectionReviewReason"] = _text(
+        (payload or {}).get("reason"), 300
+    )
+
+    valid_sections = {row["sectionId"] for row in rows}
+    claims: dict[str, list[str]] = defaultdict(list)
+    for key, values in assignments.items():
+        if key not in _SECTION_REVIEW_APPLY_KEYS or not isinstance(values, list):
+            continue
+        for value in values:
+            section_id = _id(value)
+            if section_id in valid_sections:
+                claims[section_id].append(key)
+
+    assignment: dict[str, list[str]] = defaultdict(list)
+    for section_id, keys in claims.items():
+        if len(set(keys)) == 1:
+            assignment[keys[0]].append(section_id)
+
+    diagnostics["llmSectionReviewAssignments"] = {
+        key: len(section_ids) for key, section_ids in assignment.items()
+    }
+    diagnostics["llmSectionReviewSuccess"] = True
+
+    targets_by_key = {str(t.get("targetModule")): t for t in targets}
+    added_segments = 0
+    added_sections = 0
+    added_by_target: dict[str, int] = {}
+    touched: set[str] = set()
+    for key, section_ids in assignment.items():
+        target = targets_by_key.get(key)
+        if target is None:
+            continue
+        current = set(target.get("segmentIds") or [])
+        for section_id in section_ids[:_SECTION_REVIEW_MAX_SECTIONS_PER_TARGET]:
+            section = indexes["sectionMap"].get(section_id) or {}
+            fresh = [
+                sid for sid in _section_segment_ids(section, indexes)
+                if sid in indexes["segmentMap"]
+                and sid not in current
+                and sid not in claimed
+            ]
+            if not fresh:
+                continue
+            if added_segments + len(fresh) > _SECTION_REVIEW_MAX_ADDED_SEGMENTS:
+                break
+            current.update(fresh)
+            claimed.update(fresh)
+            added_segments += len(fresh)
+            added_sections += 1
+            added_by_target[key] = added_by_target.get(key, 0) + len(fresh)
+            touched.add(key)
+        if key in touched:
+            target["segmentIds"] = sorted(current, key=indexes["positions"].get)
+
+    for key in touched:
+        target = targets_by_key.get(key)
+        if target is None:
+            continue
+        _refresh_target_scope(target, indexes)
+        base = str(target.get("selectionSource") or "rule")
+        if "+section-review" not in base:
+            target["selectionSource"] = f"{base}+section-review"
+        target["sectionReviewedByLlm"] = True
+
+    diagnostics["llmSectionReviewAddedSegments"] = added_segments
+    diagnostics["llmSectionReviewAddedSections"] = added_sections
+    diagnostics["llmSectionReviewAddedByTarget"] = added_by_target
+    return targets
+
+
 def discover_target_ranges(
     *,
     segments: list[dict[str, Any]] | None,
@@ -3786,7 +4032,10 @@ def discover_target_ranges(
                 else f"{base_source}+review"
             )
             target = reviewed
-        target["ranges"] = _ranges_from_segments(target.get("segmentIds") or [], indexes)
+        target["ranges"] = _ranges_from_segments(
+            target.get("segmentIds") or [],
+            indexes,
+        )
         target["candidateSections"] = (
             rule_candidates.get(key, {}).get("candidateSections") or []
         )
@@ -3797,6 +4046,11 @@ def discover_target_ranges(
         target["selectedSectionCount"] = len(target.get("sectionIds") or [])
         target["selectedTableCount"] = len(target.get("tableIds") or [])
         targets.append(target)
+
+    # 章节级复核（补漏）放在唯一归属/连续性修复之前，让修复顺带清理认领后的
+    # 边界；未配置模型或调用失败时原样返回规则结果。
+    if _llm_ready(ai):
+        targets = _llm_review_sections(targets, indexes, ai or {}, diagnostics)
 
     repair_summary = _enforce_target_ownership_and_contiguity(targets, indexes)
     diagnostics["ownershipAndContiguity"] = repair_summary

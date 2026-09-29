@@ -19,12 +19,11 @@ import {
   Sparkles,
   Table2,
   Upload,
-  Trash2,
   Wrench,
   X,
   Archive
 } from "lucide-vue-next";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import { api } from "../../services/api";
 import type { MaterialFact, MatchSummary, ReasoningRow, ReviewOutput, Workspace } from "../../shared/types";
 
@@ -50,7 +49,6 @@ const emit = defineEmits<{
   openWorkspace: [];
   reanalyze: [];
   selectWorkspace: [workspace: Workspace];
-  deleteWorkspace: [workspace: Workspace];
 }>();
 
 type ModuleKey =
@@ -351,25 +349,6 @@ const extractionMode = ref<"builtin" | "workbuddy_agent_mcp">("builtin");
 const fileName = computed(() => props.importFile?.name || "");
 const historyWorkspaces = computed(() => [...props.workspaces].reverse());
 const auditRecords = computed(() => props.workspace?.auditRecords || []);
-
-async function confirmDeleteWorkspace(item: Workspace) {
-  const label = item.title || item.project?.title || item.projectId || "该项目";
-  try {
-    await ElMessageBox.confirm(
-      `确认删除「${label}」？将同时删除它的匹配结果、解析产物和关联抓取项目，删除后不可恢复。`,
-      "删除项目",
-      {
-        type: "warning",
-        confirmButtonText: "删除",
-        cancelButtonText: "取消",
-        confirmButtonClass: "el-button--danger",
-      }
-    );
-  } catch {
-    return;
-  }
-  emit("deleteWorkspace", item);
-}
 const latestAuditRecord = computed(() => auditRecords.value[auditRecords.value.length - 1] || null);
 
 const fineReview = computed(() => props.workspace?.reasoning.fineReview || null);
@@ -1530,6 +1509,34 @@ const riskCount = computed(() =>
   0
 );
 
+const productUncoveredCount = computed(() => {
+  const products = fineReview.value?.coverageBreakdown?.products;
+  if (!Array.isArray(products)) return 0;
+  return products.filter((p: any) => (p.score ?? 100) <= 50).length;
+});
+
+function historyGap(item: any): { label: string; tone: "danger" | "warning" | "success" } {
+  const fr = item?.reasoning?.fineReview;
+  if (!fr) {
+    // 公告阶段：沿用资格结论（尚未解析文件，保留原分数口径）
+    const ok = item?.reasoning?.eligibility?.shouldGetTenderDocument ?? item?.reasoning?.score >= 70;
+    return {
+      label: String(item?.reasoning?.score ?? item?.reasoning?.eligibility?.eligibilityScore ?? ""),
+      tone: ok ? "success" : "warning",
+    };
+  }
+  const hard = (fr.hardBlockers || []).length;
+  const pending = fr.pendingMaterialList?.length || 0;
+  const products = fr.coverageBreakdown?.products;
+  const uncovered = Array.isArray(products)
+    ? products.filter((p: any) => (p.score ?? 100) <= 50).length
+    : 0;
+  if (hard) return { label: `${hard} 否决`, tone: "danger" };
+  if (pending) return { label: `${pending} 待补`, tone: "warning" };
+  if (uncovered) return { label: `${uncovered} 未覆盖`, tone: "warning" };
+  return { label: "已核验", tone: "success" };
+}
+
 const rejectionPendingCount = computed(() =>
   fineSummary.value?.rejectionPendingCount ||
   rowsForModule("rejection").filter((row) => ["待核查", "待澄清"].includes(displayStatus(row))).length ||
@@ -1946,16 +1953,13 @@ watch(
           </template>
 
           <div v-if="historyWorkspaces.length" class="match-history-list">
-            <div
+            <button
               v-for="item in historyWorkspaces"
               :key="item.id"
+              type="button"
               class="match-history-item"
               :class="{ 'match-history-item--active': item.id === workspace?.id }"
-              role="button"
-              tabindex="0"
               @click="emit('selectWorkspace', item)"
-              @keydown.enter.prevent="emit('selectWorkspace', item)"
-              @keydown.space.prevent="emit('selectWorkspace', item)"
             >
               <span class="match-history-item-main">
                 <strong>{{ item.title || item.project.title || "未命名项目" }}</strong>
@@ -1969,26 +1973,14 @@ watch(
               <span class="match-history-item-side">
                 <el-tag
                   size="small"
-                  :type="item.reasoning.fineReview
-                    ? ((item.reasoning.fineReview.hardBlockers || []).length ? 'danger' : 'success')
-                    : ((item.reasoning.eligibility?.shouldGetTenderDocument ?? item.reasoning.score >= 70) ? 'success' : 'warning')"
+                  :type="historyGap(item).tone"
                   effect="plain"
                 >
-                  {{ item.reasoning.fineReview?.score ?? item.reasoning.eligibility?.eligibilityScore ?? item.reasoning.score }}
+                  {{ historyGap(item).label }}
                 </el-tag>
-                <el-button
-                  :icon="Trash2"
-                  size="small"
-                  text
-                  type="danger"
-                  :disabled="busy"
-                  title="删除该项目"
-                  aria-label="删除该项目"
-                  @click.stop="confirmDeleteWorkspace(item)"
-                />
                 <el-icon><ChevronRight /></el-icon>
               </span>
-            </div>
+            </button>
           </div>
           <el-empty v-else description="暂无历史匹配项目" />
         </el-card>
@@ -2031,9 +2023,9 @@ watch(
             <span v-else class="decision-note">当前为公告资格粗匹配，获取完整文件后可展开技术与商务判断。</span>
           </div>
           <div class="decision-strip-stats">
-            <span><strong>{{ riskCount }}</strong> 否决风险</span>
+            <span><strong>{{ productUncoveredCount }}</strong> 产品未覆盖</span>
             <span><strong>{{ missingMaterialCount }}</strong> 待补材料</span>
-            <span><strong>{{ statusCounts.notSatisfied }}</strong> 不满足</span>
+            <span><strong>{{ riskCount }}</strong> 否决风险</span>
           </div>
         </div>
 

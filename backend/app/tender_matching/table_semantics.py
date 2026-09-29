@@ -67,6 +67,14 @@ def _header_row(table: Mapping[str, Any]) -> tuple[int, list[str]]:
 
 
 def _product_column(header_cells: list[str]) -> tuple[int | None, str]:
+    # 先做「精确列名」匹配：避免「品目名称」作为子串误命中「采购品目名称」，
+    # 把品目类别（如 A02102100 教学仪器）当成产品名，而漏掉真正的「标的名称」列。
+    for index, cell in enumerate(header_cells):
+        compact = _compact(cell)
+        for term in PRODUCT_HEADER_TERMS:
+            if _compact(term) == compact:
+                return index, _text(cell, 80)
+    # 再回退到「子串」匹配：处理「采购品目名称」这类带前缀、且没有更好列名的情况。
     for index, cell in enumerate(header_cells):
         compact = _compact(cell)
         for term in PRODUCT_HEADER_TERMS:

@@ -308,54 +308,6 @@ def _status(parse_method: str, text: str, segments: list[DocumentSegment]) -> st
     return "empty"
 
 
-# documentBlocks 只持久化 units（叶子单元）。segments 是 units 中“非表格单元格”的
-# 子集，该包含关系由 document_parser 各分支的构造保证（docx 为
-# units = segments ∪ 表格单元格单元，pdf/文本为 units = segments.copy()），
-# 因此可以精确还原，不需要重复落盘。
-_TABLE_CELL_CONTENT_MARKER = "cell"
-
-
-def _is_table_cell_unit(unit: Mapping[str, Any]) -> bool:
-    return _TABLE_CELL_CONTENT_MARKER in str(unit.get("contentType") or "").lower()
-
-
-def derive_segments_from_units(units: Any) -> list[dict[str, Any]]:
-    """从叶子单元还原逻辑段落/表格行（过滤掉表格单元格单元）。"""
-
-    return [
-        dict(item)
-        for item in _as_list(units)
-        if isinstance(item, Mapping) and not _is_table_cell_unit(item)
-    ]
-
-
-def document_segments(document_blocks: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    """读取 documentBlocks 的 segments：旧数据直接读，新数据由 units 还原。"""
-
-    blocks = _as_dict(document_blocks)
-    persisted = [
-        dict(item)
-        for item in _as_list(blocks.get("segments"))
-        if isinstance(item, Mapping)
-    ]
-    if persisted:
-        return persisted
-    return derive_segments_from_units(blocks.get("units"))
-
-
-def strip_derivable_segments(document_blocks: Mapping[str, Any] | None) -> dict[str, Any]:
-    """落盘前去掉可由 units 还原的 segments，避免段落/表格行重复存储。
-
-    仅在 units 非空时剥离：units 为空说明该解析分支没有产出叶子单元，
-    此时保留 segments 以免丢失正文。
-    """
-
-    blocks = _as_dict(document_blocks)
-    if _as_list(blocks.get("units")):
-        blocks.pop("segments", None)
-    return blocks
-
-
 def document_ir_from_parsed(
     parsed: Mapping[str, Any],
     *,
@@ -380,7 +332,7 @@ def document_ir_from_parsed(
         or generated_version
     )
 
-    segments = [_segment(item) for item in document_segments(raw) if isinstance(item, Mapping)]
+    segments = [_segment(item) for item in _as_list(raw.get("segments")) if isinstance(item, Mapping)]
     units = [_segment(item) for item in _as_list(raw.get("units")) if isinstance(item, Mapping)]
     tables = [
         DocumentTable.model_validate(item)

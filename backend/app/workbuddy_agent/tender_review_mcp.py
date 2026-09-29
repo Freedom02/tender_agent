@@ -268,6 +268,65 @@ def _autofill_template_locators(value: Any) -> list[str]:
     return warnings
 
 
+def _autofill_range_sources(value: Any) -> list[str]:
+    """Auto-fill a source reference on ranges the agent forgot to annotate.
+
+    ``DocumentRange`` requires at least one source reference (schemas.py:137),
+    but a single omitted field should not reject an otherwise complete map.
+    The fallback reuses the parent section's own source IDs (sectionIds ->
+    sectionIds, sourceSegmentIds -> segmentIds, tableIds -> tableIds), which is
+    lossless and records a warning instead of failing validation.
+    """
+    warnings: list[str] = []
+    if not isinstance(value, Mapping):
+        return warnings
+    sections = value.get("sections")
+    if not isinstance(sections, list):
+        return warnings
+    for index, section in enumerate(sections):
+        if not isinstance(section, Mapping):
+            continue
+        ranges = section.get("ranges")
+        if not isinstance(ranges, list):
+            continue
+
+        def _as_str_list(field: str) -> list[str]:
+            raw = section.get(field) or []
+            if not isinstance(raw, list):
+                raw = [raw] if raw else []
+            return [str(item) for item in raw if str(item).strip()]
+
+        section_ids = _as_str_list("sectionIds")
+        # A section annotates segments as sourceSegmentIds; a range annotates
+        # the same segments as segmentIds (schemas.py:109 vs :131).
+        segment_ids = _as_str_list("sourceSegmentIds")
+        table_ids = _as_str_list("tableIds")
+
+        for ridx, rng in enumerate(ranges):
+            if not isinstance(rng, Mapping):
+                continue
+            if (
+                rng.get("startSegmentId")
+                or rng.get("endSegmentId")
+                or rng.get("segmentIds")
+                or rng.get("sectionIds")
+                or rng.get("tableIds")
+                or (rng.get("source") or {}).get("segmentIds")
+                or (rng.get("source") or {}).get("sectionIds")
+            ):
+                continue
+            if not (section_ids or segment_ids or table_ids):
+                continue
+            if section_ids:
+                rng["sectionIds"] = list(section_ids)
+            if segment_ids:
+                rng["segmentIds"] = list(segment_ids)
+            if table_ids:
+                rng["tableIds"] = list(table_ids)
+            warnings.append(f"mcp_autofilled_range_source:{index}:{ridx}")
+    return warnings
+
+
 def _unwrap_document_map_array_wrappers(
     value: Any,
     *,
@@ -337,13 +396,17 @@ class TenderReviewMCPServer:
         run: AgentRun | Mapping[str, Any] | None = None,
         artifact_path: str | Path | None = None,
     ):
-        self.document = (
-            document
-            if isinstance(document, DocumentIR)
-            else DocumentIR.model_validate(document)
-        )
-        self.service = DocumentReadService(self.document)
-        self.run = self._resolve_run(run)
+        # Defer DocumentIR validation so the MCP initialize/tools-list handshake
+        # answers immediately. A 5MB+ bootstrap (large tender documents) can
+        # take seconds to validate; that delay makes the CodeBuddy CLI's
+        # tools/list handshake time out and surface as a transient
+        # "Tool inspect_document not found" flake.
+        self._document_raw: DocumentIR | Mapping[str, Any] = document
+        self._run_raw: AgentRun | Mapping[str, Any] | None = run
+        self._ready = False
+        self.document: DocumentIR | None = None
+        self.service: DocumentReadService | None = None
+        self.run: AgentRun | None = None
         self.document_maps: dict[str, DocumentMap] = {}
         self.unresolved_issues: list[UnresolvedIssue] = []
         self.candidate_findings: list[CandidateFinding] = []
@@ -404,6 +467,24 @@ class TenderReviewMCPServer:
                 "AgentRun documentVersionId does not match the bound document.",
             )
         return resolved
+
+    def _ensure_ready(self) -> None:
+        """Load the bound document (lazily) on first tool use.
+
+        The handshake methods (initialize, tools/list, ping) never touch the
+        document, so keeping validation out of ``__init__`` lets them answer
+        fast and avoids the CLI's handshake timeout on large documents.
+        """
+        if self._ready:
+            return
+        self.document = (
+            self._document_raw
+            if isinstance(self._document_raw, DocumentIR)
+            else DocumentIR.model_validate(self._document_raw)
+        )
+        self.service = DocumentReadService(self.document)
+        self.run = self._resolve_run(self._run_raw)
+        self._ready = True
 
     @staticmethod
     def _schema(model: type[BaseModel]) -> dict[str, Any]:
@@ -566,6 +647,7 @@ class TenderReviewMCPServer:
         name: str,
         arguments: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._ensure_ready()
         if name not in self._dispatch:
             error = DocumentReadError(
                 "tool_not_found",
@@ -706,6 +788,7 @@ class TenderReviewMCPServer:
             document_map_payload
         )
         contract_warnings.extend(_autofill_template_locators(document_map_payload))
+        contract_warnings.extend(_autofill_range_sources(document_map_payload))
         validation = validate_document_map(
             document_map_payload,
             sections=self.document.sections,
@@ -895,6 +978,7 @@ class TenderReviewMCPServer:
         }
 
     def audit_snapshot(self) -> dict[str, Any]:
+        self._ensure_ready()
         return {
             "schemaVersion": MCP_SERVER_VERSION,
             "toolPolicyVersion": MCP_TOOL_POLICY_VERSION,
