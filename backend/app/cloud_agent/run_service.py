@@ -201,17 +201,17 @@ class CloudRunService:
             parse_bundle_artifact = str(parse_bundle_path.relative_to(self.root)).replace("\\", "/")
             parse_bundle_payload["artifactPath"] = parse_bundle_artifact
             parse_bundle_path.write_text(
-                json.dumps(parse_bundle_payload, ensure_ascii=False, indent=2),
+                json.dumps(parse_bundle_payload, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             run_parse_bundle_path = run_dir / "parse-bundle.json"
             if run_parse_bundle_path != parse_bundle_path:
                 run_parse_bundle_path.write_text(
-                    json.dumps(parse_bundle_payload, ensure_ascii=False, indent=2),
+                    json.dumps(parse_bundle_payload, ensure_ascii=False, separators=(",", ":")),
                     encoding="utf-8",
                 )
             output_path.write_text(
-                json.dumps(result_payload, ensure_ascii=False, indent=2),
+                json.dumps(result_payload, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             self.repository.update(

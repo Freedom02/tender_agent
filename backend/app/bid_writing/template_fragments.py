@@ -945,7 +945,7 @@ def attach_template_fragments_to_bundle(
             artifact = fragment_dir / f"{template_id}.json"
             fragment["fragmentArtifact"] = str(artifact.relative_to(root)).replace("\\", "/")
             artifact.write_text(
-                json.dumps(fragment, ensure_ascii=False, indent=2),
+                json.dumps(fragment, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
         index_path = fragment_dir / "index.json"
@@ -959,7 +959,7 @@ def attach_template_fragments_to_bundle(
                     "templateFragments": fragments,
                 },
                 ensure_ascii=False,
-                indent=2,
+                separators=(",", ":"),
             ),
             encoding="utf-8",
         )

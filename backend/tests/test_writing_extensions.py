@@ -290,6 +290,20 @@ class WritingExtensionsTests(unittest.TestCase):
                 "",
             )
 
+    def test_save_parse_bundle_writes_compact_json(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._store(root)
+            bundle_path = (
+                root / "runtime" / "projects" / "p-01" / "parse" / "parse-bundle.json"
+            )
+            raw = bundle_path.read_text(encoding="utf-8")
+            # 紧凑写盘：无缩进换行，避免大解析产物体积翻倍。
+            self.assertNotIn("\n  ", raw)
+            self.assertEqual(json.loads(raw)["parseBundleId"], "parse-001")
+
 
 if __name__ == "__main__":
     unittest.main()

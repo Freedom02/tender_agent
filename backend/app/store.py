@@ -567,7 +567,7 @@ class Store:
             }
         )
         payload = bundle.model_dump(mode="json")
-        write_json(target, payload)
+        write_json(target, payload, compact=True)
         return payload
 
     def get_parse_bundle(self, workspace_id: str) -> dict[str, Any] | None:

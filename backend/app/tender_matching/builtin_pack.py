@@ -213,7 +213,7 @@ def write_tender_pack(
     latest = directory / "tender_pack.json"
     temporary = latest.with_suffix(".json.tmp")
     temporary.write_text(
-        json.dumps(pack, ensure_ascii=False, indent=2),
+        json.dumps(pack, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
     temporary.replace(latest)
@@ -223,7 +223,7 @@ def write_tender_pack(
         archived = archive / f"tender_pack.{_safe_dir_name(job_id)}.json"
         if not archived.exists():
             archived.write_text(
-                json.dumps(pack, ensure_ascii=False, indent=2),
+                json.dumps(pack, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
     return latest
