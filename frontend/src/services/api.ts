@@ -219,6 +219,8 @@ export const api = {
       body: JSON.stringify({ config: { ai } })
     }),
   piPreflight: () => request<Record<string, any>>("/api/config/pi/preflight"),
+  workspaceDetail: (workspaceId: string) =>
+    request<Workspace>(`/api/workspaces/${encodeURIComponent(workspaceId)}`),
   deleteWorkspace: (workspaceId: string) =>
     request<{
       success: boolean;
