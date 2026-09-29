@@ -162,4 +162,20 @@ def create_router(store: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail="工作区不存在")
         return result
 
+    @router.post("/api/workspaces/{workspace_id}/bid-document/evidence-chapter")
+    def build_evidence_chapter(workspace_id: str) -> dict[str, Any]:
+        """一键生成/刷新「技术参数证明材料」章节：逐条挂上已匹配的证明材料。"""
+        result = store.build_evidence_chapter(workspace_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区不存在")
+        return result
+
+    @router.get("/api/workspaces/{workspace_id}/bid-document/evidence-chapter")
+    def preview_evidence_chapter(workspace_id: str) -> dict[str, Any]:
+        """预览逐条技术要求 → 证明材料的映射（只读，不写盘）。"""
+        result = store.evidence_chapter_preview(workspace_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区不存在")
+        return result
+
     return router

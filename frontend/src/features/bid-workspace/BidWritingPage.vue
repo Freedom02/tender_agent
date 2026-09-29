@@ -38,6 +38,8 @@ import type {
   BidSection,
   CatalogItem,
   CloudBidRun,
+  EvidenceChapterPreview,
+  EvidenceEntry,
   LibrarySummary,
   MaterialProfile,
   SubmissionStructure,
@@ -80,6 +82,9 @@ const rewritingSectionId = ref("");
 const reviewingCompliance = ref(false);
 const savingSectionId = ref("");
 const exporting = ref(false);
+const buildingEvidence = ref(false);
+const evidencePreview = ref<EvidenceChapterPreview | null>(null);
+const evidencePanelOpen = ref(false);
 const previewingExport = ref(false);
 const exportFiles = ref<{ name: string; url: string }[]>([]);
 const exportPreviewVisible = ref(false);
@@ -1624,6 +1629,54 @@ function regenerateToc() {
   void generateToc();
 }
 
+async function loadEvidencePreview() {
+  if (!workspaceId.value) return;
+  try {
+    evidencePreview.value = await api.bidDocumentEvidencePreview(workspaceId.value);
+  } catch {
+    evidencePreview.value = null;
+  }
+}
+
+async function buildEvidenceChapter() {
+  if (!workspaceId.value) {
+    ElMessage.warning("请先选择工作区");
+    return;
+  }
+  if (!bidDocument.value) {
+    ElMessage.warning("请先回到上一步生成目录");
+    return;
+  }
+  buildingEvidence.value = true;
+  try {
+    const result = await api.bidDocumentBuildEvidenceChapter(workspaceId.value);
+    bidDocument.value = result.bidDocument;
+    emit("update:bid-document", result.bidDocument);
+    await loadEvidencePreview();
+    evidencePanelOpen.value = true;
+    ElMessage.success(result.message || "技术参数证明材料章节已生成");
+  } catch (error) {
+    ElMessage.error((error as Error).message);
+  } finally {
+    buildingEvidence.value = false;
+  }
+}
+
+function openEvidenceSection() {
+  goStep(3);
+  void nextTick(() => scrollToSection(evidencePreview.value?.sectionId || "evidence-01"));
+}
+
+function evidenceEntryState(entry: EvidenceEntry): { type: "success" | "warning" | "danger" | "info"; label: string } {
+  if (entry.status !== "ready") {
+    return { type: "danger", label: "待人工补充" };
+  }
+  if (entry.sourceRefs.some((ref) => ref.available === false)) {
+    return { type: "warning", label: "待补扫描件" };
+  }
+  return { type: "success", label: "已命中" };
+}
+
 async function fillTemplate(sectionId: string) {
   if (!workspaceId.value || !sectionId) {
     ElMessage.warning("请先选择要填充的章节");
@@ -2085,6 +2138,16 @@ async function previewExport() {
               >
                 按当前规则重算目录
               </el-button>
+              <el-button
+                size="small"
+                text
+                type="primary"
+                :icon="FileText"
+                :loading="buildingEvidence"
+                @click="buildEvidenceChapter"
+              >
+                一键插入技术参数证明材料
+              </el-button>
               <el-tag v-if="planningSourceKey(bidDocument)" size="small" :type="planSourceTag(planningSourceKey(bidDocument), bidDocument)" effect="plain">
                 {{ planSourceLabel(planningSourceKey(bidDocument)) }}
               </el-tag>
@@ -2262,6 +2325,47 @@ async function previewExport() {
           </el-tree>
         </div>
 
+      </el-card>
+
+      <el-card v-if="evidencePreview" class="panel" shadow="never">
+        <template #header>
+          <div class="panel-header">
+            <div class="result-title"><el-icon><FileText /></el-icon><span>技术参数证明材料</span></div>
+            <div class="header-tags">
+              <el-tag size="small" type="info" effect="plain">共 {{ evidencePreview.summary.total }} 条</el-tag>
+              <el-tag size="small" type="success" effect="plain">命中 {{ evidencePreview.summary.ready }}</el-tag>
+              <el-tag size="small" type="warning" effect="plain">待补扫描 {{ (evidencePreview.summary.ready || 0) - (evidencePreview.summary.scannedReady || 0) }}</el-tag>
+              <el-tag size="small" type="danger" effect="plain">待人工补 {{ evidencePreview.summary.missing }}</el-tag>
+              <el-button size="small" text type="primary" @click="openEvidenceSection">查看正文</el-button>
+            </div>
+          </div>
+        </template>
+        <div class="evidence-entry-list">
+          <div
+            v-for="entry in evidencePreview.entries"
+            :key="entry.sequence"
+            class="evidence-entry"
+          >
+            <div class="evidence-entry-head">
+              <span class="evidence-entry-seq">#{{ entry.sequence }}</span>
+              <span class="evidence-entry-title" :title="entry.requirement">{{ entry.requirement }}</span>
+              <el-tag size="small" :type="evidenceEntryState(entry).type" effect="plain">
+                {{ evidenceEntryState(entry).label }}
+              </el-tag>
+            </div>
+            <div v-if="entry.sourceRefs.length" class="evidence-entry-refs">
+              <span
+                v-for="ref in entry.sourceRefs"
+                :key="ref.evidencePath"
+                class="evidence-ref"
+                :class="{ 'evidence-ref-missing': ref.available === false }"
+                :title="ref.evidencePath"
+              >
+                {{ ref.available === false ? "◌" : "●" }} {{ ref.evidencePath }}
+              </span>
+            </div>
+          </div>
+        </div>
       </el-card>
 
       <div class="step-actions">
@@ -2981,6 +3085,54 @@ async function previewExport() {
   gap: 8px;
   font-weight: 600;
   color: var(--text-primary);
+}
+.evidence-entry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 480px;
+  overflow: auto;
+}
+.evidence-entry {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.evidence-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.evidence-entry-seq {
+  flex: none;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.evidence-entry-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.evidence-entry-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+}
+.evidence-ref {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  font-family: var(--el-font-family-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.evidence-ref-missing {
+  color: var(--el-color-warning);
 }
 .panel-title {
   font-weight: 600;

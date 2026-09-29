@@ -666,6 +666,54 @@ export interface BidSection {
   editHistory?: Record<string, unknown>[];
 }
 
+export interface EvidenceRef {
+  factKey?: string;
+  factId?: string;
+  name?: string;
+  evidencePath?: string;
+  /** 磁盘上是否真有扫描件（false = 已匹配到证据位但原件尚未上传） */
+  available?: boolean;
+  [key: string]: unknown;
+}
+
+export interface EvidenceEntry {
+  sequence: number;
+  requirementId: string;
+  requirement: string;
+  category: string;
+  matchStatus: string;
+  matchReason: string;
+  gaps: string[];
+  materials: {
+    materialId?: string;
+    name?: string;
+    description?: string;
+    evidencePath?: string;
+    sourceGroup?: string;
+    verificationStatus?: string;
+  }[];
+  sourceRefs: EvidenceRef[];
+  status: "ready" | "missing" | string;
+}
+
+export interface EvidenceChapterSummary {
+  total: number;
+  ready: number;
+  missing: number;
+  distinctEvidence?: number;
+  /** 已匹配到证据的条目中，原件真正已上传的条数 */
+  scannedReady?: number;
+  scannedTotal?: number;
+}
+
+export interface EvidenceChapterPreview {
+  sectionId: string;
+  exists: boolean;
+  entries: EvidenceEntry[];
+  summary: EvidenceChapterSummary;
+  blanksToFill: string[];
+}
+
 export interface DeviationRow {
   clause?: string;
   requirement?: string;

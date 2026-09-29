@@ -3387,6 +3387,207 @@ class Store:
             "section": section,
         }
 
+    # ------------------------------------------------------------------ 证明材料
+    def _evidence_chapter_inputs(
+        self,
+        workspace_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+        """准备证明材料章节所需的 workspace / bid_doc / fine_review / parse_bundle。"""
+
+        workspace = self.workspaces.get(workspace_id)
+        if not workspace:
+            return None
+        if not isinstance(workspace.get("bidDocument"), dict):
+            self.plan_bid_document(workspace_id)
+        bid_doc = workspace.get("bidDocument") or {}
+        reasoning = (
+            workspace.get("reasoning")
+            if isinstance(workspace.get("reasoning"), dict)
+            else {}
+        )
+        fine_review = (
+            reasoning.get("fineReview")
+            if isinstance(reasoning.get("fineReview"), dict)
+            else {}
+        )
+        parse_bundle = self.get_parse_bundle(workspace_id) or {}
+        return workspace, bid_doc, fine_review, parse_bundle
+
+    @staticmethod
+    def _ensure_evidence_section(bid_doc: dict[str, Any]) -> dict[str, Any]:
+        """确保「技术参数证明材料」章节及其分组存在于 plan 中，返回该章节。"""
+
+        from .bid_writing.evidence_chapter import (
+            EVIDENCE_SECTION_GROUP_ID,
+            EVIDENCE_SECTION_ID,
+            build_evidence_chapter_section,
+            build_evidence_group_section,
+        )
+
+        plan = bid_doc.get("plan")
+        if not isinstance(plan, list):
+            plan = []
+            bid_doc["plan"] = plan
+
+        section = next(
+            (
+                item
+                for item in plan
+                if isinstance(item, dict)
+                and str(item.get("sectionId") or "") == EVIDENCE_SECTION_ID
+            ),
+            None,
+        )
+        if isinstance(section, dict):
+            return section
+
+        if not any(
+            isinstance(item, dict)
+            and str(item.get("sectionId") or "") == EVIDENCE_SECTION_GROUP_ID
+            for item in plan
+        ):
+            plan.append(build_evidence_group_section())
+
+        section = build_evidence_chapter_section()
+        # 紧跟分组之后、附件类章节之前，符合"四、其他资料"的位置习惯
+        section["order"] = max(
+            [
+                int(item.get("order") or 0)
+                for item in plan
+                if isinstance(item, dict)
+                and str(item.get("parentSectionId") or "") == EVIDENCE_SECTION_GROUP_ID
+            ]
+            or [0]
+        ) + 1
+        plan.append(section)
+        return section
+
+    def _annotate_evidence_availability(self, section: dict[str, Any]) -> dict[str, int]:
+        """给证明材料章节的每个证据引用标注磁盘上是否真有扫描件。
+
+        匹配结果保证"这条要求有对应证据位"，但证据原件可能尚未扫描上传（目录里
+        只有占位 txt/.keep）。这里逐个 evidencePath 探测一次，把「已匹配」与
+        「原件已上传」拆开，避免把占位误报成可用证据。
+        """
+
+        from .media_store.local import LocalFolderStore
+
+        media = LocalFolderStore(self.runtime_root)
+        cache: dict[str, bool] = {}
+        for group in (section.get("evidenceGroups") or []):
+            if not isinstance(group, dict):
+                continue
+            for ref in (group.get("sourceRefs") or []):
+                if not isinstance(ref, dict):
+                    continue
+                path = str(ref.get("evidencePath") or "").strip()
+                if not path:
+                    continue
+                if path not in cache:
+                    asset = media.fetch({"evidencePath": path, "name": ""})
+                    cache[path] = bool(
+                        asset is not None and not getattr(asset, "placeholder", False)
+                    )
+                ref["available"] = bool(cache[path])
+        scanned_ready = sum(1 for ok in cache.values() if ok)
+        summary = section.get("evidenceSummary")
+        if not isinstance(summary, dict):
+            summary = {}
+        summary["scannedReady"] = scanned_ready
+        summary["scannedTotal"] = len(cache)
+        section["evidenceSummary"] = summary
+        return summary
+
+    def build_evidence_chapter(self, workspace_id: str) -> dict[str, Any] | None:
+        """一键生成/刷新「技术参数证明材料」章节（纯确定性，不调 LLM）。
+
+        逐条复用细评审已匹配到的 M3 材料，把每条技术要求的证明材料（图片 /
+        PDF 页 / docx 内嵌截图）挂到章节上，导出时按条插入。
+        """
+
+        prepared = self._evidence_chapter_inputs(workspace_id)
+        if prepared is None:
+            return None
+        workspace, bid_doc, fine_review, _parse_bundle = prepared
+
+        from .bid_writing.evidence_chapter import (
+            build_evidence_chapter_result,
+            build_evidence_entries,
+        )
+
+        self._refresh_company_from_m3(force=True)
+        section = self._ensure_evidence_section(bid_doc)
+        entries = build_evidence_entries(fine_review, self.company_knowledge)
+        result = build_evidence_chapter_result(section, entries)
+
+        section["content"] = result["content"]
+        section["evidenceEntries"] = result["evidenceEntries"]
+        section["evidenceGroups"] = result["evidenceGroups"]
+        section["sourceRefs"] = result["sourceRefs"]
+        section["blanksToFill"] = result["blanksToFill"]
+        section["status"] = result["status"]
+        section["source"] = section.get("source") or "attachment"
+        section["kind"] = section.get("kind") or "attachment"
+        section["responseType"] = section.get("responseType") or "attachment"
+        section["evidenceSummary"] = result["summary"]
+        section["provider"] = "local"
+
+        summary = self._annotate_evidence_availability(section)
+
+        bid_doc["status"] = "generated"
+        self._invalidate_compliance_review(bid_doc)
+        workspace["bidDocument"] = bid_doc
+        self.persist_runtime()
+        return {
+            "bidDocument": bid_doc,
+            "section": section,
+            "summary": summary,
+            "message": (
+                f"已按 {result['summary']['total']} 条技术要求生成证明材料章节："
+                f"{result['summary']['ready']} 条匹配到证据"
+                f"（其中 {summary.get('scannedReady', 0)} 条原件已上传、"
+                f"{result['summary']['ready'] - summary.get('scannedReady', 0)} 条待补扫描件），"
+                f"{result['summary']['missing']} 条需人工补充材料。"
+            ),
+        }
+
+    def evidence_chapter_preview(self, workspace_id: str) -> dict[str, Any] | None:
+        """预览逐条技术要求的证明材料映射（只读，不写盘）。"""
+
+        prepared = self._evidence_chapter_inputs(workspace_id)
+        if prepared is None:
+            return None
+        _workspace, bid_doc, fine_review, _parse_bundle = prepared
+
+        from .bid_writing.evidence_chapter import (
+            build_evidence_chapter_result,
+            build_evidence_entries,
+        )
+
+        self._refresh_company_from_m3(force=True)
+        section = next(
+            (
+                item
+                for item in (bid_doc.get("plan") or [])
+                if isinstance(item, dict) and str(item.get("sectionId") or "") == "evidence-01"
+            ),
+            None,
+        )
+        entries = build_evidence_entries(fine_review, self.company_knowledge)
+        result = build_evidence_chapter_result(section, entries)
+        summary = self._annotate_evidence_availability(
+            {"evidenceGroups": result["evidenceGroups"],
+             "evidenceSummary": result["summary"]}
+        )
+        return {
+            "sectionId": str((section or {}).get("sectionId") or "evidence-01"),
+            "exists": isinstance(section, dict),
+            "entries": result["evidenceEntries"],
+            "groups": result["evidenceGroups"],
+            "summary": summary,
+            "blanksToFill": result["blanksToFill"],
+        }
+
     def rewrite_bid_section(
         self,
         workspace_id: str,

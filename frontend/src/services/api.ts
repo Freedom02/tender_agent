@@ -6,6 +6,8 @@ import type {
   CatalogItem,
   CloudBidRun,
   ComplianceReviewResult,
+  EvidenceChapterSummary,
+  EvidenceEntry,
   EvidenceFilesResponse,
   ImportResult,
   MaterialFact,
@@ -339,6 +341,27 @@ export const api = {
     ),
   proofread: (workspaceId: string) =>
     request<ProofreadResult>(`/api/workspaces/${encodeURIComponent(workspaceId)}/proofread`),
+  // ---- 技术参数证明材料 ----
+  bidDocumentBuildEvidenceChapter: (workspaceId: string) =>
+    request<{
+      bidDocument: BidDocument;
+      section: BidSection;
+      summary: EvidenceChapterSummary;
+      message: string;
+    }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/evidence-chapter`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+  bidDocumentEvidencePreview: (workspaceId: string) =>
+    request<{
+      sectionId: string;
+      exists: boolean;
+      entries: EvidenceEntry[];
+      summary: EvidenceChapterSummary;
+      blanksToFill: string[];
+    }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/evidence-chapter`
+    ),
   complianceReview: (workspaceId: string) =>
     request<ComplianceReviewResult & { bidDocument: BidDocument }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/compliance-review`,

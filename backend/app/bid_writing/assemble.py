@@ -204,26 +204,92 @@ def markdown_to_docx(document: Document, markdown_text: str) -> None:
 # 章节 / 偏离表渲染
 # ---------------------------------------------------------------------------
 def _insert_asset(document: Document, asset: dict[str, Any], key: str) -> None:
-    """插入一条图文资产：图片直接插图 + 图注；否则输出附件占位。"""
+    """插入一条图文资产：逐页插图 + 图注；占位/无法渲染时输出附件占位。"""
     kind = str(asset.get("kind") or "")
     caption = str(asset.get("caption") or "").strip() or "证明材料"
     local_path = str(asset.get("local_path") or "").strip()
     page_count = int(asset.get("page_count") or 0)
     width_cm = float(asset.get("width_cm") or 14.0)
+    summary = str(asset.get("text_summary") or "").strip()
 
-    if kind == "image" and local_path and Path(local_path).exists():
-        try:
-            document.add_picture(local_path, width=Cm(width_cm))
-            document.add_paragraph(f"图：{caption}", style="Caption")
+    # 占位证据（证据扫描件尚未补齐）：明确提示人工补充，绝不插图。
+    if asset.get("placeholder"):
+        document.add_paragraph(
+            f"【待补充证据：{caption}（{key}，证据扫描件尚未补齐，请人工补充后再投标）】"
+        )
+        return
+
+    pages = [
+        str(path).strip()
+        for path in (asset.get("page_images") or [])
+        if str(path).strip()
+    ]
+    if kind == "image" and not pages and local_path:
+        pages = [local_path]
+    usable = [path for path in pages if Path(path).exists()]
+    if kind == "image" and usable:
+        inserted = 0
+        for index, path in enumerate(usable):
+            try:
+                document.add_picture(path, width=Cm(width_cm))
+                inserted += 1
+                suffix = f"（{index + 1}/{len(usable)}）" if len(usable) > 1 else ""
+                label = summary or caption
+                document.add_paragraph(f"图：{label}{suffix}", style="Caption")
+            except Exception:
+                continue  # 单页失败不中断，继续下一页
+        if inserted:
+            if len(usable) < len(pages):
+                document.add_paragraph(
+                    f"（{caption}：共 {len(pages)} 页，已插入前 {len(usable)} 页，其余请查原件）"
+                )
             return
-        except Exception:
-            pass  # 图片无法插入时回退为附件占位
 
     document.add_paragraph(f"【附件：{caption}（{key}，共 {page_count} 页）】")
 
 
 def _add_evidence_assets(document: Document, section: dict[str, Any], assets: dict[str, Any] | None) -> None:
-    """为章节溯源引用插入真实图文；有资产则插图，无资产/暗标则输出占位。"""
+    """为章节溯源引用插入真实图文；有资产则插图，无资产/暗标则输出占位。
+
+    若章节带 ``evidenceGroups``（技术参数证明材料章节），则按"要求 → 本条证据"
+    的顺序逐条交错插入，避免把所有证据堆在章节末尾。
+    """
+    groups = section.get("evidenceGroups")
+    if isinstance(groups, list) and groups:
+        inserted_group_keys: set[str] = set()
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            all_refs = [r for r in (group.get("sourceRefs") or []) if isinstance(r, dict)]
+            if not all_refs:
+                document.add_paragraph("【本条未命中企业证明材料，需人工补充】")
+                continue
+            insert_refs = [
+                r for r in (group.get("insertRefs") or []) if isinstance(r, dict)
+            ]
+            reused_refs = [
+                r for r in (group.get("reusedRefs") or []) if isinstance(r, dict)
+            ]
+            # 兼容旧载荷：无 insertRefs 时退回按 sourceRefs 逐条插入
+            if not insert_refs and not reused_refs:
+                insert_refs = all_refs
+            for ref in insert_refs:
+                key = str(ref.get("evidencePath") or "").strip()
+                if not key or key in inserted_group_keys:
+                    continue
+                inserted_group_keys.add(key)
+                asset = (assets or {}).get(key)
+                if asset:
+                    _insert_asset(document, asset, key)
+                else:
+                    document.add_paragraph(f"【附件：证据路径 {key}】")
+            for ref in reused_refs:
+                key = str(ref.get("evidencePath") or "").strip()
+                if not key:
+                    continue
+                document.add_paragraph(f"【证据原件见前文：{key}】")
+        return
+
     refs: list[dict[str, Any]] = []
     direct = section.get("evidencePath")
     if direct:
