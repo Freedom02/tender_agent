@@ -477,3 +477,74 @@ class BidPlanTreeTests(unittest.TestCase):
         # 偏离表没有评分点 → 不打评分注解
         self.assertNotIn("evaluationScore", by_id["d-01"])
         self.assertEqual(bid_document["evaluationStrategy"]["total"], 80.0)
+
+    def test_match_eval_section_does_not_apply_default(self) -> None:
+        from backend.app.bid_writing.planning import match_eval_section
+
+        self.assertEqual(match_eval_section("技术方案"), "t-02")
+        self.assertEqual(match_eval_section("售后服务方案"), "t-05")
+        # 无技术关键词命中时返回空串，避免把投标函/商务文件误挂成技术方案蓝图
+        self.assertEqual(match_eval_section("投标函"), "")
+        self.assertEqual(match_eval_section("商务响应文件"), "")
+        # 原私有映射仍保留 t-02 默认值，行为不变
+        from backend.app.bid_writing.planning import _eval_section_id
+
+        self.assertEqual(_eval_section_id("投标函"), "t-02")
+
+    def test_resolve_section_blueprint_by_id_and_title(self) -> None:
+        from backend.app.bid_writing.section_blueprints import (
+            resolve_section_blueprint,
+        )
+
+        by_id = resolve_section_blueprint({"sectionId": "t-05", "title": "任意标题"})
+        self.assertEqual(by_id["blueprintId"], "t-05")
+        self.assertEqual(by_id["name"], "售后服务方案")
+
+        # sectionId 不在固定池时按标题关键词归位
+        by_title = resolve_section_blueprint(
+            {"sectionId": "s-99", "title": "技术方案"}
+        )
+        self.assertEqual(by_title["blueprintId"], "t-02")
+
+        # 技术类但没有具体蓝图 → 通用兜底
+        generic = resolve_section_blueprint(
+            {"sectionId": "s-01", "title": "自定义论证", "kind": "technical"}
+        )
+        self.assertEqual(generic["blueprintId"], "generic")
+
+        # 非技术章节不挂蓝图
+        self.assertEqual(
+            resolve_section_blueprint(
+                {"sectionId": "c-01", "title": "投标函", "kind": "template"}
+            ),
+            {},
+        )
+
+    def test_attach_section_blueprints_annotates_plan(self) -> None:
+        from backend.app.bid_writing.section_blueprints import (
+            attach_section_blueprints,
+        )
+
+        bid_document = {
+            "plan": [
+                {
+                    "sectionId": "t-02",
+                    "title": "技术方案",
+                    "evaluationDepth": "primary",
+                },
+                {"sectionId": "c-01", "title": "投标函", "kind": "template"},
+            ]
+        }
+
+        summary = attach_section_blueprints(bid_document)
+
+        t02 = bid_document["plan"][0]
+        self.assertEqual(t02["sectionBlueprint"]["blueprintId"], "t-02")
+        self.assertIn("总体技术架构", t02["sectionBlueprint"]["skeleton"])
+        self.assertTrue(t02["sectionBlueprint"]["pitfalls"])
+        # evidenceSlots 供确定性材料注入，不进 prompt 视图
+        self.assertNotIn("evidenceSlots", t02["sectionBlueprint"])
+        # 非技术章节不注解
+        self.assertNotIn("sectionBlueprint", bid_document["plan"][1])
+        self.assertEqual(summary["t-02"]["depthPolicy"], "primary")
+        self.assertEqual(bid_document["sectionBlueprints"]["t-02"]["name"], "技术方案")

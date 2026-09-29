@@ -1747,6 +1747,7 @@ class Store:
             plan_from_outline,
         )
         from .bid_writing.evaluation_strategy import attach_evaluation_strategy
+        from .bid_writing.section_blueprints import attach_section_blueprints
         from .bid_writing.volumes import plan_from_submission_structure
         from .bid_writing.schemas import build_bid_document
         from .bid_writing.template_reuse import attach_templates
@@ -1841,6 +1842,7 @@ class Store:
                 resolved_eval.get("items") or [],
                 method=str(resolved_eval.get("method") or ""),
             )
+            attach_section_blueprints(bid_doc)
             workspace["bidDocument"] = bid_doc
             self.persist_runtime()
             return {"bidDocument": bid_doc, "workspace": workspace}
@@ -1952,6 +1954,7 @@ class Store:
                 resolved_eval.get("items") or [],
                 method=str(resolved_eval.get("method") or ""),
             )
+            attach_section_blueprints(existing_bid_doc)
             workspace["bidDocument"] = existing_bid_doc
             self.persist_runtime()
             return {"bidDocument": existing_bid_doc, "workspace": workspace}
@@ -2054,6 +2057,7 @@ class Store:
             resolved_eval.get("items") or [],
             method=str(resolved_eval.get("method") or ""),
         )
+        attach_section_blueprints(bid_doc)
         workspace["bidDocument"] = bid_doc
         self.persist_runtime()
         return {"bidDocument": bid_doc, "workspace": workspace}

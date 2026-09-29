@@ -67,6 +67,44 @@ def _profile_block(profile: str) -> str:
     )
 
 
+# 评分深度档位 → 篇幅要求（取值来自 evaluation_strategy.depth_for_weight）
+_DEPTH_GUIDANCE: dict[str, str] = {
+    "primary": "重点章：分值占比高，必须写深写足，逐条响应本章评分点，不省略论证与佐证。",
+    "regular": "常规章：评分点覆盖到位、论证清楚即可，不做冗余铺陈。",
+    "minor": "次要章：覆盖评分点后即收束，不再扩写。",
+}
+
+
+def _section_guidance_block(section: dict[str, Any]) -> str:
+    """章节蓝图 + 评分深度 → 写法与篇幅指引（招标原文始终优先于蓝图范式）。"""
+    value = section if isinstance(section, dict) else {}
+    blueprint = value.get("sectionBlueprint")
+    blueprint = blueprint if isinstance(blueprint, dict) else {}
+
+    lines: list[str] = []
+    name = str(blueprint.get("name") or "").strip()
+    if name:
+        lines.append(f"本章范式：{name}（通用范式；与招标原文冲突时以招标原文为准）")
+    focus = str(blueprint.get("focus") or "").strip()
+    if focus:
+        lines.append(f"写法要点：{focus}")
+    skeleton = blueprint.get("skeleton")
+    if isinstance(skeleton, list) and skeleton:
+        lines.append("建议骨架：" + " → ".join(str(item) for item in skeleton))
+    pitfalls = blueprint.get("pitfalls")
+    if isinstance(pitfalls, list) and pitfalls:
+        lines.append("本章陷阱：" + "；".join(str(item) for item in pitfalls))
+
+    depth = str(value.get("evaluationDepth") or "").strip()
+    weight = value.get("evaluationWeight")
+    if depth in _DEPTH_GUIDANCE:
+        suffix = f"（本章分值权重 {weight}）" if weight not in (None, "") else ""
+        lines.append(f"篇幅档位：{_DEPTH_GUIDANCE[depth]}{suffix}")
+    elif blueprint.get("lengthPolicy"):
+        lines.append(f"篇幅档位：{blueprint['lengthPolicy']}")
+    return "\n".join(lines)
+
+
 def _section_prompt_view(section: dict[str, Any], profile: str = "") -> dict[str, Any]:
     value = section if isinstance(section, dict) else {}
     resolved_profile = profile or resolve_writing_profile(value)
@@ -87,6 +125,7 @@ def _section_prompt_view(section: dict[str, Any], profile: str = "") -> dict[str
         "evaluationScore",
         "evaluationWeight",
         "evaluationDepth",
+        "sectionBlueprint",
         "templateId",
     )
     result = {
@@ -2124,6 +2163,9 @@ def section_plan_prompt(
 模式：{mode}
 {_profile_block(profile)}
 
+【本章蓝图与篇幅】
+{_section_guidance_block(section) or "（无特定范式，按画像与本类重点撰写）"}
+
 【章节解析上下文】
 {_dump(_section_parse_bundle_view(parse_bundle, section=section, coverage=coverage), 22000)}
 
@@ -2205,6 +2247,9 @@ sourceEvidence 中的招标文件原文是本章节响应依据；应逐项落�
 项目：{project_id}
 模式：{mode}
 {_profile_block(profile)}
+
+【本章蓝图与篇幅】
+{_section_guidance_block(section) or "（无特定范式，按画像与本类重点撰写）"}
 
 【章节解析上下文】
 {_dump(_section_parse_bundle_view(parse_bundle, section=section, coverage=coverage), 22000)}
@@ -2389,6 +2434,9 @@ def section_rewrite_prompt(
 用户修改要求：{instruction}
 选中的正文片段（可能为空）：
 {(selected_text or "（未提供选中文本）")[:8000]}
+
+【本章蓝图与篇幅】
+{_section_guidance_block(section) or "（无特定范式，按画像与本类重点撰写）"}
 
 【当前章节解析上下文】
 {_dump(_section_parse_bundle_view(parse_bundle, section=section, coverage=coverage), 18000)}

@@ -511,12 +511,17 @@ _EVAL_TO_SECTION: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-def _eval_section_id(name: str) -> str:
+def match_eval_section(name: str) -> str:
+    """评分点/章节名称 → 技术章节固定池 sectionId；无关键词命中返回空串（不套默认值）。"""
     n = name
     for keywords, section_id in _EVAL_TO_SECTION:
         if any(kw in n for kw in keywords):
             return section_id
-    return "t-02"
+    return ""
+
+
+def _eval_section_id(name: str) -> str:
+    return match_eval_section(name) or "t-02"
 
 
 def plan_from_eval(eval_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
