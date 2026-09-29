@@ -3738,22 +3738,33 @@ _SECTION_REVIEW_CONTENT_KEYS: tuple[str, ...] = (
 _SECTION_REVIEW_MAX_SECTIONS = 240
 _SECTION_REVIEW_MAX_SECTIONS_PER_TARGET = 60
 _SECTION_REVIEW_MAX_ADDED_SEGMENTS = 600
+# 空壳锚点：规则已判定为某内容类型、但自身只有标题（≤3 段）且完全被占用的章节。
+# 它们不参与补漏，只作为只读参照送给模型——"第三部分 采购清单及技术要求"这类
+# 1 段壳章后面紧跟的未编号大章节，靠它才能被正确归到 technical（网易项目概况）。
+_SECTION_REVIEW_ANCHOR_MAX_SEGMENTS = 3
+_SECTION_REVIEW_MAX_ANCHORS = 40
 
 
 def _section_review_inventory(
     indexes: Mapping[str, Any],
     claimed: set[str] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """Bounded section inventory in document order.
 
     When ``claimed`` is given, only sections that still hold at least one
     segment no content target owns are included -- the review is a pure
     gap-filling pass, so already-assigned chapters are just noise (and they
     dominate the reasoning-token budget of a thinking model).
+
+    Returns ``(rows, anchors, truncated)``. ``anchors`` are fully-claimed
+    type shells (a chapter the rules typed as content but that holds only its
+    own heading); they are never reassigned and only serve as read-only
+    context for locating the real body chapter that follows them.
     """
 
     claimed = claimed or set()
     rows: list[dict[str, Any]] = []
+    anchors: list[dict[str, Any]] = []
     for section_id, section in (indexes.get("sectionMap") or {}).items():
         heading = _text(section.get("heading"), 120)
         if not heading:
@@ -3764,8 +3775,24 @@ def _section_review_inventory(
         ]
         if not segment_ids:
             continue
+        section_type = str(section.get("sectionType") or "")
+        position = min(indexes["positions"].get(sid, 0) for sid in segment_ids)
         free = [sid for sid in segment_ids if sid not in claimed]
         if not free:
+            if (
+                section_type in _SECTION_REVIEW_APPLY_KEYS
+                and len(segment_ids) <= _SECTION_REVIEW_ANCHOR_MAX_SEGMENTS
+            ):
+                anchors.append(
+                    {
+                        "sectionId": section_id,
+                        "heading": heading,
+                        "level": int(section.get("level") or 0),
+                        "segCount": len(segment_ids),
+                        "type": section_type,
+                        "position": position,
+                    }
+                )
             continue
         rows.append(
             {
@@ -3774,9 +3801,7 @@ def _section_review_inventory(
                 "level": int(section.get("level") or 0),
                 "segCount": len(segment_ids),
                 "freeCount": len(free),
-                "position": min(
-                    indexes["positions"].get(sid, 0) for sid in segment_ids
-                ),
+                "position": position,
             }
         )
     rows.sort(key=lambda row: row["position"])
@@ -3787,10 +3812,15 @@ def _section_review_inventory(
         truncated = len(rows) - _SECTION_REVIEW_MAX_SECTIONS
         rows = rows[:_SECTION_REVIEW_MAX_SECTIONS]
         rows.sort(key=lambda row: row["position"])
-    return rows, truncated
+    anchors.sort(key=lambda row: row["position"])
+    if len(anchors) > _SECTION_REVIEW_MAX_ANCHORS:
+        anchors = anchors[:_SECTION_REVIEW_MAX_ANCHORS]
+    return rows, anchors, truncated
 
 
-def _section_review_prompt(rows: list[dict[str, Any]]) -> tuple[str, str]:
+def _section_review_prompt(
+    rows: list[dict[str, Any]], anchors: list[dict[str, Any]] | None = None
+) -> tuple[str, str]:
     target_lines = "\n".join(
         f"- {key}（{_module(key).get('label')}）：{_module(key).get('description')}"
         for key in _SECTION_REVIEW_CONTENT_KEYS
@@ -3798,16 +3828,18 @@ def _section_review_prompt(rows: list[dict[str, Any]]) -> tuple[str, str]:
     system = (
         "你是招标文件章节归属复核员。\n"
         "输入是一份招标文件的章节清单，每行格式：章节ID | 层级 | 段数 | 标题。\n"
-        "请判断每个章节的正文属于下列哪一个目标模块：\n"
+        "请为**每一个**章节给出归属判定，可选的目标模块只有下列几个：\n"
         f"{target_lines}\n"
         "要求：\n"
-        "1. 只输出你确信归属的章节；不确定就不要输出。\n"
-        "2. 一个章节最多归属一个模块。\n"
-        "3. 目录、封面、前言、报名须知等无归属章节不要输出。\n"
-        "4. 警惕“空壳章节”：某个类型章只有 1 段（只有标题），而紧随其后的相邻"
-        "大章节才是真正内容，应把真正的内容章节归入对应模块。\n"
+        "1. 必须为清单里的每个章节ID都输出一条判定，一条都不能漏；不属于任何"
+        '目标模块的统一填 "none"。\n'
+        "2. 一个章节只能填一个值（某个模块名，或 none）。\n"
+        "3. 目录、封面、前言、报名须知、附件清单等填 none。\n"
+        "4. 警惕「空壳章节」：某个类型章只有 1 段（只有标题），而紧随其后的相邻"
+        "大章节才是它的正文——这种情况下要把真正的正文章节归给对应模块，"
+        "而不是因为它标题不属于该类型就填 none。\n"
         "5. 只输出 JSON，不要任何解释文字。\n"
-        '输出格式：{"assignments":{"technical":["SEC-0012"],"commercial":["SEC-0040"]},'
+        '输出格式：{"sections":{"SEC-0012":"technical","SEC-0040":"none"},'
         '"reason":"简短理由"}'
     )
     lines = [
@@ -3815,6 +3847,15 @@ def _section_review_prompt(rows: list[dict[str, Any]]) -> tuple[str, str]:
         for row in rows
     ]
     user = "章节清单：\n" + "\n".join(lines)
+    if anchors:
+        anchor_lines = [
+            f'{a["sectionId"]} | L{a["level"]} | 段数={a["segCount"]} | [{a["type"]}] {a["heading"]}'
+            for a in anchors
+        ]
+        user += (
+            "\n\n以下为已判定归属的「壳章」（只有标题、正文在其后相邻章节），"
+            "仅供定位参照，不要对它们输出判定：\n" + "\n".join(anchor_lines)
+        )
     return system, user
 
 
@@ -3843,13 +3884,14 @@ def _llm_review_sections(
                 if segment_id in indexes["segmentMap"]:
                     claimed.add(segment_id)
 
-    rows, truncated = _section_review_inventory(indexes, claimed)
+    rows, anchors, truncated = _section_review_inventory(indexes, claimed)
     diagnostics["llmSectionReviewSectionCount"] = len(rows)
+    diagnostics["llmSectionReviewAnchorCount"] = len(anchors)
     diagnostics["llmSectionReviewTruncated"] = truncated
     if not rows:
         return targets
 
-    system, user = _section_review_prompt(rows)
+    system, user = _section_review_prompt(rows, anchors)
     limits = _target_review_limits(ai)
     max_tokens = min(max(int(limits["maxTokens"]), 2600), 8000)
     diagnostics["llmSectionReviewCalled"] = True
@@ -3867,29 +3909,68 @@ def _llm_review_sections(
         diagnostics["llmSectionReviewError"] = _text(result.get("error"), 300)
         return targets
 
-    payload = _json_object(str(result.get("content") or ""))
-    assignments = (payload or {}).get("assignments")
-    if not isinstance(assignments, dict):
-        diagnostics["llmSectionReviewError"] = "未返回可解析的章节归属 JSON"
-        return targets
-    diagnostics["llmSectionReviewReason"] = _text(
-        (payload or {}).get("reason"), 300
-    )
-
+    payload = _json_object(str(result.get("content") or "")) or {}
     valid_sections = {row["sectionId"] for row in rows}
-    claims: dict[str, list[str]] = defaultdict(list)
-    for key, values in assignments.items():
-        if key not in _SECTION_REVIEW_APPLY_KEYS or not isinstance(values, list):
-            continue
-        for value in values:
-            section_id = _id(value)
-            if section_id in valid_sections:
-                claims[section_id].append(key)
+    diagnostics["llmSectionReviewReason"] = _text(payload.get("reason"), 300)
+
+    labels: dict[str, str] = {}
+    flat = payload.get("sections")
+    if isinstance(flat, dict):
+        # 强制逐节表态格式：{"sections": {SEC-xxxx: "technical" | "none"}}
+        for section_id, value in flat.items():
+            sid = _id(section_id)
+            key = str(value or "").strip().lower()
+            if sid in valid_sections and key in _SECTION_REVIEW_APPLY_KEYS:
+                labels[sid] = key
+    else:
+        # 旧格式兜底：{"assignments": {technical: [SEC-...]}}，多目标冲突的章节丢弃。
+        assignments = payload.get("assignments")
+        if not isinstance(assignments, dict):
+            diagnostics["llmSectionReviewError"] = "未返回可解析的章节归属 JSON"
+            return targets
+        claims: dict[str, list[str]] = defaultdict(list)
+        for key, values in assignments.items():
+            if key not in _SECTION_REVIEW_APPLY_KEYS or not isinstance(values, list):
+                continue
+            for value in values:
+                section_id = _id(value)
+                if section_id in valid_sections:
+                    claims[section_id].append(key)
+        for section_id, keys in claims.items():
+            if len(set(keys)) == 1:
+                labels[section_id] = keys[0]
+
+    # 「最内层优先」：同一棵章节树里若父章节和它的子章节都被标注，父章节会把它
+    # 整块（含全部子章节段）认领走，于是一个跨类型的大章（典型：「项目概况」这种
+    # 未编号的 L1 章，里面同时有技术要求与评分办法）会被整块塞进单一目标，而且
+    # 模型每次挑的目标还会变。丢掉这类父标签，让更具体的子章节各自决定归属。
+    section_map = indexes.get("sectionMap") or {}
+    key_by_sid = {_id(key): key for key in section_map}
+    parent_of: dict[str, str] = {}
+    for key, section in section_map.items():
+        parent_of[key] = key_by_sid.get(_id(section.get("parentId")), "")
+
+    def _has_labeled_descendant(sid: str) -> bool:
+        for other in labels:
+            if other == sid:
+                continue
+            cursor = parent_of.get(other, "")
+            while cursor:
+                if cursor == sid:
+                    return True
+                cursor = parent_of.get(cursor, "")
+        return False
+
+    labels = {
+        sid: key for sid, key in labels.items() if not _has_labeled_descendant(sid)
+    }
+
+    diagnostics["llmSectionReviewLabeled"] = len(labels)
+    diagnostics["llmSectionReviewUnlabeled"] = len(valid_sections) - len(labels)
 
     assignment: dict[str, list[str]] = defaultdict(list)
-    for section_id, keys in claims.items():
-        if len(set(keys)) == 1:
-            assignment[keys[0]].append(section_id)
+    for section_id, key in labels.items():
+        assignment[key].append(section_id)
 
     diagnostics["llmSectionReviewAssignments"] = {
         key: len(section_ids) for key, section_ids in assignment.items()
@@ -3897,16 +3978,44 @@ def _llm_review_sections(
     diagnostics["llmSectionReviewSuccess"] = True
 
     targets_by_key = {str(t.get("targetModule")): t for t in targets}
+    # 空目标兜底门槛：只给「明显缺失」的目标补漏。规则结果已经相当完整的目标
+    # （例如一份正常招标文件的 commercial 本就有几十上百段）再让模型加段，实测
+    # 只会灌水：模型把技术需求章同时分给 commercial 与 technical，而唯一归属修复
+    # 里 commercial 的优先级高于 technical，结果把技术正文整章吞成 commercial
+    # （济南 commercial 87→629、最大块 414）。超过门槛的目标一律不碰。
+    total_segments = len(indexes["segmentMap"])
+    needy_threshold = max(3, int(total_segments * 0.03))
+    needy_keys = {
+        key
+        for key in _SECTION_REVIEW_APPLY_KEYS
+        if key in targets_by_key
+        and len(targets_by_key[key].get("segmentIds") or []) <= needy_threshold
+    }
+    diagnostics["llmSectionReviewNeedyThreshold"] = needy_threshold
+    diagnostics["llmSectionReviewNeedyKeys"] = sorted(needy_keys)
+    diagnostics["llmSectionReviewSkippedKeys"] = sorted(
+        set(_SECTION_REVIEW_APPLY_KEYS) - needy_keys
+    )
+    assignment = {key: ids for key, ids in assignment.items() if key in needy_keys}
+
     added_segments = 0
     added_sections = 0
     added_by_target: dict[str, int] = {}
+    # 去重计数：claimed 已冻结，同一段可能被多个目标各加一次（重叠归属随后由
+    # “唯一归属”修复按优先级裁决），上限必须按不重复段数算，否则会过早截断。
+    distinct_added: set[str] = set()
     touched: set[str] = set()
-    for key, section_ids in assignment.items():
+    for key in _SECTION_REVIEW_APPLY_KEYS:
         target = targets_by_key.get(key)
         if target is None:
             continue
+        section_ids = assignment.get(key) or []
+        if not section_ids:
+            continue
         current = set(target.get("segmentIds") or [])
-        for section_id in section_ids[:_SECTION_REVIEW_MAX_SECTIONS_PER_TARGET]:
+        for section_id in sorted(
+            section_ids, key=lambda sid: indexes["positions"].get(sid, 0)
+        )[:_SECTION_REVIEW_MAX_SECTIONS_PER_TARGET]:
             section = indexes["sectionMap"].get(section_id) or {}
             fresh = [
                 sid for sid in _section_segment_ids(section, indexes)
@@ -3916,16 +4025,15 @@ def _llm_review_sections(
             ]
             if not fresh:
                 continue
-            if added_segments + len(fresh) > _SECTION_REVIEW_MAX_ADDED_SEGMENTS:
+            if len(distinct_added | set(fresh)) > _SECTION_REVIEW_MAX_ADDED_SEGMENTS:
                 break
+            distinct_added.update(fresh)
             current.update(fresh)
-            claimed.update(fresh)
             added_segments += len(fresh)
             added_sections += 1
             added_by_target[key] = added_by_target.get(key, 0) + len(fresh)
             touched.add(key)
-        if key in touched:
-            target["segmentIds"] = sorted(current, key=indexes["positions"].get)
+        target["segmentIds"] = sorted(current, key=indexes["positions"].get)
 
     for key in touched:
         target = targets_by_key.get(key)
@@ -3938,6 +4046,7 @@ def _llm_review_sections(
         target["sectionReviewedByLlm"] = True
 
     diagnostics["llmSectionReviewAddedSegments"] = added_segments
+    diagnostics["llmSectionReviewAddedSegmentsDistinct"] = len(distinct_added)
     diagnostics["llmSectionReviewAddedSections"] = added_sections
     diagnostics["llmSectionReviewAddedByTarget"] = added_by_target
     return targets

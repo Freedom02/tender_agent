@@ -298,14 +298,20 @@ def call_openai_compatible(
         else:
             try:
                 json.loads(raw_body.decode("utf-8"))
+                break
             except (UnicodeDecodeError, json.JSONDecodeError):
-                if attempt < len(endpoints):
-                    last_error = (
-                        "模型端点返回非 JSON 内容，正在尝试标准 /v1/chat/completions 路径"
-                    )
-                    continue
-            break
-        if attempt < max_attempts and _is_retryable_error({"success": False, "error": last_error}):
+                # 非 JSON 有两种来源：base URL 少了 /v1 时返回的网关落地页，
+                # 以及网关过载/限流时返回的 HTML 错误页。两者都值得换端点或
+                # 退避后重试，而不是第一次就把整批复核判死。
+                last_error = (
+                    "模型端点返回非 JSON 内容，正在尝试标准 /v1/chat/completions 路径"
+                    if attempt < len(endpoints)
+                    else "模型端点返回非 JSON 内容，正在重试"
+                )
+        if attempt < max_attempts and (
+            "非 JSON" in last_error
+            or _is_retryable_error({"success": False, "error": last_error})
+        ):
             time.sleep(min(2 * attempt, 6))
             continue
         return {"success": False, "error": last_error}
