@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """标书撰写模块 —— 智能校对与风险自查（纯函数、确定性、无 LLM）。
 
-职责：对标书文档（bid_document）做五类检查，产出 Markdown 报告与风险项列表：
+职责：对标书文档（bid_document）做七类检查，产出 Markdown 报告与风险项列表：
   1) 漏响应检测      —— fineReview.rows 的每条 requirementId 是否都进入两张偏离表；
   2) 废标风险        —— 直接读取 fineReview 的 hardBlockers / rejectionRisks / unresolvedMandatory；
   3) 负偏离/待澄清   —— 偏离表内 deviation ∈ {负偏离, 待人工确认} 的行；
   4) 关键字段一致性  —— project 的项目名/编号、企业名缺失或占位，及正文项目名不一致；
-  5) 敏感词          —— 正文命中禁用/敏感小词表。
+  5) 敏感词          —— 正文命中禁用/敏感小词表；
+  6) 证据溯源        —— 企业事实断言是否带 sourceRefs、证据路径是否完整、材料缺口是否残留；
+  7) 承诺一致性      —— 质保期/响应时限/工期等承诺值是否跨章自相矛盾
+                        （6/7 见 evidence_audit.audit_evidence，防幻觉 + 一致性闭环）。
 
 硬性约束：只读入参，不调用 LLM，不修改任何已有文件；复用 schemas.py 的
 偏离类型与偏离表分组键，复用 fineReview 已有的废标/否决/未解决强制项，
@@ -255,6 +258,22 @@ def _check_sensitive_words(bid_document: dict[str, Any], add) -> None:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+def _check_evidence(bid_document: dict[str, Any], add) -> None:
+    """6) 证据溯源：委托 evidence_audit 做无溯源断言/证据路径/材料缺口检查。"""
+    from .evidence_audit import audit_evidence
+
+    audit = audit_evidence(bid_document)
+    for item in audit.get("riskItems") or []:
+        if not isinstance(item, dict):
+            continue
+        add(
+            str(item.get("level") or "中"),
+            str(item.get("title") or "证据溯源风险"),
+            str(item.get("detail") or ""),
+            count_key="证据溯源",
+        )
+
+
 def proofread(
     bid_document: dict[str, Any],
     fine_review: dict[str, Any],
@@ -271,7 +290,7 @@ def proofread(
     project = project if isinstance(project, dict) else {}
 
     risk_items: list[dict[str, str]] = []
-    counts: dict[str, int] = {"漏响应": 0, "废标风险": 0, "负偏离": 0, "敏感词": 0, "关键信息": 0}
+    counts: dict[str, int] = {"漏响应": 0, "废标风险": 0, "负偏离": 0, "敏感词": 0, "关键信息": 0, "证据溯源": 0}
 
     def add(level: str, title: str, detail: str, count_key: str | None = None) -> None:
         """追加一条风险项并累加对应计数。"""
@@ -286,6 +305,7 @@ def proofread(
     _check_deviations(bid_document, add)
     _check_key_fields(bid_document, project, company, add)
     _check_sensitive_words(bid_document, add)
+    _check_evidence(bid_document, add)
 
     lines = [
         "# 标书校对与风险自查报告",
@@ -296,6 +316,7 @@ def proofread(
         f"- 废标项：**{counts['废标风险']}**",
         f"- 负偏离/待澄清：**{counts['负偏离']}**",
         f"- 敏感词：**{counts['敏感词']}**",
+        f"- 证据/一致性：**{counts['证据溯源']}**",
         "",
         "## 风险明细",
     ]
