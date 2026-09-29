@@ -567,6 +567,10 @@ class Store:
             }
         )
         payload = bundle.model_dump(mode="json")
+        if isinstance(payload.get("documentBlocks"), dict):
+            from .tender_matching.document_models import strip_derivable_segments
+
+            payload["documentBlocks"] = strip_derivable_segments(payload["documentBlocks"])
         write_json(target, payload, compact=True)
         return payload
 

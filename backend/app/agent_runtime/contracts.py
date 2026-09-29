@@ -245,6 +245,10 @@ def build_parse_bundle(
         document_blocks
         or result_value.get("documentBlocks")
     )
+    # segments 可由 units 精确还原（见 document_models），落盘只保留 units。
+    from ..tender_matching.document_models import strip_derivable_segments
+
+    resolved_document_blocks = strip_derivable_segments(resolved_document_blocks)
     resolved_document_structure = _as_dict(
         document_structure
         or result_value.get("documentStructure")
