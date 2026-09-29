@@ -416,6 +416,24 @@ export function useAppState() {
     }
   }
 
+  async function refreshPiPreflight() {
+    busy.value = true;
+    try {
+      const report = await api.piPreflight();
+      const current = (config.value || {}) as Record<string, any>;
+      const next = { ...current, ai: { ...(current.ai || {}), piPreflight: report } };
+      config.value = next as typeof config.value;
+      if (bootstrap.value) bootstrap.value.config = config.value;
+      configText.value = JSON.stringify(config.value, null, 2);
+      if (report?.ok) ElMessage.success(`Pi 模型自检通过：${report.summary || ""}`);
+      else ElMessage.warning(`Pi 模型自检发现问题：${report?.summary || "请查看配置页提示"}`);
+    } catch (error) {
+      ElMessage.error((error as Error).message);
+    } finally {
+      busy.value = false;
+    }
+  }
+
   async function runAutomation() {
     busy.value = true;
     try {
@@ -613,6 +631,7 @@ export function useAppState() {
     saveDraft,
     saveConfig,
     testAiConnection,
+    refreshPiPreflight,
     runAutomation,
     runMonitoring,
     updateMonitorSite,

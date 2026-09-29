@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
+import logging
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -33,10 +35,33 @@ FRONTEND_DIST = ROOT / "frontend" / "dist"
 store = Store(ROOT)
 cloud_run_service = CloudRunService(ROOT)
 
+logger = logging.getLogger(__name__)
+
+
+def run_pi_preflight() -> None:
+    """启动时自检 Pi 模型可用性；任何失败只记日志，绝不影响服务启动。"""
+
+    try:
+        from .pi_agent.preflight import get_report
+
+        report = get_report(refresh=True)
+        if report.get("ok"):
+            logger.info("Pi 模型自检通过：%s", report.get("summary"))
+        else:
+            logger.warning("Pi 模型自检发现问题：%s", report.get("summary"))
+            for problem in report.get("problems") or []:
+                logger.warning("  - %s", problem)
+        for warning in report.get("warnings") or []:
+            logger.warning("Pi 模型自检提示：%s", warning)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pi 模型自检未能完成：%s", exc)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     store.initialize()
+    # 自检会读文件并查询网关：放进后台线程，绝不阻塞服务启动。
+    threading.Thread(target=run_pi_preflight, name="pi-model-preflight", daemon=True).start()
     monitoring_task = asyncio.create_task(monitoring_loop(store))
     try:
         yield

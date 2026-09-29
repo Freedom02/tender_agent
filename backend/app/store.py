@@ -1068,7 +1068,18 @@ class Store:
         for key in ("apiKey", "key", "token", "password"):
             if key in ai:
                 ai[key] = "***"
+        ai["piPreflight"] = self.pi_preflight_report()
         return config
+
+    def pi_preflight_report(self) -> dict[str, Any] | None:
+        """Pi 模型自检结果（只读缓存，不发起网络请求；未自检过为 None）。"""
+
+        try:
+            from .pi_agent.preflight import cached_report
+
+            return cached_report()
+        except Exception:  # noqa: BLE001
+            return None
 
     def filtered_catalog(self, query: str = "", region: str = "", type: str = "", current_only: bool = False) -> list[dict[str, Any]]:
         valid_items = [

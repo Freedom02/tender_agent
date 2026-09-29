@@ -35,4 +35,12 @@ def create_router(store: Store) -> APIRouter:
             configured["apiKey"] = store.config.get("ai", {}).get("apiKey", "")
         return store.test_ai_connection(configured)
 
+    @router.get("/pi/preflight")
+    def pi_preflight() -> dict[str, Any]:
+        """重新执行 Pi 模型自检并返回结果（会查询网关，供配置页手动触发）。"""
+
+        from ..pi_agent.preflight import get_report
+
+        return get_report(refresh=True)
+
     return router

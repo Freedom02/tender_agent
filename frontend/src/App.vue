@@ -53,6 +53,7 @@ const {
   saveDraft,
   saveConfig,
   testAiConnection,
+  refreshPiPreflight,
   runAutomation,
   runMonitoring,
   updateMonitorSite,
@@ -221,6 +222,7 @@ onMounted(loadBootstrap);
       @test-in-app="testInAppNotification"
       @test-wecom="testWecom"
       @test-ai="testAiConnection"
+      @refresh-pi-preflight="refreshPiPreflight"
     />
   </AppShell>
 </template>

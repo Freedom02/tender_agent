@@ -205,6 +205,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ config: { ai } })
     }),
+  piPreflight: () => request<Record<string, any>>("/api/config/pi/preflight"),
   monitoringStatus: () => request<MonitoringStatus>("/api/monitoring/status"),
   runMonitoring: (siteId = "") =>
     request<MonitoringRunResult>("/api/monitoring/run", {

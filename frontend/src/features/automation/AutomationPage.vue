@@ -35,7 +35,10 @@ const apiBaseUrl = ref("https://api.openai.com/v1");
 const apiKey = ref("");
 const apiModel = ref("gpt-4o-mini");
 const organizationId = ref("");
+const piModel = ref("");
+const piProvider = ref("");
 const aiConfigured = computed(() => props.config.ai?.configured === true);
+const piPreflight = computed(() => (props.config.ai?.piPreflight as Record<string, any>) || null);
 
 const monitorSites = computed(() => props.monitoring.sites);
 const inAppEnabled = ref(true);
@@ -90,6 +93,8 @@ function loadSavedConfig() {
   apiBaseUrl.value = props.config.ai?.baseUrl || apiBaseUrl.value;
   apiModel.value = props.config.ai?.model || apiModel.value;
   organizationId.value = props.config.ai?.organizationId || organizationId.value;
+  piModel.value = props.config.ai?.piModel || "";
+  piProvider.value = props.config.ai?.piProvider || "";
   apiKey.value = "";
 }
 
@@ -122,7 +127,11 @@ function currentAiConfig() {
     baseUrl: apiBaseUrl.value.trim(),
     apiKey: apiKey.value.trim(),
     model: apiModel.value.trim(),
-    organizationId: organizationId.value.trim()
+    organizationId: organizationId.value.trim(),
+    // Pi 智能体（目录规划 / 正文撰写 / 模板填表）专用模型。
+    // 必须随表单回传：后端 save_config 会把整段 ai 替换掉，漏传即被抹空。
+    piModel: piModel.value.trim(),
+    piProvider: piProvider.value.trim()
   };
 }
 
@@ -169,6 +178,7 @@ const emit = defineEmits<{
   testInApp: [];
   testWecom: [];
   testAi: [ai: Record<string, unknown>];
+  refreshPiPreflight: [];
 }>();
 
 function openCreateSite() {
@@ -426,7 +436,57 @@ function submitSite() {
             </el-row>
           </el-form>
 
+          <el-divider content-position="left">Pi 智能体（标书撰写 / 目录规划）</el-divider>
+
+          <el-alert
+            v-if="piPreflight && !piPreflight.ok"
+            :title="`Pi 模型自检未通过：${piPreflight.summary || ''}`"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="api-alert"
+          >
+            <div v-for="(problem, index) in piPreflight.problems || []" :key="`p-${index}`">{{ problem }}</div>
+            <div v-for="(warning, index) in piPreflight.warnings || []" :key="`w-${index}`">{{ warning }}</div>
+          </el-alert>
+          <el-alert
+            v-else-if="piPreflight"
+            :title="`Pi 模型自检通过：${piPreflight.summary || ''}`"
+            type="success"
+            show-icon
+            :closable="false"
+            class="api-alert"
+          />
+          <el-alert
+            v-else
+            title="Pi 模型尚未自检：后端启动时自动检查一次，也可点下方按钮立即检查。"
+            type="info"
+            show-icon
+            :closable="false"
+            class="api-alert"
+          />
+
+          <el-form label-position="top">
+            <el-row :gutter="12">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="Pi 模型名称">
+                  <el-input v-model="piModel" placeholder="留空则回退到上面的模型" />
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="12">
+                <el-form-item label="Pi Provider（可选）">
+                  <el-input v-model="piProvider" placeholder="留空自动使用 company-ai" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
+          <div class="form-hint">
+            标书撰写用的模型，与上面「模型名称」（匹配模块）分开配置；留空即回退到上面的模型。
+            所选模型还必须登记在 pi 注册表内，否则 pi 会拒绝该模型。
+          </div>
+
           <div class="config-actions">
+            <el-button :icon="Zap" plain :loading="busy" @click="emit('refreshPiPreflight')">Pi 模型自检</el-button>
             <el-button :icon="CheckCircle2" plain @click="testConnection">测试 API</el-button>
             <el-button :icon="Bell" plain @click="emit('testWecom')">测试企业微信</el-button>
             <el-button :icon="Save" :loading="busy" type="primary" @click="saveAllConfig">保存配置</el-button>
