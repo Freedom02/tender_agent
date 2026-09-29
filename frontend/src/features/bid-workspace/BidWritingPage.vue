@@ -40,6 +40,7 @@ import type {
   CloudBidRun,
   EvidenceChapterPreview,
   EvidenceEntry,
+  EvidenceAssetFile,
   LibrarySummary,
   MaterialProfile,
   SubmissionStructure,
@@ -1134,6 +1135,11 @@ function escapeHtml(s: string): string {
 
 function renderInline(s: string): string {
   let out = s;
+  // 内联图片必须先于链接处理，否则 ![图注](url) 会被当成链接并遗留一个 "!"。
+  out = out.replace(
+    /!\[([^\]]*)\]\(([^)\s]+)\)/g,
+    '<img class="evidence-inline-image" src="$2" alt="$1" loading="lazy" />'
+  );
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
@@ -1209,6 +1215,17 @@ function renderMarkdown(md: string): string {
       flushPara();
       closeList();
       out.push(`<blockquote>${renderInline(escapeHtml(quote[1]))}</blockquote>`);
+      continue;
+    }
+    const imageLine = raw.match(/^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$/);
+    if (imageLine) {
+      flushPara();
+      closeList();
+      out.push(
+        `<p class="evidence-image-block"><img class="evidence-inline-image" src="${escapeHtml(
+          imageLine[2]
+        )}" alt="${escapeHtml(imageLine[1])}" loading="lazy" /></p>`
+      );
       continue;
     }
     const ul = raw.match(/^\s*[-*]\s+(.*)$/);
@@ -1567,6 +1584,11 @@ function htmlToMarkdown(root: HTMLElement): string {
         });
       return `${items.join("\n")}\n\n`;
     }
+    if (tag === "img") {
+      const alt = node.getAttribute("alt") || "";
+      const src = node.getAttribute("src") || "";
+      return src ? `![${alt}](${src})` : "";
+    }
     if (tag === "table") {
       const rows = Array.from(node.querySelectorAll("tr")).map((row) =>
         Array.from(row.querySelectorAll("th,td")).map((cell) =>
@@ -1675,6 +1697,18 @@ function evidenceEntryState(entry: EvidenceEntry): { type: "success" | "warning"
     return { type: "warning", label: "待补扫描件" };
   }
   return { type: "success", label: "已命中" };
+}
+
+function entryMaterialFiles(entry: EvidenceEntry): EvidenceAssetFile[] {
+  const files: EvidenceAssetFile[] = [];
+  for (const ref of entry.sourceRefs) {
+    if (Array.isArray(ref.files)) files.push(...ref.files);
+  }
+  return files;
+}
+
+function entryMaterialFileUrls(entry: EvidenceEntry): string[] {
+  return entryMaterialFiles(entry).map((file) => file.url);
 }
 
 async function fillTemplate(sectionId: string) {
@@ -2363,6 +2397,23 @@ async function previewExport() {
               >
                 {{ ref.available === false ? "◌" : "●" }} {{ ref.evidencePath }}
               </span>
+            </div>
+            <div v-if="entryMaterialFiles(entry).length" class="evidence-entry-thumbs">
+              <el-image
+                v-for="file in entryMaterialFiles(entry)"
+                :key="file.url"
+                class="evidence-thumb"
+                :src="file.url"
+                :preview-src-list="entryMaterialFileUrls(entry)"
+                :initial-index="entryMaterialFileUrls(entry).indexOf(file.url)"
+                fit="cover"
+                preview-teleported
+                lazy
+              >
+                <template #error>
+                  <div class="evidence-thumb-fallback">无法预览</div>
+                </template>
+              </el-image>
             </div>
           </div>
         </div>
@@ -3782,4 +3833,44 @@ async function previewExport() {
   border-radius: 3px;
 }
 .doc-body :deep(a) { color: var(--primary, #409eff); }
+/* 证明材料章节：正文内联的真实扫描件（v-html 渲染，需 :deep 命中） */
+.doc-rich-editor :deep(.evidence-inline-image),
+.doc-body :deep(.evidence-inline-image) {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+}
+.doc-rich-editor :deep(.evidence-image-block),
+.doc-body :deep(.evidence-image-block) {
+  margin: 10px 0;
+  text-align: center;
+}
+.evidence-entry-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.evidence-thumb {
+  width: 96px;
+  height: 96px;
+  border-radius: 4px;
+  border: 1px solid var(--el-border-color-lighter);
+  overflow: hidden;
+}
+.evidence-thumb :deep(img) {
+  object-fit: cover;
+}
+.evidence-thumb-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  background: var(--el-fill-color-light);
+}
 </style>

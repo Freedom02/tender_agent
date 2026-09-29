@@ -3462,6 +3462,68 @@ class Store:
         plan.append(section)
         return section
 
+    def _resolve_evidence_assets(self, refs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """把一组证据引用解析为 ``{evidencePath: 资产信息}``。
+
+        资产信息含 ``files``（可直接访问的 ``/runtime/...`` 图片地址，供前端逐条
+        内联展示真实扫描件）与 ``available``（原件是否真实可插图，占位目录为 False）。
+        """
+
+        from .media_store.local import LocalFolderStore
+
+        media = LocalFolderStore(self.runtime_root)
+        runtime_root = Path(self.runtime_root).resolve()
+        assets: dict[str, dict[str, Any]] = {}
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            path = str(ref.get("evidencePath") or "").strip()
+            if not path or path in assets:
+                continue
+            try:
+                asset = media.fetch(ref)
+            except Exception:
+                asset = None
+            assets[path] = self._evidence_asset_info(path, asset, runtime_root)
+        return assets
+
+    @staticmethod
+    def _evidence_asset_info(
+        path: str,
+        asset: Any,
+        runtime_root: Path,
+    ) -> dict[str, Any]:
+        """把媒体适配器解析出的 MediaAsset 转成可序列化的资产信息。"""
+
+        if asset is None:
+            return {
+                "evidencePath": path,
+                "available": False,
+                "files": [],
+                "placeholder": False,
+                "kind": "missing",
+                "caption": "",
+                "pageCount": 0,
+                "textSummary": "",
+            }
+        files: list[dict[str, str]] = []
+        for page in asset.page_images or []:
+            try:
+                rel = Path(page).resolve().relative_to(runtime_root).as_posix()
+            except (ValueError, OSError):
+                continue
+            files.append({"url": f"/runtime/{rel}", "name": Path(page).name})
+        return {
+            "evidencePath": path,
+            "available": not bool(asset.placeholder),
+            "files": files,
+            "placeholder": bool(asset.placeholder),
+            "kind": str(asset.kind or ""),
+            "caption": str(asset.caption or ""),
+            "pageCount": int(asset.page_count or 0),
+            "textSummary": str(asset.text_summary or ""),
+        }
+
     def _annotate_evidence_availability(self, section: dict[str, Any]) -> dict[str, int]:
         """给证明材料章节的每个证据引用标注磁盘上是否真有扫描件。
 
@@ -3518,7 +3580,15 @@ class Store:
         self._refresh_company_from_m3(force=True)
         section = self._ensure_evidence_section(bid_doc)
         entries = build_evidence_entries(fine_review, self.company_knowledge)
-        result = build_evidence_chapter_result(section, entries)
+        assets = self._resolve_evidence_assets(
+            [
+                ref
+                for entry in entries
+                for ref in (entry.get("sourceRefs") or [])
+                if isinstance(ref, dict)
+            ]
+        )
+        result = build_evidence_chapter_result(section, entries, assets=assets)
 
         section["content"] = result["content"]
         section["evidenceEntries"] = result["evidenceEntries"]
@@ -3532,7 +3602,9 @@ class Store:
         section["evidenceSummary"] = result["summary"]
         section["provider"] = "local"
 
-        summary = self._annotate_evidence_availability(section)
+        # 资产解析已在生成前完成（files/available 已挂到每条证据引用上），
+        # 统计直接取生成结果，不再对同一批证据重复探测一遍磁盘。
+        summary = result["summary"]
 
         bid_doc["status"] = "generated"
         self._invalidate_compliance_review(bid_doc)
@@ -3574,17 +3646,21 @@ class Store:
             None,
         )
         entries = build_evidence_entries(fine_review, self.company_knowledge)
-        result = build_evidence_chapter_result(section, entries)
-        summary = self._annotate_evidence_availability(
-            {"evidenceGroups": result["evidenceGroups"],
-             "evidenceSummary": result["summary"]}
+        assets = self._resolve_evidence_assets(
+            [
+                ref
+                for entry in entries
+                for ref in (entry.get("sourceRefs") or [])
+                if isinstance(ref, dict)
+            ]
         )
+        result = build_evidence_chapter_result(section, entries, assets=assets)
         return {
             "sectionId": str((section or {}).get("sectionId") or "evidence-01"),
             "exists": isinstance(section, dict),
             "entries": result["evidenceEntries"],
             "groups": result["evidenceGroups"],
-            "summary": summary,
+            "summary": result["summary"],
             "blanksToFill": result["blanksToFill"],
         }
 

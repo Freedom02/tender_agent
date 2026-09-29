@@ -147,11 +147,18 @@ def _render_markdown_table(document: Document, table_lines: list[str]) -> None:
             cells[j].text = text
 
 
+# 正文内联图片行（证明材料章节会把真实扫描件按条内联进正文）。Word 的插图由
+# ``_add_evidence_assets`` 用本地原件插入（更清晰、支持多页），因此这里识别后跳过，
+# 避免把 ``![图注](url)`` 语法当正文文字输出。
+_IMAGE_LINE_RE = re.compile(r"^!\[[^\]]*\]\([^)\s]+\)$")
+
+
 def markdown_to_docx(document: Document, markdown_text: str) -> None:
     """把 Markdown 文本渲染进 Word 文档。
 
     支持 ``#``/``##``/``###`` 标题、``-``/``*`` 无序列表、``1.`` 有序列表、
-    ``|`` 分隔表格（带分隔行）、普通段落；空文本不产生任何输出。
+    ``|`` 分隔表格（带分隔行）、普通段落；图片行由证据插图环节负责，这里跳过；
+    空文本不产生任何输出。
     """
     if not markdown_text or not markdown_text.strip():
         return
@@ -170,6 +177,11 @@ def markdown_to_docx(document: Document, markdown_text: str) -> None:
                 table_lines.append(lines[i].strip())
                 i += 1
             _render_markdown_table(document, table_lines)
+            continue
+
+        # 内联图片行：交给 _add_evidence_assets 插图，正文不输出图片语法。
+        if _IMAGE_LINE_RE.match(stripped):
+            i += 1
             continue
 
         # 标题（# / ## / ### ...）
