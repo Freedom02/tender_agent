@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from app.pi_agent.client import PiError, _extract_text_from_message, parse_json_text
-from app.pi_agent.client import PiClient
-from app.pi_agent.config import PiConfig
+from backend.app.pi_agent.client import PiError, _extract_text_from_message, parse_json_text
+from backend.app.pi_agent.client import PiClient
+from backend.app.pi_agent.config import PiConfig
 
 
 def test_extract_text_only_accepts_assistant_messages() -> None:
