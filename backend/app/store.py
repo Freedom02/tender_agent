@@ -36,6 +36,7 @@ from .tender_matching.document_parser import (
 from .tender_matching.document_structure import enrich_document_structure
 from .tender_matching.decision_summary import build_workspace_decision_summary
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
+from .tender_matching.observability import capture_llm_telemetry
 from .workbuddy_agent.workflow.integration import (
     WorkBuddyAgentMatchingError,
     build_review_output_from_analysis_pack,
@@ -51,6 +52,46 @@ from .tender_monitor.adapters import (
 # 详见 docs2/Repository层设计与读写点清单.md。
 from .repository import JsonCatalogRepository, JsonWorkspaceRepository, M3FactsRepository
 from .repository.io import read_json, write_json
+
+
+def _attach_llm_health(result: Any, telemetry: Any) -> None:
+    """把本次匹配的 LLM 调用成败统计写进工作区，避免大模型故障被静默吞掉。
+
+    语义匹配在 call_openai_compatible 失败时只返回 None / 空列表，最终表现为
+    「未匹配到 / 待补材料」，与「企业确实没有可核验材料」无法区分。这里把失败次数与
+    首个错误挂到 fineReview.extraction 上，界面上就能看出是 AI 调用出了问题。
+    """
+    summary = telemetry.summary()
+    fine_review = result.get("fineReview") if isinstance(result, dict) else None
+    extraction = fine_review.get("extraction") if isinstance(fine_review, dict) else None
+    if not isinstance(extraction, dict):
+        return
+    stats = extraction.setdefault("stats", {})
+    if isinstance(stats, dict):
+        stats["llmCallCount"] = summary["llmCallCount"]
+        stats["llmFailureCount"] = summary["llmFailureCount"]
+    if summary["llmFailureCount"] <= 0:
+        return
+    first_error = next(
+        (
+            str(call.get("error") or "")
+            for call in telemetry.calls
+            if not call.get("success") and call.get("error")
+        ),
+        "",
+    )
+    warning = (
+        f"大模型调用失败 {summary['llmFailureCount']} 次"
+        f"（共 {summary['llmCallCount']} 次）"
+        + (f"，首个错误：{first_error}" if first_error else "")
+        + "。匹配结果可能不完整，请检查 AI 配置与网络连通性。"
+    )
+    warnings = extraction.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        extraction["warnings"] = warnings
+    if warning not in warnings:
+        warnings.append(warning)
 
 
 def now_iso() -> str:
@@ -1706,7 +1747,11 @@ class Store:
         if not item:
             return None
         previous_workspace = self.workspaces.get(item.get("workspaceId"))
-        reasoning = self.match_project(item)
+        # 大模型不可用时不能静默：统计本次匹配的 LLM 调用成败并挂到工作区上，
+        # 否则失败的语义匹配会伪装成「未匹配到 / 待补材料」。
+        with capture_llm_telemetry() as llm_telemetry:
+            reasoning = self.match_project(item)
+        _attach_llm_health(reasoning, llm_telemetry)
         workspace_id = item.get("workspaceId") or uid("workspace")
         item["workspaceId"] = workspace_id
         item["status"] = "已分析"
