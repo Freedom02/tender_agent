@@ -42,7 +42,7 @@ tender_agent/
 │  │  ├─ importers/     # Excel 模板导入
 │  │  ├─ m3/            # M3 图库客户端与写透
 │  │  ├─ notification/  # 站内 / 企业微信通知
-│  │  ├─ tender_matching/  # 解析层 + 提取层 + 匹配层（agent_bridge / document_parser / document_fine_matching / document_matching / eligibility …）
+│  │  ├─ tender_matching/  # 解析层 + 提取层 + 匹配层（document_parser / document_fine_matching / document_matching / eligibility …）
 │  │  ├─ tender_monitor/   # 招标监控（adapters / custom_site / scheduler / service）
 │  │  └─ wecom/         # 企业微信
 │  ├─ run.py            # 启动入口（127.0.0.1:8797）
@@ -127,7 +127,7 @@ npm run build
 ```text
 招标文件
   -> 解析层  document_parser / document_structure（文本、章节、表格）
-  -> 提取层  document_fine_matching（项目信息 / 采购需求 / 资格审查，支持智能体桥 agent_bridge 可插拔）
+  -> 提取层  document_fine_matching（项目信息 / 采购需求 / 资格审查；外部智能体通道已迁至 workbuddy_agent/）
   -> 匹配层  document_matching + M3 事实库（公告资格粗匹配 eligibility + 招标文件细匹配）
   -> 评分 / 证据 / 缺失项 / 风险 / 投标建议
 ```
