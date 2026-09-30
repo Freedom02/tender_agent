@@ -1,0 +1,81 @@
+# ───────────────────────────────────────────────────────────────────────
+# 换行符（EOL）规范
+#
+# 背景：本仓库在 Windows 上开发（core.autocrlf=true），但部分文件要在
+#       Linux 容器里执行或解析。
+#
+# 若 .sh 被检出成 CRLF，其 shebang 会变成 "#!/bin/bash\r"，容器报：
+#     cannot execute: required file not found      （退出码 127）
+# 实测：全新 clone 到 Windows 后，shared-db 首次初始化会因此失败，
+#       容器直接退出。（数据目录已非空时不会重跑 init，所以只影响首次。）
+#
+# 规则：会在类 Unix 环境执行/解析的一律 LF；Windows 专有脚本一律 CRLF。
+#
+# 注意：不要在本文件末尾加 `* text=auto` —— gitattributes 是「后匹配者优先」，
+#       放末尾会把上面这些具体规则全部覆盖掉。此处有意不加兜底规则，
+#       未列出的文件维持 git 默认行为。
+# ───────────────────────────────────────────────────────────────────────
+
+# ── 必须在 Linux / 容器内执行：强制 LF ──────────────────────────────
+# 本文件自身也用 LF，避免被 autocrlf 转成 CRLF 后影响解析
+/.gitattributes   text eol=lf
+*.sh              text eol=lf
+*.bash            text eol=lf
+Dockerfile        text eol=lf
+Dockerfile.*      text eol=lf
+*.dockerfile      text eol=lf
+.dockerignore     text eol=lf
+docker-compose*.yml  text eol=lf
+Makefile          text eol=lf
+*.mk              text eol=lf
+
+# ── 容器内解析的配置与数据：LF ──────────────────────────────────────
+# docker-compose.yml / .env / init/*.sql 都由容器读取，
+# 换行符混入 \r 会导致解析异常或 SQL 报错。
+*.yml             text eol=lf
+*.yaml            text eol=lf
+*.sql             text eol=lf
+.env              text eol=lf
+.env.example      text eol=lf
+*.conf            text eol=lf
+*.toml            text eol=lf
+
+# ── Windows 专有脚本：必须 CRLF，否则 cmd / PowerShell 解析异常 ──────
+*.bat             text eol=crlf
+*.cmd             text eol=crlf
+*.ps1             text eol=crlf
+*.psm1            text eol=crlf
+
+# ── 二进制：禁止任何换行 / 编码转换 ─────────────────────────────────
+*.png             binary
+*.jpg             binary
+*.jpeg            binary
+*.gif             binary
+*.bmp             binary
+*.ico             binary
+*.webp            binary
+*.pdf             binary
+*.doc             binary
+*.docx            binary
+*.xls             binary
+*.xlsx            binary
+*.ppt             binary
+*.pptx            binary
+*.zip             binary
+*.7z              binary
+*.rar             binary
+*.gz              binary
+*.tar             binary
+*.woff            binary
+*.woff2           binary
+*.ttf             binary
+*.otf             binary
+*.eot             binary
+*.pyc             binary
+
+# ── 数据库导出物：二进制，绝不能做换行转换 ──────────────────────────
+# 实测：`pg_dump ... > file.dump` 这类 PowerShell 重定向会把二进制流转码，
+#       7.1MB 的 dump 膨胀到 13.6MB，pg_restore 报 "not a valid archive"。
+#       用 -Fc 导出的文件也可能被 git 误当文本处理，这里显式标为二进制。
+*.dump            binary
+*.backup          binary

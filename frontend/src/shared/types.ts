@@ -670,6 +670,12 @@ export interface BidSection {
   editHistory?: Record<string, unknown>[];
 }
 
+/** 证据扫描件渲染出的可访问图片（/runtime/... 地址） */
+export interface EvidenceAssetFile {
+  url: string;
+  name?: string;
+}
+
 export interface EvidenceRef {
   factKey?: string;
   factId?: string;
@@ -677,6 +683,15 @@ export interface EvidenceRef {
   evidencePath?: string;
   /** 磁盘上是否真有扫描件（false = 已匹配到证据位但原件尚未上传） */
   available?: boolean;
+  /** 已渲染出的证明材料页面（图片 / PDF 转图 / docx 内嵌截图），供逐条内联展示 */
+  files?: EvidenceAssetFile[];
+  /** 证据目录只有占位文件（原件尚未补齐） */
+  placeholder?: boolean;
+  /** image = 可直接内联展示；attachment = 只能作为附件占位 */
+  kind?: string;
+  caption?: string;
+  pageCount?: number;
+  textSummary?: string;
   [key: string]: unknown;
 }
 

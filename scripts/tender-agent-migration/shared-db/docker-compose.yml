@@ -1,0 +1,74 @@
+# tender_agent 共享开发库 —— PostgreSQL 16
+# 用法：
+#   copy .env.example .env   然后改密码
+#   docker-compose up -d
+#   docker-compose logs -f postgres
+#
+# 说明：不带 version 键（Compose Spec 已弃用）。
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: tender-pg
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tender_app}
+      # 不设默认值：没写 .env 就直接启动失败，避免"弱密码默认库"上线
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-tender_agent_dev}
+      # UTF8 编码 + C locale：中文存取正常，排序/比较结果确定，跨机器一致
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+      # 逗号分隔的额外库名，由 init/02-extra-databases.sh 建好并套用同一套表结构
+      # 例：EXTRA_DATABASES=tender_dev_alice,tender_dev_bob
+      EXTRA_DATABASES: ${EXTRA_DATABASES:-}
+
+    # 绑定地址：默认只允许本机连（安全默认值）。
+    # 要给伙伴连，把 .env 里 PG_BIND 改成 0.0.0.0，并放行防火墙。
+    ports:
+      - "${PG_BIND:-127.0.0.1}:${PG_PORT:-5432}:5432"
+
+    volumes:
+      - tender_pgdata:/var/lib/postgresql/data
+      # 首次初始化（数据卷为空时）自动建表；已初始化则不会重跑
+      - ./init:/docker-entrypoint-initdb.d:ro
+
+    # 开发档调优：这台机器 20 逻辑核，并发很低，内存给足缓冲即可
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - max_connections=50
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - timezone=Asia/Shanghai
+      - -c
+      - log_timezone=Asia/Shanghai
+      - -c
+      - log_min_duration_statement=1000
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tender_app} -d ${POSTGRES_DB:-tender_agent_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    # PostgreSQL 并行查询依赖共享内存，Docker 默认 64MB 偏小
+    shm_size: 512mb
+
+volumes:
+  tender_pgdata:
+    name: tender_pgdata

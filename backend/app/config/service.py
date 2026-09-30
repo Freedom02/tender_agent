@@ -110,23 +110,14 @@ def default_ai_config() -> dict[str, Any]:
         # 内置 company-ai 映射；环境变量 PI_MODEL / PI_PROVIDER 仍可覆盖。
         "piModel": "",
         "piProvider": "",
-        # 外部智能体（WorkBuddy）作为**提取层 Provider** 的通道配置。
-        # 默认关闭：SDK / 授权未就绪时打开，会让每次分析都白等一轮超时再回退。
-        # 逐键的含义见 `tender_matching/agent_bridge.py` 的模块注释与 DEFAULT_CONFIG。
-        "agentBridge": {
-            "enabled": False,
-            "transport": "file",
-            "runtimeDir": "runtime/agent_bridge",
-            "httpEndpoint": "http://127.0.0.1:8911",
-            # 只做"短等待命中"：Sidecar 是离线跑完一批的（单批 14~62 秒、整份文件
-            # 可能几十批），分析接口是同步的，等不起完整一轮。正确用法是**先预热**
-            # （投递任务包 → 跑 Sidecar → 结果写回 outbox），分析时直接命中快路径。
-            # 未命中时这里短暂等待后回退到内置模型通道，保证接口不被拖死。
-            "timeoutSeconds": 20,
-            "pollIntervalSeconds": 1,
-            "writePack": True,
-            "packDir": "runtime/projects",
-        },
+        # 注意：这里**没有** `agentBridge` 段，这是有意的。
+        # 旧的「智能体提取桥」实现（`tender_matching/agent_bridge.py`）已在
+        # git `f070899` 中删除，该配置项的逐键含义已无处可查，且全仓库**没有任何
+        # 代码读取它**——留着只会让人误以为这条能力还在（外部智能体提取曾是最容易
+        # 被误判为"已有能力"的坑）。
+        # 外部智能体（WorkBuddy）现由 `app/workbuddy_agent/` 独立实现，
+        # 配置与默认值见 `workbuddy_agent/config/defaults.py`。
+        # 如需恢复提取桥，请一并恢复实现代码，不要只把配置加回来。
     }
 
 

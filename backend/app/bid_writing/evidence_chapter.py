@@ -317,18 +317,87 @@ def _evidence_paths(entry: dict[str, Any]) -> list[str]:
     )
 
 
+# 媒体适配器解析出的资产字段，需要透传到证据引用上供前端 / 导出层取用。
+_ASSET_FIELDS = (
+    "available",
+    "files",
+    "placeholder",
+    "kind",
+    "caption",
+    "pageCount",
+    "textSummary",
+)
+
+
+def _attach_asset(ref: dict[str, Any], info: dict[str, Any] | None) -> None:
+    """把已解析的资产信息挂到证据引用上（原地更新，供 entries/groups 共用）。"""
+
+    if not isinstance(info, dict):
+        return
+    for field in _ASSET_FIELDS:
+        if field in info:
+            ref[field] = info[field]
+
+
+def _ref_name(ref: dict[str, Any]) -> str:
+    name = str(ref.get("name") or "").strip()
+    if name:
+        return name
+    return str(ref.get("evidencePath") or "").strip() or "（未命名材料）"
+
+
+def _ref_images(ref: dict[str, Any]) -> list[str]:
+    """把证据引用上已解析的真实扫描件渲染为正文图片 Markdown 行。"""
+
+    files = ref.get("files")
+    if not isinstance(files, list):
+        return []
+    caption = str(ref.get("caption") or ref.get("name") or "").strip() or "证明材料"
+    images: list[str] = []
+    for index, file in enumerate(files):
+        if not isinstance(file, dict):
+            continue
+        url = str(file.get("url") or "").strip()
+        if not url:
+            continue
+        alt = caption if len(files) == 1 else f"{caption}（第 {index + 1} 页）"
+        images.append(f"![{alt}]({url})")
+    return images
+
+
+def _ref_note(ref: dict[str, Any]) -> str:
+    """本条证据的正文说明行：有扫描件给图注，否则说明占位 / 附件 / 证据地址。"""
+
+    files = ref.get("files")
+    if isinstance(files, list) and files:
+        caption = str(ref.get("caption") or ref.get("name") or "").strip() or _ref_name(ref)
+        return f"附图：{caption}（共 {len(files)} 页）"
+    if ref.get("placeholder"):
+        return "待补扫描件（原件尚未上传）"
+    if str(ref.get("kind") or "") == "attachment":
+        return "附件证据（非图片格式，导出时以附件占位给出）"
+    return f"证据路径：{str(ref.get('evidencePath') or '').strip()}"
+
+
 def build_evidence_chapter_result(
     section: dict[str, Any] | None,
     entries: list[dict[str, Any]],
+    assets: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """把逐条证据条目渲染为章节内容，并产出导出层需要的插图分组。
 
     ``evidenceGroups[].insertRefs`` 是本条**应当实际插图**的证据（整章内同一证据
     只插一次），``sourceRefs`` 是本条对应的全部证据（用于正文交叉引用）。
+
+    ``assets`` 为 ``evidencePath -> 资产信息`` 的映射（Store 侧用媒体适配器解析
+    真实扫描件得到）。提供时，正文会**直接内联材料内容**（图片 Markdown），并把
+    ``files``（可直接访问的 ``/runtime/...`` 图片地址）挂到每个证据引用上，供前端
+    逐条展示真实扫描件，而不是只显示证据地址。
     """
 
     section_data = section if isinstance(section, dict) else {}
     title = str(section_data.get("title") or "").strip() or EVIDENCE_SECTION_TITLE
+    asset_map = assets if isinstance(assets, dict) else {}
 
     lines: list[str] = [
         f"# {title}",
@@ -356,6 +425,7 @@ def build_evidence_chapter_result(
             path = str(ref.get("evidencePath") or "").strip()
             if not path:
                 continue
+            _attach_asset(ref, asset_map.get(path))
             if path in inserted:
                 reused.append(ref)
             else:
@@ -369,12 +439,14 @@ def build_evidence_chapter_result(
         names = _material_names(entry)
         if refs:
             lines.append(f"- 响应材料：{names or '（见下列证据原件）'}")
-            for path in _evidence_paths(entry):
+            for ref in refs:
+                path = str(ref.get("evidencePath") or "").strip()
                 first = inserted.get(path, 0)
                 if first and first != int(sequence or 0):
-                    lines.append(f"  - 证据路径：{path}（原件见第 {first} 条）")
-                else:
-                    lines.append(f"  - 证据路径：{path}")
+                    lines.append(f"  - 证据原件见第 {first} 条：{_ref_name(ref)}")
+                    continue
+                lines.extend(_ref_images(ref))
+                lines.append(f"  - {_ref_note(ref)}")
         else:
             lines.append("- 响应材料：【需人工补充：未在 M3 中命中可支撑本条要求的证明材料】")
             blanks.append(
@@ -422,6 +494,19 @@ def build_evidence_chapter_result(
 
     summary = evidence_entries_summary(entries)
     summary["distinctEvidence"] = len(inserted)
+
+    scanned_total = 0
+    scanned_ready = 0
+    for ref in deduped_refs:
+        path = str(ref.get("evidencePath") or "").strip()
+        if not path or path not in asset_map:
+            continue
+        scanned_total += 1
+        if asset_map[path].get("available"):
+            scanned_ready += 1
+    summary["scannedReady"] = scanned_ready
+    summary["scannedTotal"] = scanned_total
+
     return {
         "content": "\n".join(lines).strip(),
         "evidenceEntries": entries,

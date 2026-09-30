@@ -1,5 +1,28 @@
 # WorkBuddy 智能体接入方式说明
 
+> ## ⚠️ 本文档已过期，勿据此实施（2026-09-30 标注）
+>
+> **本文描述的 `agent_bridge` 机制已经从代码中删除。** `backend/app/tender_matching/agent_bridge.py`
+> 在 git `f070899`（2026-09-24）中被移除，`git ls-files` 中已不存在任何 `agent_bridge` / `sidecar` 代码。
+>
+> 因此下文所述的 `runtime/agent_bridge/inbox|outbox` 任务包协议、`file` / `http` 两种传输方式、
+> `agentBridge` 配置段、`workbuddy-agent` 提取层 Provider 接入流程，**均不再对应现行代码**。
+> （`config/service.py` 里那段 `agentBridge` 默认值也已一并清除——它已无任何代码读取。）
+>
+> **现行实现是 `backend/app/workbuddy_agent/`：**
+>
+> | 用途 | 位置 |
+> |---|---|
+> | 配置与默认值 | `backend/app/workbuddy_agent/config/defaults.py` |
+> | 配置说明 | `backend/app/workbuddy_agent/config/README.md` |
+> | 能力契约 | `backend/app/workbuddy_agent/skills/tender-document-map/SKILL.md` |
+> | 运行时目录 | `runtime/document_map_agent`（**不再是** `runtime/agent_bridge`） |
+> | 测试 | `backend/tests/test_workbuddy_agent_matching.py` |
+>
+> 本文仅作为**历史沿革记录**保留，用于理解当初的接入尝试及其失败原因
+> （Sidecar 能启动、能读任务包，但 headless 智能体始终未完成登录鉴权）。
+> 同一事实另见 `docs/企业经营智能体-现状盘点-招投标智能体.md` 第 4.2 节与"已核实的文档/代码偏差"第 8 条。
+
 本文整理当前项目中 WorkBuddy / CodeBuddy 智能体的接入现状、登录方式、实际能力边界，以及后续可选的接入路线。
 
 ## 1. 核心结论

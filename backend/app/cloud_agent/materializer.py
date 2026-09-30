@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -417,6 +417,11 @@ def build_catalog_item(
     return item
 
 
+def _now_iso() -> str:
+    """本地时区 ISO 时间戳（与 store.now_iso 同格式，带时区偏移）。"""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def build_workspace(
     *,
     run: dict[str, Any],
@@ -484,6 +489,16 @@ def build_workspace(
     }
     if previous and previous.get("auditRecords"):
         workspace["auditRecords"] = previous["auditRecords"]
+    # 创建时间盖章规则（存储层据此填 workspaces.created_at）：
+    #   首次创建 -> 记当前时间；
+    #   重复物化 -> 沿用原记录的值；
+    #   接入前的老数据（previous 里没有）-> 一律不写，交给存储层保留库里已有的值，
+    #   而不是伪造一个「现在」。
+    if isinstance(previous, dict):
+        if previous.get("createdAt"):
+            workspace["createdAt"] = previous["createdAt"]
+    else:
+        workspace["createdAt"] = _now_iso()
     return workspace
 
 

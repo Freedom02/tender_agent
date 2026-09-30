@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from .config.service import ensure_config, public_configuration
 from .runtime_lock import runtime_file_lock
+from .storage import create_backend
 from .tender_matching.eligibility import (
     call_openai_compatible,
     evaluate_announcement_eligibility,
@@ -50,7 +51,7 @@ from .tender_monitor.adapters import (
 )
 # Repository 层（阶段 2）：三个聚合的读写统一走 Repository，json_impl 直连现有文件。
 # 详见 docs2/Repository层设计与读写点清单.md。
-from .repository import JsonCatalogRepository, JsonWorkspaceRepository, M3FactsRepository
+from .repository import M3FactsRepository
 from .repository.io import read_json, write_json
 
 
@@ -116,6 +117,8 @@ class Store:
         self.root = root
         self.runtime_root = root / "runtime"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        # 结构化状态的读写后端：json（默认，现状）/ dual（读 JSON、双写 JSON+DB）/ db（PostgreSQL 唯一事实源）
+        self.backend = create_backend(self.runtime_root)
         self.catalog_path = self.runtime_root / "catalog.json"
         self.libraries_path = self.runtime_root / "libraries.json"
         self.config_path = root / "agent-config.json"
@@ -145,10 +148,9 @@ class Store:
         # 每次 bootstrap 都会调用它。按 (查询参数, catalog 对象身份) 缓存，落盘时失效。
         self._catalog_filter_cache: dict[tuple[str, str, str, bool], list[dict[str, Any]]] = {}
         self._catalog_filter_identity: int | None = None
-        # Repository 层（阶段 2）：三个聚合的读写出口。json_impl 直连现有文件，
-        # 行为与迁移前一致；阶段 3+ 换 pg_impl 时只需替换这里的实现。
-        self._catalog_repo = JsonCatalogRepository(self.catalog_path)
-        self._workspace_repo = JsonWorkspaceRepository(self.workspaces_path)
+        # Repository 层：只保留 M3 企业事实出口（M3 是外部图库，不属于 runtime JSON，
+        # 因此不在 self.backend 的接口范围内）。catalog / workspaces / libraries /
+        # reminders / automation_runs 的读写统一走 self.backend（json / dual / db 三态）。
         self._facts_repo = M3FactsRepository(self._load_facts_from_m3)
 
     def _load_facts_from_m3(self) -> dict[str, Any]:
@@ -159,15 +161,17 @@ class Store:
 
     def initialize(self) -> None:
         # 企业数据单一来源：M3 图库（本地不再落 company-materials.json，只保留证明材料文件）。
-        self.catalog = self._catalog_repo.load()
+        self.catalog = self.backend.load_catalog() or []
+        # config（含 AI API Key）仍留在磁盘 agent-config.json，不进库。
         self.config = ensure_config(read_json(self.config_path, self.default_config()))
-        self.libraries = read_json(self.libraries_path, self.default_libraries())
-        self.reminders = read_json(self.runtime_root / "reminders.json", [])
-        self.runs = read_json(self.runtime_root / "automation-runs.json", [])
-        self.workspaces = self._workspace_repo.load()
+        self.libraries = self.backend.load_libraries() or self.default_libraries()
+        self.reminders = self.backend.load_reminders() or []
+        self.runs = self.backend.load_automation_runs() or []
+        self.workspaces = self.backend.load_workspaces() or {}
+        # 磁盘工作区指纹：保留我方的懒加载前置条件（_refresh_workspaces_from_disk 依赖它）。
         self._workspaces_disk_mtime = self._workspaces_file_mtime()
         self.deleted_workspaces = {
-            str(item) for item in (read_json(self.deleted_workspaces_path, []) or []) if str(item)
+            str(item) for item in (self.backend.load_deleted_workspaces() or []) if str(item)
         }
         for deleted_id in self.deleted_workspaces:
             self.workspaces.pop(deleted_id, None)
@@ -552,16 +556,17 @@ class Store:
         self.persist_catalog()
 
     def persist_catalog(self) -> None:
-        self._catalog_repo.save(self.catalog)
+        self.backend.save_catalog(self.catalog)
+        # 保有我方：catalog 落盘后使过滤缓存失效。
         self._catalog_filter_cache.clear()
 
     def persist_libraries(self) -> None:
-        write_json(self.libraries_path, self.libraries)
+        self.backend.save_libraries(self.libraries)
 
     def persist_runtime(self) -> None:
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = self._workspace_repo.load()
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 disk_workspaces = {}
             merged_workspaces = deepcopy(disk_workspaces)
@@ -578,9 +583,9 @@ class Store:
                     merged_workspaces[workspace_id] = deepcopy(workspace)
             for deleted_id in self.deleted_workspaces:
                 merged_workspaces.pop(deleted_id, None)
-            write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
-            write_json(self.runtime_root / "automation-runs.json", self.runs[-50:])
-            self._workspace_repo.save(merged_workspaces)
+            self.backend.save_reminders(self.reminders[-100:])
+            self.backend.save_automation_runs(self.runs[-50:])
+            self.backend.save_workspaces(merged_workspaces)
             self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
         self._workspaces_disk_mtime = self._workspaces_file_mtime()
@@ -621,7 +626,7 @@ class Store:
             return
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = self._workspace_repo.load()
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 self._workspaces_disk_mtime = self._workspaces_file_mtime()
                 return
@@ -641,7 +646,7 @@ class Store:
         self._workspaces_disk_mtime = self._workspaces_file_mtime()
 
     def persist_deleted_workspaces(self) -> None:
-        write_json(self.deleted_workspaces_path, sorted(self.deleted_workspaces))
+        self.backend.save_deleted_workspaces(sorted(self.deleted_workspaces))
 
     def delete_workspace(self, workspace_id: str) -> dict[str, Any] | None:
         """彻底删除一个项目：工作区记录 + 关联抓取项目 + 跟进提醒 + runtime 解析产物。
@@ -664,11 +669,11 @@ class Store:
         self._workspace_snapshot.pop(workspace_id, None)
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = self._workspace_repo.load()
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 disk_workspaces = {}
             disk_workspaces.pop(workspace_id, None)
-            self._workspace_repo.save(disk_workspaces)
+            self.backend.save_workspaces(disk_workspaces)
 
         # 2) 关联抓取项目：workspaceId 反查 + projectId 正查，两个方向都下挂
         removed_projects: list[str] = []
@@ -704,7 +709,7 @@ class Store:
             removed_reminders = len(self.reminders) - len(kept_reminders)
             if removed_reminders:
                 self.reminders = kept_reminders
-                write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
+                self.backend.save_reminders(self.reminders[-100:])
 
         # 4) 该项目的 runtime 解析产物目录（runtime/projects/<projectId>）
         removed_artifacts: list[str] = []
@@ -1803,6 +1808,13 @@ class Store:
                 workspace["draftVersion"] = int(previous_workspace.get("draftVersion", 1) or 1)
             if previous_workspace.get("auditRecords"):
                 workspace["auditRecords"] = previous_workspace["auditRecords"]
+        # 创建时间盖章：首次创建记当前时间；重新分析沿用原值；接入前的老数据没有就留空，
+        # 交给存储层保留库里已有的值（见 cloud_agent/materializer.py 同名注释）。
+        if isinstance(previous_workspace, dict):
+            if previous_workspace.get("createdAt"):
+                workspace["createdAt"] = previous_workspace["createdAt"]
+        else:
+            workspace["createdAt"] = self.current_time()
         self.workspaces[workspace_id] = workspace
         self.persist_catalog()
         self.persist_runtime()
@@ -3664,6 +3676,68 @@ class Store:
         plan.append(section)
         return section
 
+    def _resolve_evidence_assets(self, refs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """把一组证据引用解析为 ``{evidencePath: 资产信息}``。
+
+        资产信息含 ``files``（可直接访问的 ``/runtime/...`` 图片地址，供前端逐条
+        内联展示真实扫描件）与 ``available``（原件是否真实可插图，占位目录为 False）。
+        """
+
+        from .media_store.local import LocalFolderStore
+
+        media = LocalFolderStore(self.runtime_root)
+        runtime_root = Path(self.runtime_root).resolve()
+        assets: dict[str, dict[str, Any]] = {}
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            path = str(ref.get("evidencePath") or "").strip()
+            if not path or path in assets:
+                continue
+            try:
+                asset = media.fetch(ref)
+            except Exception:
+                asset = None
+            assets[path] = self._evidence_asset_info(path, asset, runtime_root)
+        return assets
+
+    @staticmethod
+    def _evidence_asset_info(
+        path: str,
+        asset: Any,
+        runtime_root: Path,
+    ) -> dict[str, Any]:
+        """把媒体适配器解析出的 MediaAsset 转成可序列化的资产信息。"""
+
+        if asset is None:
+            return {
+                "evidencePath": path,
+                "available": False,
+                "files": [],
+                "placeholder": False,
+                "kind": "missing",
+                "caption": "",
+                "pageCount": 0,
+                "textSummary": "",
+            }
+        files: list[dict[str, str]] = []
+        for page in asset.page_images or []:
+            try:
+                rel = Path(page).resolve().relative_to(runtime_root).as_posix()
+            except (ValueError, OSError):
+                continue
+            files.append({"url": f"/runtime/{rel}", "name": Path(page).name})
+        return {
+            "evidencePath": path,
+            "available": not bool(asset.placeholder),
+            "files": files,
+            "placeholder": bool(asset.placeholder),
+            "kind": str(asset.kind or ""),
+            "caption": str(asset.caption or ""),
+            "pageCount": int(asset.page_count or 0),
+            "textSummary": str(asset.text_summary or ""),
+        }
+
     def _annotate_evidence_availability(self, section: dict[str, Any]) -> dict[str, int]:
         """给证明材料章节的每个证据引用标注磁盘上是否真有扫描件。
 
@@ -3720,7 +3794,15 @@ class Store:
         self._refresh_company_from_m3(force=True)
         section = self._ensure_evidence_section(bid_doc)
         entries = build_evidence_entries(fine_review, self.company_knowledge)
-        result = build_evidence_chapter_result(section, entries)
+        assets = self._resolve_evidence_assets(
+            [
+                ref
+                for entry in entries
+                for ref in (entry.get("sourceRefs") or [])
+                if isinstance(ref, dict)
+            ]
+        )
+        result = build_evidence_chapter_result(section, entries, assets=assets)
 
         section["content"] = result["content"]
         section["evidenceEntries"] = result["evidenceEntries"]
@@ -3734,7 +3816,9 @@ class Store:
         section["evidenceSummary"] = result["summary"]
         section["provider"] = "local"
 
-        summary = self._annotate_evidence_availability(section)
+        # 资产解析已在生成前完成（files/available 已挂到每条证据引用上），
+        # 统计直接取生成结果，不再对同一批证据重复探测一遍磁盘。
+        summary = result["summary"]
 
         bid_doc["status"] = "generated"
         self._invalidate_compliance_review(bid_doc)
@@ -3776,17 +3860,21 @@ class Store:
             None,
         )
         entries = build_evidence_entries(fine_review, self.company_knowledge)
-        result = build_evidence_chapter_result(section, entries)
-        summary = self._annotate_evidence_availability(
-            {"evidenceGroups": result["evidenceGroups"],
-             "evidenceSummary": result["summary"]}
+        assets = self._resolve_evidence_assets(
+            [
+                ref
+                for entry in entries
+                for ref in (entry.get("sourceRefs") or [])
+                if isinstance(ref, dict)
+            ]
         )
+        result = build_evidence_chapter_result(section, entries, assets=assets)
         return {
             "sectionId": str((section or {}).get("sectionId") or "evidence-01"),
             "exists": isinstance(section, dict),
             "entries": result["evidenceEntries"],
             "groups": result["evidenceGroups"],
-            "summary": summary,
+            "summary": result["summary"],
             "blanksToFill": result["blanksToFill"],
         }
 

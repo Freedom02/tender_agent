@@ -63,7 +63,6 @@ tender_agent/
 │     │  └─ service.py
 │     ├─ tender_matching/
 │     │  ├─ __init__.py
-│     │  ├─ agent_bridge.py        # 智能体提取桥（可插拔）
 │     │  ├─ contracts.py
 │     │  ├─ document_fine_matching.py  # 提取层
 │     │  ├─ document_matching.py       # 匹配层（M3 事实路由）
