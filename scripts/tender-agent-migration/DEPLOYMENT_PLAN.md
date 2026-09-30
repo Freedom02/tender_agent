@@ -4,6 +4,14 @@
 > 全程可回滚、可校验，最后进入日常备份运维状态。
 >
 > 本文档配套文件：`schema.sql`（建表）、`migrate_to_db.py`（迁移脚本）、`README.md`（迁移映射与用法）。
+>
+> **适用范围（重要）**：本文档是**单人本机部署 + 本机数据搬迁**的完整计划，面向"迁移发起人自己"。
+> 若要给别人部署、或要让伙伴连上这台库、或要把数据交接出去，请看 →
+> [`PARTNER_ONBOARDING.md`](PARTNER_ONBOARDING.md)。那份文档会说明本文档里没有的三件事：
+> **数据不在 git 里**、**2.6GB 证明材料文件要单独传**、**应用侧还要配 `STORE_BACKEND` / `PG_DSN`**。
+>
+> 另：本文档用 `tender_agent` / `tender_agent_test` 作库名，而 `shared-db/` 那套 Docker 方案用
+> `tender_agent_dev` —— 实际在用的是后者。两套命名并存，注意区分。
 
 ---
 
@@ -133,6 +141,11 @@ net start postgresql-x64-16
 
 ### C2. 确认只监听本机（默认即可）
 `postgresql.conf` 里 `listen_addresses = 'localhost'`；`pg_hba.conf` 保持默认（`scram-sha-256`）。这台库只给本机应用用，不需要开外网。
+
+> ⚠️ **这一条只适用于"自己一个人用"的场景。** 如果你要让伙伴连上这个库共享数据，
+> 需要把 `listen_addresses` 放开并放行防火墙 —— 具体做法见
+> [`shared-db/README.md` 第 4 节](shared-db/README.md)（局域网 / Tailscale / 云主机三种方案）。
+> **这是两种互斥的部署形态，先决定走哪种**：单人本机（按本文档），还是多人共享（按 shared-db）。
 
 ### C3. 防病毒白名单（重要，Windows 常见坑）
 Windows Defender 实时扫描会明显拖慢数据库和备份。把以下目录加进排除项：

@@ -4,6 +4,11 @@
 
 **先读这句**：Docker 容器跑在谁的电脑上，数据库就是谁的**本机资源**。让伙伴连上，靠的是**网络方案**（局域网 / 虚拟组网 / 云主机），不是 Docker 配置。请先看第 4 节再决定。
 
+> 📖 **伙伴首次接入**：完整流程（拿到什么 / 缺什么、拿数据的两种方式、2.6GB 证明文件怎么交接、
+> `.env` 与应用侧 `STORE_BACKEND` 配置、自检清单）见 [`../PARTNER_ONBOARDING.md`](../PARTNER_ONBOARDING.md)。
+>
+> ⚠️ 本文档只解决「库怎么建、怎么连」，**不含数据怎么过去** —— 那正是上面那份文档的主题。
+
 ---
 
 ## 1. 前置：先把 WSL2 装上（Windows 家庭版必做）
@@ -161,16 +166,41 @@ docker-compose exec -T postgres psql -U tender_app -d tender_agent_dev -f - < mi
 
 ### 6.4 重置与备份
 
+> ### 🚨 别用 `>` / `<` 重定向传 dump
+>
+> **实测（PowerShell 5.1）：`pg_dump ... > backup.dump` 会损坏文件。** 重定向把原生命令的
+> 二进制输出当文本转码，dump 从 **7,125,701 字节** 膨胀到 **13,595,952 字节**，
+> `pg_restore` 直接报 `input file does not appear to be a valid archive` ——
+> **你以为备份成功了，其实那份文件根本恢复不了。**
+>
+> 恢复方向同理：PowerShell 不支持 `<` 输入重定向（`<` 是保留运算符），
+> `... --clean < backup.dump` 会直接语法报错。
+>
+> 正确做法是「容器内导出 + `docker cp`」，全程字节安全。
+
 ```powershell
-# 备份（自定义格式，可 pg_restore）
-docker-compose exec -T postgres pg_dump -U tender_app -Fc tender_agent_dev > backup_dev.dump
+# —— 备份（自定义格式，可用 pg_restore 恢复）——
+docker-compose exec -T postgres pg_dump -U tender_app -Fc -f /tmp/backup.dump tender_agent_dev
+docker cp tender-pg:/tmp/backup.dump .\backup_dev.dump
+docker-compose exec -T postgres rm -f /tmp/backup.dump
 
-# 恢复
-docker-compose exec -T postgres pg_restore -U tender_app -d tender_agent_dev --clean < backup_dev.dump
+# 自检：应列出目录项（实测 90）且无 error
+docker cp .\backup_dev.dump tender-pg:/tmp/check.dump
+docker-compose exec -T postgres pg_restore -l /tmp/check.dump | Measure-Object -Line
+docker-compose exec -T postgres pg_restore -l /tmp/check.dump | Select-String "error"
+docker-compose exec -T postgres rm -f /tmp/check.dump
 
-# 彻底重置（!! 会删除所有数据，仅限开发库）
+# —— 恢复 ——
+docker cp .\backup_dev.dump tender-pg:/tmp/restore.dump
+docker-compose exec -T postgres pg_restore --no-owner -U tender_app -d tender_agent_dev /tmp/restore.dump
+docker-compose exec -T postgres rm -f /tmp/restore.dump
+
+# —— 彻底重置（!! 会删除所有数据，仅限开发库）——
 docker-compose down -v && docker-compose up -d
 ```
+
+> 容器名固定为 `tender-pg`（见 `docker-compose.yml` 的 `container_name`）。
+> 上面这些命令在 PowerShell 5.1 和 7 下都能用。
 
 ---
 

@@ -7,10 +7,16 @@
 
 | 文件 | 作用 |
 |---|---|
+| `PARTNER_ONBOARDING.md` | **伙伴数据接入指南** —— 拿到什么/缺什么、数据怎么过去（共享库 or dump）、2.6GB 证明文件、`.env` 配置、自检清单。**给别人部署时先看这份** |
 | `DEPLOYMENT_PLAN.md` | **从零部署 PostgreSQL 到数据搬迁的完整计划**（含环境实测、安装、调优、校验、备份、回滚） |
+| `shared-db/` | Docker 共享开发库：Compose 编排 + 建表 init + 多人共享的网络方案 |
 | `schema.sql` | PostgreSQL 16 建表脚本（16 张表 + 索引） |
+| `migrations/` | 表结构变更文件（**已建过库的人**要按编号手动执行，新建库不需要） |
 | `migrate_to_db.py` | 一次性迁移脚本（读 JSON → 写库 → 行数校验报告） |
 | `README.md` | 本文档 |
+
+> ⚠️ `migrate_to_db.py` 读的是**发起迁移那台机器**的 `runtime/*.json`。别人 clone 仓库后没有
+> 这份源数据，跑它只会读到空 —— 他们要的是 `PARTNER_ONBOARDING.md` 里 dump 的路子。
 
 ## 前置条件
 
