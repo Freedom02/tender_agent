@@ -59,6 +59,8 @@ description: 依据招标解析结果判断投标文件目录该有哪些章节�
 - `derived: true`、`derivedOrigin`（`required_by_tender` / `ai_initiative`）、`derivedArchetype`（原型名）
 - `derivedBasis`：一句话说明为什么需要这一章，**必须点名具体证据**（例如“technical-0007 等 12 条技术条款要求功能与性能指标，现有目录只有响应表，无叙述承载章节”）
 - `requirementIds` / `evaluationIds`：只能用工具返回过的 ID，不得臆造（校验会拒绝，且后端会再过滤一次）
+- `source` 固定写 `ai`；`responseType` **必须用系统词表**：承载正文的章节写 `chapter_text`（不要写 `narrative`、`text`、`chapter`），需要插原件的材料章节写 `attachment`；不得使用 `fixed_form`、`table`、`section_group`、`deviation`。
+- `kind` 用 `technical` 或 `commercial`；`required` 按是否必交填写（主动发挥类通常为 `false`）。
 
 正例：`{"title":"技术方案","derivedBasis":"technical-0001~technical-0018 共 18 条技术功能与性能条款，现仅有技术响应表承载","requirementIds":["technical-0001","technical-0007"]}`
 

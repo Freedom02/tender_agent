@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import unittest
 
+from backend.app.bid_writing.schemas import normalize_response_type
 from backend.app.bid_writing.volumes import plan_from_submission_structure
 from backend.app.pi_agent.writing_orchestrator import _normalize_plan
 from backend.app.store import Store
@@ -118,6 +119,58 @@ class DerivedSectionPlacementTests(unittest.TestCase):
             SUBMISSION_STRUCTURE, generated_plan=_generated_plan(row), keep_derived=True
         )
         self.assertNotIn("技术方案", [row["title"] for row in plan])
+
+
+class ResponseTypeVocabularyTests(unittest.TestCase):
+    """真实踩坑回归：模型把 itemType 词表（narrative）写进 responseType，
+    放置护栏若用白名单会让整章静默消失。"""
+
+    def test_normalize_response_type_maps_item_type_vocabulary(self) -> None:
+        self.assertEqual(normalize_response_type("narrative"), "chapter_text")
+        self.assertEqual(normalize_response_type("Narrative"), "chapter_text")
+        self.assertEqual(normalize_response_type("text"), "chapter_text")
+        self.assertEqual(normalize_response_type("chapter_text"), "chapter_text")
+        self.assertEqual(normalize_response_type("fixed_table"), "fixed_form")
+        self.assertEqual(normalize_response_type(""), "")
+
+    def test_derived_chapter_with_narrative_response_type_is_kept(self) -> None:
+        row = _derived_row("技术方案")
+        row["responseType"] = "narrative"
+        plan = plan_from_submission_structure(
+            SUBMISSION_STRUCTURE,
+            generated_plan=_generated_plan(row),
+            keep_derived=True,
+        )
+        self.assertIn("技术方案", [item["title"] for item in plan])
+
+    def test_derived_chapter_may_not_become_fixed_form_or_section_group(self) -> None:
+        for response_type in ("fixed_form", "section_group", "deviation"):
+            row = _derived_row("技术方案")
+            row["responseType"] = response_type
+            plan = plan_from_submission_structure(
+                SUBMISSION_STRUCTURE,
+                generated_plan=_generated_plan(row),
+                keep_derived=True,
+            )
+            self.assertNotIn(
+                "技术方案", [item["title"] for item in plan], response_type
+            )
+
+    def test_normalize_plan_converts_narrative_to_chapter_text(self) -> None:
+        row = _derived_row("技术方案")
+        row["responseType"] = "narrative"
+        plan = _normalize_plan({"plan": _generated_plan(row)})
+        chapter = next(item for item in plan if item["title"] == "技术方案")
+        self.assertEqual(chapter["responseType"], "chapter_text")
+
+    def test_store_normalization_converts_narrative_to_chapter_text(self) -> None:
+        row = _derived_row("技术方案")
+        row["responseType"] = "narrative"
+        plan, _warnings = Store._normalize_pi_bid_plan(
+            {"plan": _generated_plan(row)}, {"rows": []}, None
+        )
+        chapter = next(item for item in plan if item["title"] == "技术方案")
+        self.assertEqual(chapter["responseType"], "chapter_text")
 
 
 class TitleRegressionTests(unittest.TestCase):

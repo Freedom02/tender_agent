@@ -73,8 +73,8 @@ def _item_supports_children(item: dict[str, Any]) -> bool:
 #: 允许出现「智能体新增叙述章节」的来源标记（对应 outline_diagnosis 的两类产出线）。
 DERIVED_ORIGINS = ("required_by_tender", "ai_initiative")
 
-#: 智能体新增章节可用的响应类型：只允许承载正文/材料，不允许变成新的卷或格式条目。
-DERIVED_RESPONSE_TYPES = ("", "chapter_text", "attachment", "table")
+#: 智能体新增章节**不允许**使用的响应类型：卷分组、固定格式件与偏离表只能来自原文。
+DERIVED_REJECTED_RESPONSE_TYPES = ("section_group", "fixed_form", "deviation")
 
 
 def _is_derived_narrative(row: dict[str, Any]) -> bool:
@@ -82,8 +82,12 @@ def _is_derived_narrative(row: dict[str, Any]) -> bool:
 
     这是放置层的护栏而不是业务判断：只有同时满足
     ① 显式 ``derived=true``；② ``derivedOrigin`` 属于两类产出线；
-    ③ ``derivedBasis`` 非空（真的写明了依据）；④ 不是卷/格式条目
+    ③ ``derivedBasis`` 非空（真的写明了依据）；④ 不是卷/格式条目；
+    ⑤ 响应类型不是卷分组/固定格式件/偏离表
     的节点，才会被容许挂到卷下。任何一条不满足都按原有规则丢弃。
+
+    这里对 ``responseType`` 用**黑名单**而非白名单：模型经常把 itemType 词表
+    （``narrative``）写进 responseType，白名单会让整章静默消失。
     """
 
     if not bool(row.get("derived")):
@@ -94,7 +98,10 @@ def _is_derived_narrative(row: dict[str, Any]) -> bool:
         return False
     if str(row.get("nodeType") or "").strip() in {"volume", "format_item"}:
         return False
-    return str(row.get("responseType") or "").strip() in DERIVED_RESPONSE_TYPES
+    return (
+        str(row.get("responseType") or "").strip()
+        not in DERIVED_REJECTED_RESPONSE_TYPES
+    )
 
 
 def plan_from_submission_structure(

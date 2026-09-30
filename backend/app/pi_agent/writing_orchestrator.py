@@ -10,6 +10,7 @@ from typing import Any, Callable
 from ..agent_runtime.contracts import build_agent_result, now_iso
 from ..bid_writing.schemas import (
     material_keys_for_writing_profile,
+    normalize_response_type,
     resolve_writing_profile,
 )
 from .outline_agent_context import (
@@ -131,6 +132,32 @@ def _flatten_plan_items(
     return flattened
 
 
+def _dropped_derived_titles(
+    plan: list[dict[str, Any]],
+    outline_raw: dict[str, Any],
+) -> list[str]:
+    """找出智能体声明新增、但没能在放置后留在目录里的章节标题。
+
+    放置规则对「挂错父级」的章节是丢弃处理；静默丢弃会让人完全看不出
+    智能体到底做没做事，所以这里把差异显式报出来。
+    """
+
+    kept = {
+        _text(item.get("title"), 240)
+        for item in plan
+        if isinstance(item, dict) and item.get("derived")
+    }
+    titles: list[str] = []
+    raw_plan = outline_raw.get("plan") if isinstance(outline_raw, dict) else None
+    for item in _as_list(raw_plan):
+        if not isinstance(item, dict) or not item.get("derived"):
+            continue
+        title = _text(item.get("title"), 240)
+        if title and title not in kept and title not in titles:
+            titles.append(title)
+    return titles
+
+
 def _normalize_plan(
     value: Any,
     *,
@@ -219,7 +246,7 @@ def _normalize_plan(
         sibling_orders[sibling_key] = max(sibling_orders.get(sibling_key, 0), order)
         source = _text(item.get("source"), 60) or "ai"
         kind = _text(item.get("kind"), 60) or "technical"
-        response_type = _text(item.get("responseType"), 60)
+        response_type = normalize_response_type(_text(item.get("responseType"), 60))
         if not response_type:
             response_type = (
                 "fixed_form"
@@ -1036,6 +1063,14 @@ class PiWritingOrchestrator:
             {**parsed_structure, "volumes": planned_volumes},
             keep_derived=policy["enabled"],
         )
+        if policy["enabled"]:
+            dropped = _dropped_derived_titles(plan, outline_raw)
+            if dropped:
+                warnings.append(
+                    "目录智能体新增的 %d 个章节未通过放置规则被丢弃（%s）："
+                    "它们必须挂在既有卷下或可承载正文的文件项下。"
+                    % (len(dropped), "、".join(dropped[:6]))
+                )
         if not plan:
             raise PiWritingOrchestrationError(
                 "明确的投标文件格式未能生成有效卷内目录"

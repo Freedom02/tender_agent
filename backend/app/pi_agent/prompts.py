@@ -2060,7 +2060,7 @@ allRequirementIds 是完整要求 ID 清单；requirementSummary 是完整分类
 13. 输出顺序必须是先父后子；同一父级下的 `order` 从 1 连续编号。
 14. 无明确格式时，按文档中明确的提交文件线索生成最小可用单卷骨架；主动发挥类章节只在有评分依据或要求成规模时添加，并在 warnings 写明依据来源。
 15. 对目录修正要求，优先合并重复同级标题、删除仅为承载单条要求而生成的冗余末级节点；不能删除原文明确要求的文件项。
-16. `required` 表示该章节是否为招标文件要求或完成投标文件所必需；`responseType` 使用 `section_group`、`chapter_text`、`fixed_form`、`table`、`attachment` 或 `deviation`。用工具补充的章节 required 允许为 false。
+16. `required` 表示该章节是否为招标文件要求或完成投标文件所必需；`responseType` 只能使用 `section_group`、`chapter_text`、`fixed_form`、`table`、`attachment` 或 `deviation`（**新增正文章节一律写 `chapter_text`，不要写 narrative/text/chapter**）。用工具补充的章节 required 允许为 false，`source` 写 `ai`。
 17. 不要输出 content、正文、企业名称、人员、金额、日期或任何未在输入中出现的承诺。
 18. 新增章节**一章一个名字**：同一父节点下的标题必须互不相同，且要能看出该章承载什么（技术方案 / 实施方案与进度计划 / 质量保证措施 / 售后服务方案 / 培训方案 / 技术参数证明材料 …）。多个章节共用同一标题会被判为重复并整份退回重做。
 19. 只在查到证据时才新增章节：`search_requirements` 查不到成规模的对应条款，就不要写这一章；也不要用相同标题凑数。

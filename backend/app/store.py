@@ -2512,6 +2512,7 @@ class Store:
             SECTION_SOURCE_TABLE,
             SECTION_SOURCE_TEMPLATE,
             build_section,
+            normalize_response_type,
         )
 
         if not isinstance(payload, dict):
@@ -2621,7 +2622,9 @@ class Store:
                 level=level,
                 order=order,
                 required=bool(item.get("required", True)),
-                response_type=str(item.get("responseType") or "").strip(),
+                response_type=normalize_response_type(
+                    str(item.get("responseType") or "").strip()
+                ),
             )
             section["sourceSectionId"] = source_section_id or section_id
             section["evaluationIds"] = [
