@@ -65,3 +65,6 @@ docs/P04-P05鐩爣鑼冨洿閲嶆瀯鎵ц璁″垝.md
 docs/褰掓。-15绫绘彁鍙栧眰鍒犻櫎璁板綍.md
 docs/绠�鍘嗛」鐩粡鍘嗘敼鍐欑増.md
 scripts/_*.py
+
+# 治理校验脚本的输出报告（每次运行重新生成，不入库）
+scripts/projection_coverage_report.txt
