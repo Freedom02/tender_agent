@@ -476,10 +476,25 @@ class PostgresBackend(StorageBackend):
             # （包括「未知」的 NULL）；updated_at 仅在该工作区 payload 真变了才刷新。
             _upsert_rows(cur, "workspaces", ws_rows, ["id"],
                          coalesce_cols=("created_at",), touch_col="updated_at")
-            # 派生表全量重建，与工作区 payload 保持一致
-            cur.execute("DELETE FROM workspace_requirement_coverage")
-            cur.execute("DELETE FROM workspace_fine_review_rows")
-            cur.execute("DELETE FROM workspace_sections")
+            # 派生表按 workspace_id 局部重建，与工作区 payload 保持一致。
+            #
+            # 这里以前是**无 WHERE 的整表 DELETE**（全库所有工作区的行全删全插），
+            # 代价是 O(总行数)/次保存 —— 而 persist_runtime()（存章节、改匹配状态）
+            # 每次都会走到这里，规模上去之后是纯粹的浪费。
+            # 现在只清理**本次传入**的工作区：DELETE ... WHERE workspace_id = ANY(%s)，
+            # 随后 upsert 出的行覆盖同一批 workspace_id，语义与整表重建等价。
+            #
+            # 注意：以 **workspaces 字典的键**（而不是各子表 rows 里出现过的 id）为准。
+            # 若某个工作区这次没有产生任何章节行，用子表推导的 id 集合会漏掉它，
+            # 旧行就会残留 —— 用字典键可以保证「传入即重建」，包括清空成 0 行的情形。
+            ws_ids = [str(k) for k in value if isinstance(value.get(k), dict)]
+            if ws_ids:
+                for table in (
+                    "workspace_requirement_coverage",
+                    "workspace_fine_review_rows",
+                    "workspace_sections",
+                ):
+                    cur.execute(f"DELETE FROM {table} WHERE workspace_id = ANY(%s)", (ws_ids,))
             _upsert_rows(cur, "workspace_sections", sec_rows, ["workspace_id", "section_id"])
             _upsert_rows(cur, "workspace_fine_review_rows", fr_rows, ["workspace_id", "row_id"])
             _upsert_rows(cur, "workspace_requirement_coverage", cov_rows, ["workspace_id", "requirement_id"])
