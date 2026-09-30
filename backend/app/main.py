@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
 import threading
 from contextlib import suppress
 from pathlib import Path
@@ -24,6 +25,7 @@ from .api.monitoring import create_router as create_monitoring_router
 from .api.notifications import create_router as create_notifications_router
 from .api.ontology import create_router as create_ontology_router
 from .api.wecom import create_router as create_wecom_router
+from .runtime_lock import SingleInstanceError, acquire_single_instance_lock
 from .store import Store
 from .cloud_agent.run_service import CloudRunService
 from .tender_monitor.service import search_catalog
@@ -32,6 +34,18 @@ from .tender_monitor.scheduler import monitoring_loop
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+
+# 单实例保护。必须在 Store(ROOT) 之前占锁：Store 初始化就会读 catalog/workspaces，
+# 而两个后端进程共享同一个 runtime 目录时会各自持有内存副本互相覆盖，导致 catalog
+# 条目凭空消失、已删数据复活。用户习惯的 `uvicorn app.main:app --port 8793` 恰好
+# 绕开了「同端口起不来」这个天然互斥，所以这里补一把与端口无关的进程级锁。
+_INSTANCE_LOCK = None
+if os.getenv("TENDER_AGENT_ALLOW_MULTI_INSTANCE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    try:
+        _INSTANCE_LOCK = acquire_single_instance_lock(ROOT / "runtime" / ".backend-instance.lock")
+    except SingleInstanceError as error:
+        raise SystemExit(f"\n[启动中止] {error}\n") from None
+
 store = Store(ROOT)
 cloud_run_service = CloudRunService(ROOT)
 
