@@ -16,6 +16,7 @@ import type {
   MonitoringRunResult,
   OntologyMeta,
   OntologySummary,
+  OutlineDiagnosis,
   ParseBundle,
   ProofreadResult,
   Workspace
@@ -277,6 +278,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({})
     }),
+  bidDocumentOutlineDiagnosis: (workspaceId: string) =>
+    request<OutlineDiagnosis>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/outline-diagnosis`
+    ),
   bidDocumentGenerate: (workspaceId: string, mode: BidMode) =>
     request<{ bidDocument: BidDocument }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/bid-document/generate`,

@@ -3774,6 +3774,35 @@ class Store:
         section["evidenceSummary"] = summary
         return summary
 
+    def outline_diagnosis(self, workspace_id: str) -> dict[str, Any] | None:
+        """目录规划诊断（只读）：已有章节 / 要求响应缺口 / 自由发挥建议。
+
+        严格只读：不生成目录、不调用 LLM、不写盘。工作区还没有目录时，
+        返回带 warning 的空诊断，而不是顺手触发一次目录规划（那会调用 Pi）。
+        """
+
+        workspace = self.workspaces.get(workspace_id)
+        if not isinstance(workspace, dict):
+            return None
+        bid_doc = workspace.get("bidDocument")
+        bid_doc = bid_doc if isinstance(bid_doc, dict) else {}
+        plan = bid_doc.get("plan") if isinstance(bid_doc.get("plan"), list) else []
+        parse_bundle = self.get_parse_bundle(workspace_id) or {}
+
+        from .bid_writing.outline_diagnosis import diagnose
+
+        result = diagnose(parse_bundle, plan, workspace_id=workspace_id)
+        result["planSource"] = str(
+            bid_doc.get("planSource")
+            or bid_doc.get("planningSource")
+            or bid_doc.get("planningProvider")
+            or ""
+        )
+        result["planningWarnings"] = [
+            str(item) for item in (bid_doc.get("planningWarnings") or []) if str(item).strip()
+        ]
+        return result
+
     def build_evidence_chapter(self, workspace_id: str) -> dict[str, Any] | None:
         """一键生成/刷新「技术参数证明材料」章节（纯确定性，不调 LLM）。
 

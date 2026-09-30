@@ -162,6 +162,15 @@ def create_router(store: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail="工作区不存在")
         return result
 
+    @router.get("/api/workspaces/{workspace_id}/bid-document/outline-diagnosis")
+    def outline_diagnosis(workspace_id: str) -> dict[str, Any]:
+        """目录规划诊断（只读）：已有章节 / 要求响应缺口 / 自由发挥建议。"""
+
+        result = store.outline_diagnosis(workspace_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="工作区不存在")
+        return result
+
     @router.post("/api/workspaces/{workspace_id}/bid-document/evidence-chapter")
     def build_evidence_chapter(workspace_id: str) -> dict[str, Any]:
         """一键生成/刷新「技术参数证明材料」章节：逐条挂上已匹配的证明材料。"""
