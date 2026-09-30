@@ -143,6 +143,42 @@ assistant             工具返回内容原样转述：pong:spike-ok|workspace:w
 - Python 只做 schema 校验 + 放置 + 硬护栏。
 - **前端验证**：重算目录后，技术商务卷下出现带「要求响应·补充」的章节，每章能展开看到依据（引用了哪些条款/评分点/工具调用）。
 
+### M2′ 给目录智能体装上「技能 + 工具」— ✅ 已实现（提交 d06b2fa / d0d5807）
+
+已落地（智能体侧）：
+
+| 组件 | 落点 |
+| --- | --- |
+| 技能 | `backend/app/pi_agent/skills/bid-outline/SKILL.md`（Agent Skills 标准布局）——两条产出线、章节原型库、取证流程、放置与命名、依据写法、正反例；由 Python 读入注入提示词 |
+| 只读工具 | `backend/app/pi_agent/extensions/bid-outline-tools.ts` —— `bid_outline_signals` / `search_requirements` / `get_evaluation_points` / `get_submission_structure` / `validate_outline_candidate` |
+| 数据快照 | `backend/app/pi_agent/outline_agent_context.py` —— 每次调用前把诊断信号 + 条款索引 + 评分项 + 原文骨架写成 JSON，路径经 `BID_OUTLINE_CONTEXT` 注入子进程 |
+| 启动参数 | `client.py`：默认仍 `--no-tools`；传 tools 时用 `--no-builtin-tools --tools <白名单> --extension <扩展>`（不开放 read/bash/write/edit） |
+| 提示词 | 规则 4/5/8/14 由「不得新增章节」改为「取证后必须带依据地新增」；新增标题唯一性规则；schema 增 `derived*` 字段 |
+| 放置与护栏 | `volumes.py` 增 `keep_derived`（默认 False，行为不变）；`store.py` 落盘保留 `derived*`；策略档 `strict` 时完全关闭并保持改动前输出 |
+
+**真实数据端到端结果（数字孪生实训平台项目，210 条要求 / 8 个评分项）**
+
+```
+卷 3 / 格式条目 12 / 带依据新增 4          ← 原文骨架一个没动
+★ 项目理解与需求分析 [ai_initiative/understanding]
+★ 技术方案           [required_by_tender/technical_plan]
+★ 技术参数证明材料   [required_by_tender/evidence_materials]
+★ 培训方案           [required_by_tender/training]
+```
+
+智能体的说明（节选，均来自它自己调工具取证）：
+
+- 「technical-0001~0026 等 145 条技术功能与性能条款目前仅有技术和服务要求响应表承载，目录中无叙述性章节承载技术方案」
+- 「检索『售后 服务 响应时间 质保 维护 保修』『质量 验收 检验』『实施 进度 交付 安装 调试』均无成规模命中，故不生成对应章节，避免无依据凑数」
+- 「本项目评标方法为最低评标价法（eval-007），未识别到主观评分项，故未新增『技术优势与创新点』等自由发挥章节」
+
+**顺带修掉的两个既有 bug（在 main 上，影响整个目录功能）**
+
+1. `writing_orchestrator._normalize_plan` 与 `store._normalize_pi_bid_plan` 在第二个循环里沿用了上一个循环残留的 `title` 变量，**所有目录节点标题被覆盖成最后一个节点的标题**（同事 2026-09-27 重构 `1796737` 引入）。
+2. 质量门「未生成卷内多级章节」对直接挂在卷下的智能体新增章节误报。
+
+**待你验证**：重启后端 → Ctrl+F5 → 第 1 步解析 / 复用评估结果 → 生成目录 → 第 2 步目录树应出现带「智能体·要求响应 / 智能体·主动发挥」标签的章节（悬浮看依据），规划诊断面板底部有「目录智能体已新增的章节」列表。
+
 ### M3′ 加「目录复核」智能体（工作流）
 - 新增 `OutlineReviewAgent`：拿「诊断信号 + 生成目录」，逐条审「漏项 / 依据不足 / 放错卷」，输出修正后的目录或确认；不通过回环一次（上限 1 次，防死循环）。
 - 照抄解析链路已有的 `parse_review_prompt` → `parseReviewReport` 做法。
