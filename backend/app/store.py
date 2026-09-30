@@ -3774,11 +3774,27 @@ class Store:
         section["evidenceSummary"] = summary
         return summary
 
+    def _parse_bundle_artifact_path(self, workspace: dict[str, Any]) -> Path:
+        """解析包落盘位置（与 get_parse_bundle 的寻址一致，但不做任何修复/补写）。"""
+
+        ref = workspace.get("parseBundleRef")
+        artifact = str(ref.get("artifact") or "") if isinstance(ref, dict) else ""
+        if artifact:
+            return self.root / artifact
+        project_id = str(workspace.get("projectId") or "unassigned")
+        safe_project_id = re.sub(r"[^A-Za-z0-9_.-]", "_", project_id) or "unassigned"
+        return self.runtime_root / "projects" / safe_project_id / "parse" / "parse-bundle.json"
+
     def outline_diagnosis(self, workspace_id: str) -> dict[str, Any] | None:
         """目录规划诊断（只读）：已有章节 / 要求响应缺口 / 自由发挥建议。
 
-        严格只读：不生成目录、不调用 LLM、不写盘。工作区还没有目录时，
-        返回带 warning 的空诊断，而不是顺手触发一次目录规划（那会调用 Pi）。
+        严格只读：不生成目录、不调用 LLM、不写盘。工作区还没有目录时返回带 warning
+        的空诊断，而不是顺手触发一次目录规划（那会调用 Pi）。
+
+        解析包走 :meth:`_parse_bundle_artifact_path` 直读文件，不复用
+        :meth:`get_parse_bundle` —— 后者在缺少解析包时会尝试从 reasoning 兜底构建
+        并落盘一份旧版解析包，那就不是「只读」了，用户点一下「重新诊断」不该改变
+        工作区状态。
         """
 
         workspace = self.workspaces.get(workspace_id)
@@ -3787,7 +3803,8 @@ class Store:
         bid_doc = workspace.get("bidDocument")
         bid_doc = bid_doc if isinstance(bid_doc, dict) else {}
         plan = bid_doc.get("plan") if isinstance(bid_doc.get("plan"), list) else []
-        parse_bundle = self.get_parse_bundle(workspace_id) or {}
+        parse_bundle = read_json(self._parse_bundle_artifact_path(workspace), None)
+        parse_bundle = parse_bundle if isinstance(parse_bundle, dict) else {}
 
         from .bid_writing.outline_diagnosis import diagnose
 
