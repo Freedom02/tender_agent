@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from .config.service import ensure_config, public_configuration
 from .runtime_lock import runtime_file_lock
+from .storage import create_backend
 from .tender_matching.eligibility import (
     call_openai_compatible,
     evaluate_announcement_eligibility,
@@ -82,6 +83,8 @@ class Store:
         self.root = root
         self.runtime_root = root / "runtime"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        # 结构化状态的读写后端：json（默认，现状）/ dual（读 JSON、双写 JSON+DB）/ db（PostgreSQL 唯一事实源）
+        self.backend = create_backend(self.runtime_root)
         self.catalog_path = self.runtime_root / "catalog.json"
         self.libraries_path = self.runtime_root / "libraries.json"
         self.config_path = root / "agent-config.json"
@@ -108,14 +111,15 @@ class Store:
 
     def initialize(self) -> None:
         # 企业数据单一来源：M3 图库（本地不再落 company-materials.json，只保留证明材料文件）。
-        self.catalog = read_json(self.catalog_path, [])
+        self.catalog = self.backend.load_catalog() or []
+        # config（含 AI API Key）仍留在磁盘 agent-config.json，不进库。
         self.config = ensure_config(read_json(self.config_path, self.default_config()))
-        self.libraries = read_json(self.libraries_path, self.default_libraries())
-        self.reminders = read_json(self.runtime_root / "reminders.json", [])
-        self.runs = read_json(self.runtime_root / "automation-runs.json", [])
-        self.workspaces = read_json(self.workspaces_path, {})
+        self.libraries = self.backend.load_libraries() or self.default_libraries()
+        self.reminders = self.backend.load_reminders() or []
+        self.runs = self.backend.load_automation_runs() or []
+        self.workspaces = self.backend.load_workspaces() or {}
         self.deleted_workspaces = {
-            str(item) for item in (read_json(self.deleted_workspaces_path, []) or []) if str(item)
+            str(item) for item in (self.backend.load_deleted_workspaces() or []) if str(item)
         }
         for deleted_id in self.deleted_workspaces:
             self.workspaces.pop(deleted_id, None)
@@ -500,15 +504,15 @@ class Store:
         self.persist_catalog()
 
     def persist_catalog(self) -> None:
-        write_json(self.catalog_path, self.catalog, compact=True)
+        self.backend.save_catalog(self.catalog)
 
     def persist_libraries(self) -> None:
-        write_json(self.libraries_path, self.libraries)
+        self.backend.save_libraries(self.libraries)
 
     def persist_runtime(self) -> None:
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = read_json(self.workspaces_path, {})
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 disk_workspaces = {}
             merged_workspaces = deepcopy(disk_workspaces)
@@ -525,9 +529,9 @@ class Store:
                     merged_workspaces[workspace_id] = deepcopy(workspace)
             for deleted_id in self.deleted_workspaces:
                 merged_workspaces.pop(deleted_id, None)
-            write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
-            write_json(self.runtime_root / "automation-runs.json", self.runs[-50:])
-            write_json(self.workspaces_path, merged_workspaces, compact=True)
+            self.backend.save_reminders(self.reminders[-100:])
+            self.backend.save_automation_runs(self.runs[-50:])
+            self.backend.save_workspaces(merged_workspaces)
             self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
 
@@ -557,7 +561,7 @@ class Store:
         """Merge external process changes without losing local dirty records."""
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = read_json(self.workspaces_path, {})
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 return
             merged_workspaces = deepcopy(disk_workspaces)
@@ -575,7 +579,7 @@ class Store:
             self._workspace_snapshot = deepcopy(merged_workspaces)
 
     def persist_deleted_workspaces(self) -> None:
-        write_json(self.deleted_workspaces_path, sorted(self.deleted_workspaces))
+        self.backend.save_deleted_workspaces(sorted(self.deleted_workspaces))
 
     def delete_workspace(self, workspace_id: str) -> dict[str, Any] | None:
         """彻底删除一个项目：工作区记录 + 关联抓取项目 + 跟进提醒 + runtime 解析产物。
@@ -598,11 +602,11 @@ class Store:
         self._workspace_snapshot.pop(workspace_id, None)
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
-            disk_workspaces = read_json(self.workspaces_path, {})
+            disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
                 disk_workspaces = {}
             disk_workspaces.pop(workspace_id, None)
-            write_json(self.workspaces_path, disk_workspaces, compact=True)
+            self.backend.save_workspaces(disk_workspaces)
 
         # 2) 关联抓取项目：workspaceId 反查 + projectId 正查，两个方向都下挂
         removed_projects: list[str] = []
@@ -638,7 +642,7 @@ class Store:
             removed_reminders = len(self.reminders) - len(kept_reminders)
             if removed_reminders:
                 self.reminders = kept_reminders
-                write_json(self.runtime_root / "reminders.json", self.reminders[-100:])
+                self.backend.save_reminders(self.reminders[-100:])
 
         # 4) 该项目的 runtime 解析产物目录（runtime/projects/<projectId>）
         removed_artifacts: list[str] = []
@@ -1601,6 +1605,13 @@ class Store:
                 workspace["draftVersion"] = int(previous_workspace.get("draftVersion", 1) or 1)
             if previous_workspace.get("auditRecords"):
                 workspace["auditRecords"] = previous_workspace["auditRecords"]
+        # 创建时间盖章：首次创建记当前时间；重新分析沿用原值；接入前的老数据没有就留空，
+        # 交给存储层保留库里已有的值（见 cloud_agent/materializer.py 同名注释）。
+        if isinstance(previous_workspace, dict):
+            if previous_workspace.get("createdAt"):
+                workspace["createdAt"] = previous_workspace["createdAt"]
+        else:
+            workspace["createdAt"] = self.current_time()
         self.workspaces[workspace_id] = workspace
         self.persist_catalog()
         self.persist_runtime()

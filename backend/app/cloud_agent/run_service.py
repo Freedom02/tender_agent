@@ -11,7 +11,7 @@ from uuid import uuid4
 from .config import DifyConfig
 from .dify_client import DifyClient
 from .normalizers import normalize_parse_result
-from .run_repository import RunRepository
+from .run_repository import RunRepository, create_run_repository
 from ..agent_runtime.contracts import build_parse_bundle
 from ..bid_writing.template_fragments import attach_template_fragments_to_bundle
 from ..pi_agent.client import PiClient
@@ -38,7 +38,7 @@ class CloudRunService:
     ) -> None:
         self.root = root
         self.runtime_root = root / "runtime"
-        self.repository = repository or RunRepository(self.runtime_root)
+        self.repository = repository or create_run_repository(self.runtime_root)
         self.client = client or DifyClient()
         self.pi_client = pi_client or PiClient()
         self._agent_provider_override = (
