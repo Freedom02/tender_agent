@@ -620,6 +620,14 @@ export interface BidSection {
   conditional?: boolean;
   conditionText?: string;
   structureSource?: string;
+  /** 目录智能体据证据新增的章节（M2′）。 */
+  derived?: boolean;
+  /** required_by_tender = 招标文件事实上有要求；ai_initiative = 智能体主动发挥。 */
+  derivedOrigin?: string;
+  /** 章节原型：technical_plan / training / understanding … */
+  derivedArchetype?: string;
+  /** 一句话依据，说明为什么需要这一章（引用了哪些条款/评分项）。 */
+  derivedBasis?: string;
   parentSectionId?: string;
   level?: number;
   order?: number;

@@ -208,6 +208,23 @@ function diagnosisRequirementSummary(item: OutlineDiagnosisSuggestion): string {
   if (item.evaluationIds.length) parts.push(`评分点 ${item.evaluationIds.length} 个`);
   return parts.join(" · ") || "依据评分项判断";
 }
+/** 目录智能体新增章节的标记与依据（M2′）。 */
+function derivedOriginLabel(section: BidSection): string {
+  return section.derivedOrigin === "ai_initiative" ? "智能体·主动发挥" : "智能体·要求响应";
+}
+function derivedOriginTagType(section: BidSection): "success" | "warning" {
+  return section.derivedOrigin === "ai_initiative" ? "success" : "warning";
+}
+function derivedBasisText(section: BidSection): string {
+  const parts: string[] = [];
+  if (section.derivedArchetype) parts.push(`原型：${section.derivedArchetype}`);
+  parts.push(section.derivedBasis || "依据不足");
+  const requirementCount = section.requirementIds?.length || 0;
+  const evaluationCount = section.evaluationIds?.length || 0;
+  if (requirementCount) parts.push(`引用条款 ${requirementCount} 条`);
+  if (evaluationCount) parts.push(`引用评分项 ${evaluationCount} 个`);
+  return parts.join("\n");
+}
 
 watch(() => props.workspace?.id, () => void loadOutlineDiagnosis(), { immediate: true });
 watch(
@@ -662,6 +679,11 @@ const treePlan = computed<PlanTreeNode[]>(() => {
   }
   return roots;
 });
+
+/** 目录智能体据证据新增的章节（M2′）：直接取自已保存的目录。 */
+const derivedPlanSections = computed(() =>
+  plan.value.filter((section) => section.derived && section.nodeType !== "volume" && section.nodeType !== "format_item")
+);
 
 function sectionRole(section: BidSection): string {
   if (section.nodeType === "volume") return "卷";
@@ -2374,7 +2396,7 @@ async function previewExport() {
               />
               <div class="diagnosis-columns">
                 <section class="diagnosis-column">
-                  <header>要求响应章节（招标文件要求）</header>
+                  <header>规则聚类参考：要求响应缺口</header>
                   <p v-if="!outlineDiagnosis.requiredGaps.length" class="diagnosis-empty">
                     暂未发现要求响应缺口。
                   </p>
@@ -2401,7 +2423,7 @@ async function previewExport() {
                   </article>
                 </section>
                 <section class="diagnosis-column">
-                  <header>自由发挥章节（自主加分）</header>
+                  <header>规则聚类参考：可自由发挥</header>
                   <p v-if="!outlineDiagnosis.initiatives.length" class="diagnosis-empty">
                     暂未识别到需要自主补充的章节。
                   </p>
@@ -2424,6 +2446,38 @@ async function previewExport() {
                     <p class="diagnosis-card-basis">建议依据：{{ item.basis }}</p>
                   </article>
                 </section>
+              </div>
+              <div class="diagnosis-decided">
+                <header>
+                  目录智能体已新增的章节（{{ derivedPlanSections.length }}）
+                  <span class="diagnosis-decided-hint">章节由目录智能体取证后自行决定并写入目录，这里展示它的依据</span>
+                </header>
+                <p v-if="!derivedPlanSections.length" class="diagnosis-empty">
+                  本次目录没有新增章节。若规则聚类仍提示缺口，说明智能体取证后认为依据不足（见上方智能体 warnings）。
+                </p>
+                <article
+                  v-for="section in derivedPlanSections"
+                  :key="`derived-${section.sectionId}`"
+                  class="diagnosis-card"
+                >
+                  <div class="diagnosis-card-head">
+                    <strong>{{ section.title }}</strong>
+                    <el-tag size="small" effect="plain" :type="derivedOriginTagType(section)">
+                      {{ derivedOriginLabel(section) }}
+                    </el-tag>
+                    <el-tag v-if="section.derivedArchetype" size="small" type="info" effect="plain">
+                      {{ section.derivedArchetype }}
+                    </el-tag>
+                    <el-tag v-if="section.required === false" size="small" type="info" effect="plain">
+                      非必交项
+                    </el-tag>
+                  </div>
+                  <p class="diagnosis-card-basis">依据：{{ section.derivedBasis || "（未填写依据）" }}</p>
+                  <p class="diagnosis-card-meta">
+                    引用条款 {{ section.requirementIds?.length || 0 }} 条 · 引用评分项
+                    {{ section.evaluationIds?.length || 0 }} 个
+                  </p>
+                </article>
               </div>
               <div v-if="outlineDiagnosis.unboundRequirementSamples.length" class="diagnosis-samples">
                 <header>完全未绑定到任何章节的条款（样例）</header>
@@ -2458,6 +2512,21 @@ async function previewExport() {
                 <span class="toc-role">{{ sectionRole(data.section) }}</span>
                 <span class="toc-number">{{ sectionNumber(data.section) }}</span>
                 <el-input v-model="data.section.title" size="small" class="toc-title-input" />
+                <el-tooltip
+                  v-if="data.section.derived"
+                  placement="top"
+                  :show-after="200"
+                  :content="derivedBasisText(data.section)"
+                >
+                  <el-tag
+                    size="small"
+                    :type="derivedOriginTagType(data.section)"
+                    effect="plain"
+                    class="toc-origin-tag"
+                  >
+                    {{ derivedOriginLabel(data.section) }}
+                  </el-tag>
+                </el-tooltip>
                 <el-tag
                   v-if="data.section.structureSource"
                   size="small"
@@ -4110,6 +4179,22 @@ async function previewExport() {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
   margin-top: 6px;
+}
+.diagnosis-decided {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.diagnosis-decided > header {
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--el-text-color-primary);
+}
+.diagnosis-decided-hint {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
 }
 .diagnosis-column > header {
   margin-bottom: 6px;
