@@ -123,16 +123,37 @@ cur.execute("DELETE FROM workspace_sections")
 > ⚠️ **表名与拆分用我方的**——下面的表是**改造对象**，不是"换成队友的表"。
 > 样板 `workspace_sections` 只是拿队友的表做了**手法验证**（`payload` + 准入规则可行），手法照搬到我方表上。
 
-| 我方表（改造对象） | 现状 | 要做的 |
+| 我方表（改造对象） | 现状（本轮实测） | 要做的 |
 |:--|:--|:--|
-| **`bid_section`** | **49 列**，其中 12 个 jsonb 列在真实 6 行里**全空** | **最该先改**：加 `payload jsonb`，按准入规则砍到 ~16 列 |
-| `bid_document` | 1 行真实数据 | 加 `payload`，`bidDocument` 37 key 全进 payload |
-| `bid_plan` | 1 行真实数据 | 同上 |
-| `workspace` | 18 行 | 加 `payload`；`fineReview.rows` **61 key** 是重头 |
-| `workspace_draft` | 18 行 | 同上 |
-| `analysis_run` | **17 行**（F 组，队友完全没有） | 加 `payload` + 严格规格 |
+| **`bid_section`** | **49 列**，其中 12 个 jsonb 列在真实 6 行里**实填充 0** | ✅ **已拍板**：加 `payload jsonb`，按准入规则砍到 ~16 列 |
+| `bid_document` | **45 列**，14 个 jsonb 列实填充 0（仅 `plan`/`deviation_tables` 有值） | 加 `payload`；列裁决同 `bid_section` 手法 |
+| `bid_plan` | **仅 5 列**（`id`/`workspace_id`/`plan`/时间戳） | ⚠️ **本来就极小，无需收缩**，只加 `payload` |
+| `workspace` | **仅 8 列** | ⚠️ **不膨胀**（"`fineReview.rows` 61 key" 的说法不成立，那些 key 从未建过列）→ 只加 `payload` |
+| `workspace_draft` | **仅 6 列** | ⚠️ **不膨胀** → 只加 `payload` |
+| `analysis_run` | **31 列，29 列真实填充 100%**（17 行真数据） | ⚠️ **不是"没人用的列"** → 只加 `payload` 兜契约外字段，**不做列收缩** |
 
 **每张表的动作**：① 列出当前列 ② 按准入规则裁决保留哪些列 ③ 其余全部进 `payload jsonb` ④ 加 `org_id`/`CHECK`/时间戳/索引 ⑤ 用真实数据跑五项验证
+
+> ⚠️ **列裁决只对有真实数据的表做**。27 张空表（`match_item` 64 列 / `tender_requirement` 71 列 /
+> `requirement_group` 40 列 …）**一行数据都没有**，无从判断哪些列没人用 →
+> **只加 `payload`（纯新增、零风险），不砍列**。详见 §4.6。
+
+### P1 · 🔴 前置阻塞：db 模式要跑起来，队友的 schema 得先建
+
+**这是本轮发现的硬阻塞**（§4.4）：`STORE_BACKEND=db` 一开就报 `relation "workspaces" does not exist`，
+因为队友的 16 张表**在本地库里一张都没有**。上一轮合并的是**代码**，不是库。
+
+三个选项（**待用户拍板**）：
+
+| 选项 | 做法 | 影响 |
+|:--|:--|:--|
+| **① 建队友 schema**（共存） | 把 `scripts/tender-agent-migration/schema.sql` 建到本地库（或另建 `partner` schema） | 我方 44 张表**不受影响**（表名不冲突：`workspace` vs `workspaces`）；db 模式立刻可跑；但**两套模型并存**，需明确谁是权威 |
+| **② 只建我方表，db 模式改用我方表** | 给 `PostgresBackend` 换实现，指向我方 G 组表 | 工作量最大，且**存储层原本就用队友的**（既定决策），会推翻 §存储层接缝 |
+| **③ 暂不跑 db 模式** | 继续用 `json`/`dual`（dual 也需要队友表 → 实际只剩 `json`） | 零风险，但 `db` 模式**始终未验证**，交付目标未达成 |
+
+> 我的建议：**选 ① 并把队友 schema 建到独立的 `partner` schema**（而不是 `public`），
+> 这样"我方的表"和"队友的表"在库层面也物理隔离，谁是权威一目了然，
+> 且完全满足"不许用队友的表替代我方表"的红线。
 
 ### P2 · 治理自检（建议做，是"漏列"的根治手段）
 
@@ -210,13 +231,106 @@ cur.execute("DELETE FROM workspace_sections")
 
 ### 4.3 队友设计的三个已知硬伤
 
-| # | 问题 | 位置 |
-|:--|:--|:--|
-| 1 | 子表全局 `DELETE` + 重建（无 `WHERE`） | `postgres_backend.py::save_workspaces` |
-| 2 | 整份 payload 读写 → 多实例并发互相覆盖（他自己文档也写明） | `StorageBackend` 接口是集合级（`load_workspaces()` 全量 / `save_workspaces(dict)` 全量） |
-| 3 | 16 张表里 6 张应用侧零访问（`parse_bundles`/`parse_artifacts`/`evidence_files`/`asset_files`/`app_config`/`runtime_state`） | 只由 `migrate_to_db.py` 写过一次 |
+| # | 问题 | 位置 | 状态 |
+|:--|:--|:--|:--|
+| 1 | 子表全局 `DELETE` + 重建（无 `WHERE`） | `postgres_backend.py::save_workspaces` | ✅ **本轮已修**（`33d0135`，见 §4.5） |
+| 2 | 整份 payload 读写 → 多实例并发互相覆盖（他自己文档也写明） | `StorageBackend` 接口是集合级（`load_workspaces()` 全量 / `save_workspaces(dict)` 全量） | ⚠️ 未变（靠单实例保护缓解） |
+| 3 | 16 张表里 6 张应用侧零访问（`parse_bundles`/`parse_artifacts`/`evidence_files`/`asset_files`/`app_config`/`runtime_state`） | 只由 `migrate_to_db.py` 写过一次 | ⚠️ 未变 |
 
 > 硬伤 2 已由我方 **`5f80bce` 单实例保护（同一 runtime 目录禁止起第二个后端）** 缓解，该提交必须保留。
+
+### 4.4 🔴 本轮重大发现：`db` 模式在本地库**根本跑不起来**（此前无人记录）
+
+实测（`psycopg` 3.3.6 直连 5433）：
+
+```
+PostgresBackend(dsn).load_workspaces()
+  -> UndefinedTable: relation "workspaces" does not exist
+```
+
+逐个核对队友的表，**全部 MISSING**：
+
+| 表 | 本地库 |
+|:--|:--|
+| `workspaces` / `workspace_sections` / `workspace_fine_review_rows` / `workspace_requirement_coverage` | ❌ 不存在 |
+| `catalog_projects` / `libraries` / `library_documents` / `reminders` / `automation_runs` | ❌ 不存在 |
+| `parse_bundles` / `parse_artifacts` / `bid_runs` | ❌ 不存在 |
+
+**本地库里的 44 张表全是我方的**（`public.workspace` / `public.workspace_draft` 是**我方**的 G 组表，
+不是队友的 `workspaces` / `workspace_sections`）。唯一的 `workspace_sections` 在上轮样板建的
+`fusion_sample` schema 里，是**验证用的临时表**，不是队友的表。
+
+**含义（重要）**：
+
+1. 上一轮"合并了队友的三态存储层"是**代码层面**的合并；**库层面队友的表一张都没建**。
+   → `STORE_BACKEND=db` / `dual` 今天一开就报错，**`db` 模式从未真正跑通过**。
+2. 队友的表结构在 `scripts/tender-agent-migration/schema.sql`（16 张表）与
+   `shared-db/init/01-schema.sql`。按既有红线，**不能把它当目标 schema 直接执行**
+   （§禁止事项），但**要跑 db 模式就必须有这张 schema 存在**——这是个待你拍板的岔路口。
+3. 我方 44 张表与队友 16 张表是**两套并存的模型**，共用同一个库、表名不冲突
+   （`workspace` vs `workspaces`、`workspace_section` vs `workspace_sections`），**可以共存**。
+
+> ⏳ **待拍板**：db 模式要跑起来，队友的 schema 得先建。三个选项见 §九。
+
+### 4.5 P0 完成记录（2026-09-30 本轮）
+
+`backend/app/storage/postgres_backend.py::save_workspaces()` 的三处无 `WHERE` 的 `DELETE`
+已改为 `DELETE ... WHERE workspace_id = ANY(%s)`。
+
+**关键实现细节**：以 **`workspaces` 字典的键**为 `ws_ids`，而**不是**各子表 rows 里出现过的 id。
+若某工作区这次没产生任何章节行，用子表推导的 id 集合会漏掉它，旧行就会残留；
+用字典键才能保证"传入即重建"，**包括清空成 0 行的边界**。
+
+**验证**（`_fusion_sample/verify_p0.py`，对真实库跑，自建 fixture 后清理）：
+
+| 项 | 结果 |
+|:--|:--|
+| V1 局部化（只重建 A 时 B 的 3 行不受影响） | ✅ PASS |
+| V2 语义等价（A 的内容 == 整份重建应有内容） | ✅ PASS |
+| V3 清空边界（A 产出 0 行时旧行被清掉，B 不受影响） | ✅ PASS |
+| V4 旧写法对照（无 WHERE → B 的 3 行被误删） | ✅ 复现出被修的缺陷 |
+| 测试 A/B（89 条失败逐条相同） | ✅ 零行为回归 |
+
+### 4.6 🔴 列膨胀的真实分布（本轮实测，与之前判断有出入）
+
+实测列数（`_fusion_sample/column_audit.py`，含每列的**真实填充率**）：
+
+| 表 | 行数 | **列数** | 12+ 个 jsonb 空列？ |
+|:--|--:|--:|:--|
+| `bid_section` | 6 | **49** | ✅ 是（12 个 jsonb 实填充 **0**） |
+| `bid_document` | 1 | **45** | ✅ 是（14 个 jsonb 实填充 **0**，仅 `plan`/`deviation_tables` 有值） |
+| `match_item` | 0 | **64** | 表空，无实测依据 |
+| `requirement_group` | 0 | **40** | 表空 |
+| `analysis_run` | 17 | **31** | ❌ **不是**：31 列里 **29 列真实填充 100%**，是真在用 |
+| `match_assessment` | 0 | 31 | 表空 |
+| `parse_bundle` | 0 | 27 | 表空 |
+| `match_item_evidence` | 0 | 22 | 表空 |
+| `tender_document` | 0 | 22 | 表空 |
+| `tender_requirement` | 0 | **71** | 表空 |
+| `agent_result` | 0 | 17 | 表空 |
+| `template_fragment` | 0 | 15 | 表空 |
+| `evaluation_item` | 0 | 12 | 表空 |
+| `workspace` | 18 | **8** | ❌ 不膨胀 |
+| `workspace_draft` | 18 | **6** | ❌ 不膨胀 |
+| `bid_plan` | 1 | **5** | ❌ 不膨胀 |
+
+**三个必须纠正的认知**：
+
+1. ❌ **`workspace` / `workspace_draft` 根本不膨胀**（8 列 / 6 列）——交接文档里
+   "`workspace` 加 payload；`fineReview.rows` 61 key 是重头"的说法**不成立**：
+   这两个表本来就小，`fineReview.rows` 从来没有被建过列。
+   → 这两张表只需要**加 `payload` 列**，没有"列收缩"可做。
+2. ⚠️ **`analysis_run` 的 31 列里 29 列真实填充 100%**（17 行真数据，F 组核心可观测表）。
+   它**不是**"没人查的列"——按准入规则，这些列**应该保留**。
+   → 这张表只需要**加 `payload`** 兜住契约外字段，**不做列收缩**。
+   之前把它列进"要改造"的清单，容易被误读成要砍列，特此澄清。
+3. ✅ **真正该做列收缩的只有 `bid_section`（49 列）和 `bid_document`（45 列）**，
+   依据是**实测填充率为 0 的 jsonb 列**，而不是"列数多"。
+
+> **空表（27 张）无实测依据**：`match_item`(64 列) / `tender_requirement`(71 列) /
+> `requirement_group`(40 列) 等表**一行数据都没有**，无从判断哪些列没人用。
+> 按既定红线，**不能因为"列多"就砍**——只能**加 `payload`**（新增，零风险），
+> 列裁决留到有真实数据之后再按准入规则做。
 
 ---
 
