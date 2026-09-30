@@ -150,6 +150,41 @@ class MatchingContractTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(coerce_requirement_category(raw_category, text), expected)
 
+    def test_product_course_and_feature_clauses_are_not_rerouted_to_personnel_or_performance(
+        self,
+    ) -> None:
+        # 回归：技术/服务要求表里描述“课程内容”或“系统功能模块”的条款，
+        # 因含“案例/人员/员工/绩效”等字眼，曾被误判为人员/业绩证据类别，
+        # 导致进错匹配桶（详见 350181 招标文件 EVAL 复盘）。
+        technical_clauses = (
+            "4.操作集使用案例",
+            "1.员工管理：包括员工档案管理、考勤管理、排班管理等，帮助管理者有效地安排和管理建筑内部的服务人员。",
+            "7.绩效评估：对服务人员的绩效进行评估和考核，帮助管理者了解服务人员的工作表现并进行奖惩。",
+            "3.智慧校园-安防管理业务配置介绍，主要包括：室外监控、人员巡检；",
+            "4.智慧校园-消防管理业务配置介绍，主要包括：室内传感器监测、室内监控、防火报警、人员逃生路径；",
+            "8.数据分析与报告：对建筑内部服务管理数据的分析和报告，帮助管理者了解服务情况和改进管理决策。",
+        )
+        for text in technical_clauses:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    coerce_requirement_category("technical", text),
+                    "technical",
+                )
+
+    def test_real_performance_evidence_still_routes_to_performance(self) -> None:
+        # 修复不得把真正的业绩证据条款漏掉。
+        for text in (
+            "投标人须提供类似业绩证明材料。",
+            "提供项目业绩合同及中标通知书。",
+            "提供类似项目业绩案例证明。",
+            "须提供近三年类似业绩。",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    coerce_requirement_category("technical", text),
+                    "performance",
+                )
+
     def test_route_contract_uses_only_existing_ontology_classes(self) -> None:
         self.assertEqual(
             requirement_class_for_route(

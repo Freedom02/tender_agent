@@ -29,3 +29,42 @@ Thumbs.db
 M3_workspace/
 backend/archive/
 demo-data/
+data-backup-*/
+tmp*/
+.dsh-tmp/
+
+# Local evaluation artifacts and generated reports
+evaluation/
+.pytest_cache/
+
+# Generated evaluation reports (keep reusable design notes under docs/)
+docs/P00-baseline.md
+docs/P01-baseline.md
+docs/P02-document-ir-evaluation.md
+docs/P03-P04-section-chunk-evaluation*.md
+docs/P04-P09-*-evaluation.md
+docs/P05-reclassification-*-evaluation.md
+docs/WorkBuddy与纯规则LLM通道对比.md
+docs/P04-P05-document-map-evaluation.md
+
+# Local PostgreSQL migration verification artifacts (one-off probes,
+# regenerable via scripts/backfill_bid_writing.py; reports kept outside git)
+_backfill/
+_verify006/
+# Fusion-design sample verification (schema fusion_sample + pg8000 wheel,
+# regenerable via _fusion_sample/roundtrip.py; results in docs/)
+_fusion_sample/
+_pg_compare/
+
+# Local handoff notes and one-off probes
+docs/A01-*.md
+docs/B0*.md
+docs/WorkBuddy开发交接与下一对话提示词.md
+docs/WorkBuddy自主审核智能体实施计划.md
+docs/P04-P05目标范围重构执行计划.md
+docs/归档-15类提取层删除记录.md
+docs/简历项目经历改写版.md
+scripts/_*.py
+
+# ����У��ű���������棨ÿ�������������ɣ�����⣩
+scripts/projection_coverage_report.txt

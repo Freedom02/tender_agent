@@ -134,10 +134,37 @@ export function useAppState() {
     followUpStatus.value = selectedProject.value?.followUpStatus || "";
   }
 
+  // bootstrap 只返回工作区摘要（单个工作区的 reasoning 可达 40MB+，全量返回会让首屏
+  // 永远加载不出来）。选中的工作区在这里按需拉取完整数据。
+  const loadedWorkspaceDetails = new Set<string>();
+
+  async function ensureWorkspaceDetail(workspaceId: string) {
+    if (!workspaceId || loadedWorkspaceDetails.has(workspaceId)) return;
+    if (!workspaces.value.some((item) => item.id === workspaceId)) return;
+    loadedWorkspaceDetails.add(workspaceId);
+    try {
+      const full = await api.workspaceDetail(workspaceId);
+      if (full) {
+        const index = workspaces.value.findIndex((item) => item.id === workspaceId);
+        if (index >= 0) workspaces.value[index] = full;
+        if (bootstrap.value) bootstrap.value.workspaces = workspaces.value;
+      }
+    } catch (error) {
+      loadedWorkspaceDetails.delete(workspaceId);
+      ElMessage.error((error as Error).message);
+    }
+  }
+
+  watch(selectedWorkspaceId, (workspaceId) => {
+    void ensureWorkspaceDetail(workspaceId);
+  });
+
   async function loadBootstrap() {
     loading.value = true;
     try {
+      loadedWorkspaceDetails.clear();
       syncState(await api.bootstrap());
+      void ensureWorkspaceDetail(selectedWorkspaceId.value);
       await loadMaterialsProfile();
     } catch (error) {
       ElMessage.error((error as Error).message);
@@ -182,6 +209,8 @@ export function useAppState() {
       const existing = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (existing >= 0) workspaces.value[existing] = result.workspace;
       else workspaces.value.push(result.workspace);
+      // analyze 已返回完整工作区，标记为已加载，避免选中时又拉一次详情
+      loadedWorkspaceDetails.add(result.workspace.id);
       selectedWorkspaceId.value = result.workspace.id;
       importKind.value = result.workspace.reasoning?.fineReview ? "tender_document" : "notice";
       if (navigate) {
@@ -344,6 +373,7 @@ export function useAppState() {
       const result = await api.saveDraft(selectedWorkspace.value.id, selectedWorkspace.value.draft);
       const index = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (index >= 0) workspaces.value[index] = result.workspace;
+      loadedWorkspaceDetails.add(result.workspace.id);
       ElMessage.success(`草稿已保存为 v${result.workspace.draftVersion}`);
     } catch (error) {
       ElMessage.error((error as Error).message);
@@ -374,6 +404,7 @@ export function useAppState() {
       const index = workspaces.value.findIndex((item) => item.id === result.workspace.id);
       if (index >= 0) workspaces.value[index] = result.workspace;
       else workspaces.value.push(result.workspace);
+      loadedWorkspaceDetails.add(result.workspace.id);
       selectedWorkspaceId.value = result.workspace.id;
       ElMessage.success("人工匹配结论已保存");
     } catch (error) {
@@ -444,6 +475,7 @@ export function useAppState() {
         ...(target?.projectId ? [String(target.projectId)] : []),
       ]);
       workspaces.value = workspaces.value.filter((item) => item.id !== workspaceId);
+      loadedWorkspaceDetails.delete(workspaceId);
       if (removedProjects.size) {
         catalog.value = catalog.value.filter((item) => !removedProjects.has(String(item.id)));
         reminders.value = reminders.value.filter(

@@ -347,6 +347,10 @@ export interface FineReviewResult {
     sourceLocator?: string;
   }>;
   pendingMaterialList?: Array<MatchRiskReference & { importance?: string; evidenceNeed?: string }>;
+  coverageBreakdown?: {
+    products?: Array<{ productName: string; paramCount: number; score: number }>;
+    qualification?: { itemCount: number; score: number } | null;
+  };
   extraction: {
     method: "llm" | "rule" | string;
     provider?: string;

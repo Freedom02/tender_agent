@@ -1,0 +1,40 @@
+# 招投标智能体 · 本地开发用 PostgreSQL
+#
+# 用途：迁移步骤 1「建库建表」的本地环境，以及后续 Repository 层的开发验证。
+# 生产账号按 docs2/匹配数据持久化设计（PostgreSQL）.md §8 向公司申请，
+# 本文件里的口令仅供本机开发使用。
+#
+# 常用命令（项目根目录执行）：
+#   docker compose up -d          启动
+#   docker compose ps             看健康状态
+#   docker compose logs -f pg     看日志
+#   docker compose down           停止（保留数据卷）
+#   docker compose down -v        停止并删除数据（重置库）
+#
+# 建表 / 校验：pwsh -File scripts/db_init.ps1
+
+services:
+  pg:
+    image: postgres:16
+    container_name: tenderagent-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tender_agent
+      POSTGRES_USER: tender_app
+      POSTGRES_PASSWORD: tender_app_dev        # 仅本机开发用
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    ports:
+      - "5433:5432"   # 宿主 5433 -> 容器 5432；宿主 5432 被 Docker Desktop 后端占用
+    volumes:
+      - tenderagent_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tender_app -d tender_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  tenderagent_pgdata:

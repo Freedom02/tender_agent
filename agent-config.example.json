@@ -1,0 +1,44 @@
+{
+  "ai": {
+    "enabled": true,
+    "provider": "auto",
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "",
+    "extractionModel": "",
+    "matchingModel": "",
+    "organizationId": "",
+    "configured": false,
+    "timeoutSeconds": 120,
+    "targetReviewBatchSize": 24,
+    "targetReviewMaxInputChars": 16000,
+    "targetReviewMaxTokens": 1800,
+    "targetReviewTimeoutSeconds": 45,
+    "targetReviewMaxAttempts": 2,
+    "targetReviewMaxSplitDepth": 3,
+    "extractionMode": "builtin",
+    "workbuddyAgentMcp": {
+      "skillDir": "backend/app/workbuddy_agent/skills/tender-document-map",
+      "mcpConfigPath": "backend/app/workbuddy_agent/config/tender-review.mcp.example.json",
+      "runtimeDir": "runtime/document_map_agent",
+      "model": "auto",
+      "codebuddyCodePath": "",
+      "settingSources": [],
+      "permissionMode": "default",
+      "maxTurns": 40,
+      "maxToolCalls": 40,
+      "timeoutSeconds": 600,
+      "maxRetries": 1,
+      "requireMapValidation": true,
+      "requireRejectionScan": true,
+      "fallbackMode": "builtin"
+    }
+  },
+  "m3": {
+    "host": "",
+    "company": "",
+    "username": "",
+    "password": "",
+    "namespace": "tenderhub"
+  }
+}

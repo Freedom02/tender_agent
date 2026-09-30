@@ -32,7 +32,7 @@ DEFAULT_DOCUMENT_MAP_AGENT_CONFIG: dict[str, Any] = {
     "maxToolCalls": 40,
     "maxSaveAttempts": 3,
     "timeoutSeconds": 600,
-    "maxRetries": 0,
+    "maxRetries": 1,
     "requireMapValidation": True,
     "requireRejectionScan": True,
     "fallbackMode": "builtin",

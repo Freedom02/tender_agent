@@ -33,6 +33,13 @@ class M3Error(RuntimeError):
     """M3 交互异常（登录失败 / MQL 报错 / 非 JSON 响应）。"""
 
 
+def _is_signin_response(resp: dict[str, Any]) -> bool:
+    """M3 会话失效时常返回 {'message': '/user/login', 'status': 'signin'}。"""
+    status = str(resp.get("status") or "").lower()
+    message = str(resp.get("message") or "")
+    return status == "signin" or "/user/login" in message
+
+
 class M3Client:
     def __init__(
         self,
@@ -82,6 +89,11 @@ class M3Client:
     def mql(self, sql: str) -> dict[str, Any]:
         """执行一条 MQL 并返回解析后的 JSON。会话失效时自动重登一次。"""
         resp = self._post_mql(sql)
+        if _is_signin_response(resp):
+            self._logged_in = False
+            resp = self._post_mql(sql)
+        if _is_signin_response(resp):
+            raise M3Error("M3 会话已失效或登录失败，请检查 M3_HOST/M3_COMPANY/M3_USER/M3_PASSWORD 或在配置中更新 m3 账号")
         if resp.get("status") != "ok":
             raise M3Error(f"MQL 执行失败：{str(resp)[:300]}\n语句：{sql[:200]}")
         return resp

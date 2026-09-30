@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from .client import M3Client, M3Error
@@ -95,65 +94,79 @@ def sync_facts_to_m3(m3: M3Client, facts: dict[str, Any]) -> dict[str, Any]:
 def reuse_existing_products(
     m3: M3Client, facts: dict[str, Any], warnings: list[str]
 ) -> list[dict[str, str]]:
-    """Reuse unambiguous same-name products already stored in M3."""
+    """产品级防重（2026-09-20）：新包里的技术产品与库内已有产品按「名称/别名」匹配。
+
+    背景：导入器主键 = 「前缀-序号」（prd-{seq}，无随机批次），M3 按 biz_id upsert。
+    若产品序号因历史重排而变化（或从不同招标包带入不同序号），同一产品会以新序号再写
+    一遍产生重复对象；而「所属产品名 → productId」只在本 workbook 的「技术产品」sheet
+    内解析，若为防重把产品行从 Excel 里删掉，其名下参数/证照会全部「未关联」。
+
+    因此在写入前做二级匹配：
+      - 命中（精确名，或归一化后唯一命中名称/别名）→ 该产品行从 facts 移除（不重复 upsert，
+        库内对象保持权威不被覆盖），其名下 technical_parameter / credential 的 productId
+        改指库内已有对象，has_parameter / certified_by 边照常建立；
+      - 未命中 → 维持原行为（作为新产品写入）；
+      - 库内同名歧义（归一化命中多个不同产品）→ 不复用、原样写入，并记 warning 供人工处理；
+      - M3 不可用 / 库内无产品 → 跳过防重，行为与旧版一致。
+
+    返回复用清单 [{"productName": …, "reusedProductId": …}, …]。
+    """
     try:
         existing = read_facts_from_m3(m3, ("technical_product",)).get("technical_product", [])
-    except Exception as exc:
-        warnings.append(f"库内技术产品读取失败，本次跳过产品级防重：{str(exc)[:160]}")
+    except Exception as e:  # M3Error / 网络异常等：防重是优化，不阻断导入
+        warnings.append(f"库内技术产品读取失败，本次跳过产品级防重：{str(e)[:160]}")
         return []
     if not existing:
         return []
 
-    def normalize(value: Any) -> str:
-        return "".join(str(value or "").split()).lower()
-
-    def aliases(value: Any) -> list[str]:
-        return [part.strip() for part in re.split(r"[,，、;；/\s]+", str(value or "")) if part.strip()]
+    # 局部导入：importers 不依赖 m3，无环；但 m3.sync 在部分场景被更早加载
+    from ..importers.excel_importer import _norm_name, _split_aliases
 
     exact: dict[str, str] = {}
-    normalized: dict[str, set[str]] = {}
-    for product in existing:
-        product_id = str(product.get("productId") or "").strip()
-        name = str(product.get("productName") or "").strip()
-        if not product_id or not name:
+    norm: dict[str, list[tuple[str, str]]] = {}
+    for p in existing:
+        pid = str(p.get("productId") or "").strip()
+        name = str(p.get("productName") or "").strip()
+        if not pid or not name:
             continue
-        exact.setdefault(name, product_id)
-        for token in [name, *aliases(product.get("aliases"))]:
-            normalized.setdefault(normalize(token), set()).add(product_id)
+        exact.setdefault(name, pid)
+        for token in [name] + _split_aliases(p.get("aliases") or ""):
+            norm.setdefault(_norm_name(token), []).append((name, pid))
 
     reused: list[dict[str, str]] = []
     ambiguous: list[str] = []
     kept: list[dict[str, Any]] = []
-    for product in facts.get("technical_product", []):
-        name = str(product.get("productName") or "").strip()
-        product_id = str(product.get("productId") or "")
-        matched_id = exact.get(name) if name else None
-        if matched_id is None and name:
-            candidates = normalized.get(normalize(name), set())
-            if len(candidates) == 1:
-                matched_id = next(iter(candidates))
-            elif len(candidates) > 1:
+    for row in facts.get("technical_product", []):
+        name = str(row.get("productName") or "").strip()
+        pid = str(row.get("productId") or "")
+        hit = exact.get(name) if name else None
+        if hit is None and name:
+            uniq = sorted({tpid for _, tpid in norm.get(_norm_name(name), [])})
+            if len(uniq) == 1:
+                hit = uniq[0]
+            elif len(uniq) > 1:
                 ambiguous.append(name)
-        if not matched_id or not product_id:
-            kept.append(product)
+        if not hit or not pid:
+            kept.append(row)
             continue
+        # 名下参数/证照外键改指库内已有产品，边表照常生成
         for key in ("technical_parameter", "credential"):
-            for row in facts.get(key, []):
-                if str(row.get("productId") or "") == product_id:
-                    row["productId"] = matched_id
-        reused.append({"productName": name, "reusedProductId": matched_id})
+            for r in facts.get(key, []):
+                if str(r.get("productId") or "") == pid:
+                    r["productId"] = hit
+        reused.append({"productName": name, "reusedProductId": hit})
 
     if facts.get("technical_product") is not None:
         facts["technical_product"] = kept
     if reused:
         warnings.append(
-            f"技术产品 {len(reused)} 个与库内已有产品同名，已复用库内对象（不重复写入）："
-            + "、".join(item["productName"] for item in reused)
+            "技术产品 %d 个与库内已有产品同名，已复用库内对象（不重复写入）：%s"
+            % (len(reused), "、".join(r["productName"] for r in reused))
         )
     if ambiguous:
         warnings.append(
-            f"技术产品 {len(ambiguous)} 个在库内匹配到多个产品，未复用、按新产品写入："
-            + "、".join(ambiguous)
+            "技术产品 %d 个在库内归一化匹配到多个产品，未复用、按新产品写入：%s"
+            % (len(ambiguous), "、".join(ambiguous))
         )
     return reused
 
@@ -172,8 +185,12 @@ def build_m3_client(store: Any) -> M3Client:
     )
 
 
-def _row_to_camel(class_snake: str, row: dict[str, Any]) -> dict[str, Any]:
-    """M3 行（snake_case + 内部字段/边字段）→ 业务 fact（CamelCase，仅本体字段）。"""
+def _row_to_camel(class_snake: str, row: dict[str, Any], id_field: str | None = None) -> dict[str, Any]:
+    """M3 行（snake_case + 内部字段/边字段）→ 业务 fact（CamelCase，仅本体字段）。
+
+    写入时业务主键未作为普通列冗余（仅存在于 RID 后缀 `...:{业务主键}`），
+    这里从 RID 恢复主键，供匹配层 matchedFactIds / 证据溯源使用。
+    """
     out: dict[str, Any] = {}
     for cls, attrs in CLASS_SCHEMA.items():
         if camel_to_snake(cls) != class_snake:
@@ -183,10 +200,10 @@ def _row_to_camel(class_snake: str, row: dict[str, Any]) -> dict[str, Any]:
             if snake in row and row[snake] is not None:
                 out[name] = row[snake]
         break
-    id_field = "organizationId" if class_snake == "organization" else ID_FIELD_BY_KEY.get(class_snake)
-    rid = str(row.get("id") or "")
-    if id_field and rid:
-        out.setdefault(id_field, rid.rsplit(":", 1)[-1])
+    if id_field and row.get("id"):
+        rid = str(row["id"])
+        if ":" in rid:
+            out[id_field] = rid.rsplit(":", 1)[-1]
     return out
 
 
@@ -203,7 +220,7 @@ def read_facts_from_m3(m3: M3Client, keys: tuple[str, ...] | None = None) -> dic
     facts: dict[str, Any] = {"organization": None}
     orgs = m3.list_objects("organization", limit=1)
     if orgs:
-        facts["organization"] = _row_to_camel("organization", orgs[0])
+        facts["organization"] = _row_to_camel("organization", orgs[0], "organizationId")
 
     target = FACT_LIST_KEYS if keys is None else ((keys,) if isinstance(keys, str) else tuple(keys))
     invalid = [key for key in target if key != "organization" and key not in FACT_LIST_KEYS]
@@ -215,11 +232,11 @@ def read_facts_from_m3(m3: M3Client, keys: tuple[str, ...] | None = None) -> dic
     for key in target:
         if key == "organization":
             continue
-        facts[key] = [_row_to_camel(key, r) for r in m3.list_objects(key, limit=100000)]
+        facts[key] = [_row_to_camel(key, r, ID_FIELD_BY_KEY[key]) for r in m3.list_objects(key, limit=100000)]
     return facts
 
 
 def read_organization_from_m3(m3: M3Client) -> dict[str, Any] | None:
     """从 M3 读取企业组织（CamelCase）；无记录返回 None。"""
     orgs = m3.list_objects("organization", limit=1)
-    return _row_to_camel("organization", orgs[0]) if orgs else None
+    return _row_to_camel("organization", orgs[0], "organizationId") if orgs else None

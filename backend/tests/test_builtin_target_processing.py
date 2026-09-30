@@ -68,6 +68,37 @@ class BuiltinTargetProcessingTests(unittest.TestCase):
         self.assertNotIn("qualificationRequirements", pack)
         self.assertNotIn("technicalRequirements", pack)
 
+    def test_display_mode_contract_aligns_with_frontend(self) -> None:
+        result = extract_tender_requirements(
+            "",
+            self._document(),
+            {"enabled": False},
+            sections=[],
+            tables=[],
+        )
+        modules = {
+            item["targetModule"]: item
+            for item in result["analysisPack"]["targetModules"]
+        }
+
+        # Source-view modules must expose sourceView + source_sections mode.
+        # rejection is included: the frontend renders it as 原文视图.
+        for key in ("commercial", "evaluation", "template", "rejection"):
+            self.assertEqual(modules[key]["displayMode"], "source_sections", key)
+            self.assertTrue(modules[key].get("sourceView"), key)
+
+        # Match cards, never a source view.
+        for key in ("technical", "qualification"):
+            self.assertEqual(modules[key]["displayMode"], "match_items", key)
+            self.assertNotIn("sourceView", modules[key])
+
+        # Ignored module.
+        self.assertEqual(modules["contract"]["displayMode"], "ignored")
+
+        # Info grid (was misleadingly "risk_items" before).
+        self.assertEqual(modules["project_info"]["displayMode"], "info_items")
+        self.assertNotIn("sourceView", modules["project_info"])
+
     def test_matching_stage_receives_three_targets_but_rejection_is_not_matched(self) -> None:
         company = {
             "organization": {

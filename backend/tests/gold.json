@@ -1,0 +1,40 @@
+{
+  "description": "匹配引擎确定性判定基线：每条标注期望 4 态（满足/部分满足/不满足/待补材料）。",
+  "cases": [
+    {
+      "requirement": "建筑工程施工总承包贰级及以上",
+      "category": "qualification",
+      "expectedStatus": "满足"
+    },
+    {
+      "requirement": "建筑工程施工总承包壹级及以上",
+      "category": "qualification",
+      "expectedStatus": "不满足"
+    },
+    {
+      "requirement": "一级建造师（建筑工程专业）2名",
+      "category": "personnel",
+      "expectedStatus": "不满足"
+    },
+    {
+      "requirement": "近三年承担过不少于3个智慧园区数字孪生平台项目",
+      "category": "performance",
+      "expectedStatus": "不满足"
+    },
+    {
+      "requirement": "净资产不低于2000万元",
+      "category": "financial",
+      "expectedStatus": "满足"
+    },
+    {
+      "requirement": "投标人须在福建省内注册",
+      "category": "region",
+      "expectedStatus": "满足"
+    },
+    {
+      "requirement": "市政公用工程一级及以上",
+      "category": "qualification",
+      "expectedStatus": "待补材料"
+    }
+  ]
+}

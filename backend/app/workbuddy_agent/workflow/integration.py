@@ -867,9 +867,14 @@ def _runtime_config(ai: Mapping[str, Any]) -> DocumentMapRuntimeConfig:
         or CODEBUDDY_SDK_DEFAULT_MODEL
     )
     # The document-map task supplies its single Tender Review server explicitly.
-    # Do not inherit arbitrary user MCP/settings unless the local deployment
-    # explicitly opts in with settingSources=["user"].
-    config["settingSources"] = list(config.get("settingSources") or [])
+    # Still load the user scope by default so models.json (the UINO custom model
+    # registration) is available; deployments that must not inherit user
+    # MCP/settings can explicitly set settingSources=[].
+    config["settingSources"] = list(config.get("settingSources") or ["user"])
+    # Propagate the deployment's OpenAI-compatible endpoint (UINO) so the SDK
+    # can inject env vars and bypass the CodeBuddy.cn model-name collision.
+    config["llmBaseUrl"] = _text(ai.get("baseUrl"), 240)
+    config["llmApiKey"] = _text(ai.get("apiKey"), 240)
     return DocumentMapRuntimeConfig.model_validate(config)
 
 

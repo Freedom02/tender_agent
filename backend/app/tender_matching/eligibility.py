@@ -178,6 +178,15 @@ def _chat_endpoint(base_url: str) -> str:
     return clean if clean.endswith("/chat/completions") else f"{clean}/chat/completions"
 
 
+# Remember the endpoint that actually returned JSON for a given base URL.  Some
+# OpenAI-compatible gateways are hosted at ``https://host/v1`` while operators
+# store only ``https://host``; the bare ``/chat/completions`` path then answers
+# with an HTML landing page (HTTP 200).  Without this, every call re-discovers
+# that by POSTing to the landing page first and only then falling back to
+# ``/v1``.  Process-local: cheap to re-discover once per worker restart.
+_ENDPOINT_CACHE: dict[str, str] = {}
+
+
 def _chat_endpoints(base_url: str) -> list[str]:
     """Return compatible chat endpoints, including a guarded /v1 fallback.
 
@@ -186,6 +195,9 @@ def _chat_endpoints(base_url: str) -> list[str]:
     HTML landing page with HTTP 200 for ``/chat/completions``.  Retrying the
     standard ``/v1/chat/completions`` path turns that ambiguous response into a
     real API call without affecting already-versioned or explicit endpoints.
+
+    A previously successful endpoint is moved to the front so later calls skip
+    the guaranteed-to-fail landing-page round-trip.
     """
 
     primary = _chat_endpoint(base_url)
@@ -196,7 +208,11 @@ def _chat_endpoints(base_url: str) -> list[str]:
         and not re.search(r"/v\d+$", clean, flags=re.IGNORECASE)
     ):
         candidates.append(f"{clean}/v1/chat/completions")
-    return list(dict.fromkeys(candidates))
+    candidates = list(dict.fromkeys(candidates))
+    preferred = _ENDPOINT_CACHE.get(clean)
+    if preferred and preferred in candidates:
+        candidates = [preferred, *(c for c in candidates if c != preferred)]
+    return candidates
 
 
 @observe_llm_call
@@ -282,14 +298,20 @@ def call_openai_compatible(
         else:
             try:
                 json.loads(raw_body.decode("utf-8"))
+                break
             except (UnicodeDecodeError, json.JSONDecodeError):
-                if attempt < len(endpoints):
-                    last_error = (
-                        "模型端点返回非 JSON 内容，正在尝试标准 /v1/chat/completions 路径"
-                    )
-                    continue
-            break
-        if attempt < max_attempts and _is_retryable_error({"success": False, "error": last_error}):
+                # 非 JSON 有两种来源：base URL 少了 /v1 时返回的网关落地页，
+                # 以及网关过载/限流时返回的 HTML 错误页。两者都值得换端点或
+                # 退避后重试，而不是第一次就把整批复核判死。
+                last_error = (
+                    "模型端点返回非 JSON 内容，正在尝试标准 /v1/chat/completions 路径"
+                    if attempt < len(endpoints)
+                    else "模型端点返回非 JSON 内容，正在重试"
+                )
+        if attempt < max_attempts and (
+            "非 JSON" in last_error
+            or _is_retryable_error({"success": False, "error": last_error})
+        ):
             time.sleep(min(2 * attempt, 6))
             continue
         return {"success": False, "error": last_error}
@@ -325,6 +347,7 @@ def call_openai_compatible(
     # 三者的对策完全不同，却都会表现为"JSON 不完整"。原样带出交给上层判断。
     finish_reason = str(choices[0].get("finish_reason") or "")
     usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    _ENDPOINT_CACHE[base_url.rstrip("/")] = selected_endpoint
     return {
         "success": True,
         "content": content,

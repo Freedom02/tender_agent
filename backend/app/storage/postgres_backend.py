@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -410,13 +411,30 @@ def _replace_table(
 class PostgresBackend(StorageBackend):
     name = "postgres"
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, schema: str | None = None) -> None:
         if psycopg is None:
             raise RuntimeError("psycopg 未安装：pip install 'psycopg[binary]>=3.1'")
         self.dsn = dsn
+        # 表所在 schema。None = 走连接的默认 search_path（通常 public）。
+        #
+        # 为什么需要它：本模块所有 SQL 用的是**不带限定**的表名
+        # （`SELECT ... FROM workspaces`），所以表在哪个 schema 由 search_path 决定。
+        # 脚手架表建在独立的 `partner` schema（见 backend/migrations/010_partner_scaffold.sql），
+        # 与我方 44 张目标表（public）物理隔离，避免两套模型混淆。
+        self.schema = (schema or "").strip() or None
 
     def _connect(self) -> Any:
-        return psycopg.connect(self.dsn)
+        conn = psycopg.connect(self.dsn)
+        if self.schema:
+            # set_schema 用参数占位符不安全（标识符不能参数化），
+            # 这里对 schema 名做白名单式校验后再拼接。
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.schema):
+                conn.close()
+                raise ValueError(f"非法 schema 名：{self.schema!r}")
+            with conn.cursor() as cur:
+                cur.execute(f"SET search_path TO {self.schema}, public")
+            conn.commit()
+        return conn
 
     # ---- load ----
     def load_catalog(self) -> list[dict[str, Any]]:
@@ -476,10 +494,25 @@ class PostgresBackend(StorageBackend):
             # （包括「未知」的 NULL）；updated_at 仅在该工作区 payload 真变了才刷新。
             _upsert_rows(cur, "workspaces", ws_rows, ["id"],
                          coalesce_cols=("created_at",), touch_col="updated_at")
-            # 派生表全量重建，与工作区 payload 保持一致
-            cur.execute("DELETE FROM workspace_requirement_coverage")
-            cur.execute("DELETE FROM workspace_fine_review_rows")
-            cur.execute("DELETE FROM workspace_sections")
+            # 派生表按 workspace_id 局部重建，与工作区 payload 保持一致。
+            #
+            # 这里以前是**无 WHERE 的整表 DELETE**（全库所有工作区的行全删全插），
+            # 代价是 O(总行数)/次保存 —— 而 persist_runtime()（存章节、改匹配状态）
+            # 每次都会走到这里，规模上去之后是纯粹的浪费。
+            # 现在只清理**本次传入**的工作区：DELETE ... WHERE workspace_id = ANY(%s)，
+            # 随后 upsert 出的行覆盖同一批 workspace_id，语义与整表重建等价。
+            #
+            # 注意：以 **workspaces 字典的键**（而不是各子表 rows 里出现过的 id）为准。
+            # 若某个工作区这次没有产生任何章节行，用子表推导的 id 集合会漏掉它，
+            # 旧行就会残留 —— 用字典键可以保证「传入即重建」，包括清空成 0 行的情形。
+            ws_ids = [str(k) for k in value if isinstance(value.get(k), dict)]
+            if ws_ids:
+                for table in (
+                    "workspace_requirement_coverage",
+                    "workspace_fine_review_rows",
+                    "workspace_sections",
+                ):
+                    cur.execute(f"DELETE FROM {table} WHERE workspace_id = ANY(%s)", (ws_ids,))
             _upsert_rows(cur, "workspace_sections", sec_rows, ["workspace_id", "section_id"])
             _upsert_rows(cur, "workspace_fine_review_rows", fr_rows, ["workspace_id", "row_id"])
             _upsert_rows(cur, "workspace_requirement_coverage", cov_rows, ["workspace_id", "requirement_id"])

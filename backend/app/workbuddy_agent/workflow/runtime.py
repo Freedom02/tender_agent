@@ -83,6 +83,17 @@ class DocumentMapRuntimeConfig(BaseModel):
     require_map_validation: bool = Field(True, alias="requireMapValidation")
     require_rejection_scan: bool = Field(True, alias="requireRejectionScan")
     fallback_mode: str = Field("builtin", alias="fallbackMode")
+    # OpenAI-compatible endpoint override (UINO's token.uino.com). When set,
+    # the SDK injects CODEBUDDY_BASE_URL / OPENAI_BASE_URL + API key so the
+    # CodeBuddy CLI routes LLM calls to this endpoint instead of resolving the
+    # model name against CodeBuddy.cn's built-in model list (which collides
+    # with UINO model names such as deepseek-v4-flash).
+    llm_base_url: str = Field("", alias="llmBaseUrl")
+    llm_api_key: str = Field("", alias="llmApiKey")
+    # Reasoning models (e.g. UINO's deepseek-v4-flash) return reasoning_content
+    # that must be round-tripped to the API. "adaptive"/"enabled" lets the SDK
+    # handle that; keep "disabled" for non-reasoning models to save tokens.
+    thinking_mode: str = Field("disabled", alias="thinkingMode")
 
 
 class AgentExecutionEnvelope(BaseModel):
@@ -978,6 +989,23 @@ class WorkBuddySdkExecutor:
 
                 return PermissionResultAllow()
 
+            runtime_env = {
+                "CODEBUDDY_CONFIG_DIR": str(self.config_dir),
+                "CODEBUDDY_DISABLE_AUTO_MEMORY": "1",
+            }
+            if task.config.llm_base_url:
+                endpoint = task.config.llm_base_url.rstrip("/")
+                if not endpoint.endswith("/v1"):
+                    endpoint += "/v1"
+                # Force the CLI to route LLM calls through this OpenAI-compatible
+                # endpoint rather than CodeBuddy.cn. Both CODEBUDDY_* and
+                # OPENAI_* are set so whichever env contract the CLI honors wins.
+                runtime_env["CODEBUDDY_BASE_URL"] = endpoint
+                runtime_env["OPENAI_BASE_URL"] = endpoint
+                if task.config.llm_api_key:
+                    runtime_env["CODEBUDDY_API_KEY"] = task.config.llm_api_key
+                    runtime_env["OPENAI_API_KEY"] = task.config.llm_api_key
+
             options = CodeBuddyAgentOptions(
                 # Keep MCP tools available to the model while denying the
                 # general-purpose tools that could escape the document-bound
@@ -1015,12 +1043,15 @@ class WorkBuddySdkExecutor:
                 setting_sources=task.config.setting_sources,
                 persist_session=False,
                 request_timeout_ms=task.config.timeout_seconds * 1000,
-                thinking={"type": "disabled"},
+                thinking=(
+                    {"type": "adaptive"}
+                    if task.config.thinking_mode == "adaptive"
+                    else {"type": "enabled", "budget_tokens": 8000}
+                    if task.config.thinking_mode == "enabled"
+                    else {"type": "disabled"}
+                ),
                 can_use_tool=can_use_tool,
-                env={
-                    "CODEBUDDY_CONFIG_DIR": str(self.config_dir),
-                    "CODEBUDDY_DISABLE_AUTO_MEMORY": "1",
-                },
+                env=runtime_env,
             )
 
             async for message in query(
@@ -1202,24 +1233,34 @@ class DocumentMapAgentRuntime:
             + "\n\n"
             + f"""
 ===== bounded execution budget =====
-Use this order and do not repeat successful calls:
+Use this order. The runtime blocks tool calls that arrive out of order.
+
+READ THE WHOLE DOCUMENT (do not stop early):
 1. inspect_document once.
 2. list_section_candidates once.
-3. read_document_full with maxChars=30000 and follow nextCursor until
-   hasMore=false. Keep maxChars at 30000 (do not shrink it), and never re-read
-   a page you already saw.
-4. Use at most two search_document calls. Search rejection with this EXACT
-   regex (useRegex=true) and nothing narrower:
+3. read_document_full with maxChars=30000. Check the response: if hasMore is
+   true, call read_document_full AGAIN with the returned nextCursor. Repeat
+   until a response returns hasMore=false. You have NOT seen the whole
+   document until hasMore=false; a map built from a partial read misses
+   sections and fails the coverage gate. The runtime blocks search and save
+   while hasMore is still true, so paginate to the end first.
+
+SEARCH REJECTION AND COVER EVERY HIT (do not under-collect):
+4. Call search_document with this EXACT regex (useRegex=true) and nothing
+   narrower:
    {HIGH_RISK_PATTERN.pattern}
-   Every match this search returns is a high-risk hit. Put every matching
+   The response lists matching segments. Count them. Put EVERY matching
    segment ID into the rejection section's sourceSegmentIds (or a range on
    that section) so the coverage gate counts it, and record the significant
-   ones as rejection candidates. Never silently drop a hit as a "benign
-   mention", a record, or a post-award consequence. Use one more search only
-   when a domain boundary remains unclear.
-5. Do not search while read_document_full still has more pages.
-6. Build the source-backed map and call save_document_map immediately. If a
-   tool says its budget is exhausted, stop reading/searching and save the map.
+   ones as rejection candidates. Before save_document_map, re-check that every
+   segment the search returned appears in rejection sourceSegmentIds — missing
+   even one invalidates the map. Never drop a hit as a "benign mention", a
+   record, or a post-award consequence. Use at most two search_document calls;
+   use the second only when a domain boundary is still unclear.
+
+SAVE:
+5. Build the source-backed map and call save_document_map. If a tool reports
+   its budget is exhausted, save what you have immediately.
 """
             + _document_map_contract_prompt(run, self.document)
         )

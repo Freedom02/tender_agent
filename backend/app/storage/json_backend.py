@@ -1,27 +1,13 @@
 """JSON 文件后端：与现状完全一致的行为。"""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .base import StorageBackend
-
-
-def _read_json(path: Path, fallback: Any) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return fallback
-
-
-def _write_json(path: Path, value: Any, *, compact: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")) if compact
-        else json.dumps(value, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+# 复用全项目统一的原子写（临时文件 + os.replace）。workspaces.json 可达 1GB，
+# 朴素 write_text 在写入中途被进程重启/并发读打断会留下半截文件。
+from ..repository.io import read_json as _read_json, write_json as _write_json
 
 
 class JsonBackend(StorageBackend):

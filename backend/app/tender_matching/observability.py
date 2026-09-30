@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
@@ -133,6 +134,23 @@ def observe_llm_call(function: Callable[..., _T]) -> Callable[..., _T]:
         return result
 
     return wrapped
+
+
+@contextmanager
+def capture_llm_telemetry():
+    """在调用点就地收集 LLM 调用计数（内存态，不落盘）。
+
+    ``observe_llm_call`` 只在一个活跃的 telemetry 上下文里才会记录每次调用的成败。
+    上层（如 store.analyze）用本上下文包住整段匹配，结束后读 ``summary()``，把
+    llmFailureCount 暴露到工作区里 —— 否则大模型不可用时，匹配会静默地把所有条款
+    判成「未匹配到 / 待补材料」，用户看不出是 AI 挂了还是真的没有可核验材料。
+    """
+    telemetry = LLMCallTelemetry()
+    token = _ACTIVE_TELEMETRY.set(telemetry)
+    try:
+        yield telemetry
+    finally:
+        _ACTIVE_TELEMETRY.reset(token)
 
 
 class AnalysisRunRecorder:

@@ -37,6 +37,7 @@ from .tender_matching.document_parser import (
 from .tender_matching.document_structure import enrich_document_structure
 from .tender_matching.decision_summary import build_workspace_decision_summary
 from .tender_matching.service import evaluate_company_relevance, matches_manual_search
+from .tender_matching.observability import capture_llm_telemetry
 from .workbuddy_agent.workflow.integration import (
     WorkBuddyAgentMatchingError,
     build_review_output_from_analysis_pack,
@@ -48,6 +49,50 @@ from .tender_monitor.adapters import (
     repair_notice_fields,
     valid_time_value,
 )
+# Repository 层（阶段 2）：三个聚合的读写统一走 Repository，json_impl 直连现有文件。
+# 详见 docs2/Repository层设计与读写点清单.md。
+from .repository import M3FactsRepository
+from .repository.io import read_json, write_json
+
+
+def _attach_llm_health(result: Any, telemetry: Any) -> None:
+    """把本次匹配的 LLM 调用成败统计写进工作区，避免大模型故障被静默吞掉。
+
+    语义匹配在 call_openai_compatible 失败时只返回 None / 空列表，最终表现为
+    「未匹配到 / 待补材料」，与「企业确实没有可核验材料」无法区分。这里把失败次数与
+    首个错误挂到 fineReview.extraction 上，界面上就能看出是 AI 调用出了问题。
+    """
+    summary = telemetry.summary()
+    fine_review = result.get("fineReview") if isinstance(result, dict) else None
+    extraction = fine_review.get("extraction") if isinstance(fine_review, dict) else None
+    if not isinstance(extraction, dict):
+        return
+    stats = extraction.setdefault("stats", {})
+    if isinstance(stats, dict):
+        stats["llmCallCount"] = summary["llmCallCount"]
+        stats["llmFailureCount"] = summary["llmFailureCount"]
+    if summary["llmFailureCount"] <= 0:
+        return
+    first_error = next(
+        (
+            str(call.get("error") or "")
+            for call in telemetry.calls
+            if not call.get("success") and call.get("error")
+        ),
+        "",
+    )
+    warning = (
+        f"大模型调用失败 {summary['llmFailureCount']} 次"
+        f"（共 {summary['llmCallCount']} 次）"
+        + (f"，首个错误：{first_error}" if first_error else "")
+        + "。匹配结果可能不完整，请检查 AI 配置与网络连通性。"
+    )
+    warnings = extraction.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        extraction["warnings"] = warnings
+    if warning not in warnings:
+        warnings.append(warning)
 
 
 def now_iso() -> str:
@@ -58,20 +103,9 @@ def uid(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:10]}"
 
 
-def read_json(path: Path, fallback: Any) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return fallback
-
-
-def write_json(path: Path, value: Any, *, compact: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")) if compact
-        else json.dumps(value, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+# read_json / write_json 已迁至 repository.io（原子写、全项目唯一落盘出口），
+# 上面通过 `from .repository.io import read_json, write_json` 引入。
+# 迁移注意：这两个函数影响所有数据读写，改行为要去 repository/io.py 改一处。
 
 
 # M3 画像刷新缓存时长（秒）：避免每次 bootstrap 都打 8 条 MQL 拖慢首屏。
@@ -108,6 +142,22 @@ class Store:
         self.reminders: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
         self._workspace_snapshot: dict[str, dict[str, Any]] = {}
+        # 磁盘工作区指纹：文件未变时跳过 bootstrap 的全量重读+深拷贝（960MB×3 ≈ 155s）。
+        self._workspaces_disk_mtime: int | None = None
+        # filtered_catalog 结果缓存：对 92MB 的 analysisText 跑正则约需 34s，而首屏
+        # 每次 bootstrap 都会调用它。按 (查询参数, catalog 对象身份) 缓存，落盘时失效。
+        self._catalog_filter_cache: dict[tuple[str, str, str, bool], list[dict[str, Any]]] = {}
+        self._catalog_filter_identity: int | None = None
+        # Repository 层：只保留 M3 企业事实出口（M3 是外部图库，不属于 runtime JSON，
+        # 因此不在 self.backend 的接口范围内）。catalog / workspaces / libraries /
+        # reminders / automation_runs 的读写统一走 self.backend（json / dual / db 三态）。
+        self._facts_repo = M3FactsRepository(self._load_facts_from_m3)
+
+    def _load_facts_from_m3(self) -> dict[str, Any]:
+        """A 组企业事实的 loader（注入 M3FactsRepository，避免 store↔m3 循环依赖）。"""
+        from .m3.sync import build_m3_client, read_facts_from_m3
+
+        return read_facts_from_m3(build_m3_client(self))
 
     def initialize(self) -> None:
         # 企业数据单一来源：M3 图库（本地不再落 company-materials.json，只保留证明材料文件）。
@@ -118,6 +168,8 @@ class Store:
         self.reminders = self.backend.load_reminders() or []
         self.runs = self.backend.load_automation_runs() or []
         self.workspaces = self.backend.load_workspaces() or {}
+        # 磁盘工作区指纹：保留我方的懒加载前置条件（_refresh_workspaces_from_disk 依赖它）。
+        self._workspaces_disk_mtime = self._workspaces_file_mtime()
         self.deleted_workspaces = {
             str(item) for item in (self.backend.load_deleted_workspaces() or []) if str(item)
         }
@@ -505,6 +557,8 @@ class Store:
 
     def persist_catalog(self) -> None:
         self.backend.save_catalog(self.catalog)
+        # 保有我方：catalog 落盘后使过滤缓存失效。
+        self._catalog_filter_cache.clear()
 
     def persist_libraries(self) -> None:
         self.backend.save_libraries(self.libraries)
@@ -534,6 +588,7 @@ class Store:
             self.backend.save_workspaces(merged_workspaces)
             self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
+        self._workspaces_disk_mtime = self._workspaces_file_mtime()
 
     def _install_workspaces(self, merged_workspaces: dict[str, Any]) -> None:
         """就地安装工作区表，保留每个工作区 dict 的对象身份。
@@ -557,12 +612,23 @@ class Store:
             else:
                 self.workspaces[workspace_id] = value
 
+    def _workspaces_file_mtime(self) -> int | None:
+        try:
+            return self.workspaces_path.stat().st_mtime_ns
+        except OSError:
+            return None
+
     def _refresh_workspaces_from_disk(self) -> None:
         """Merge external process changes without losing local dirty records."""
+        mtime = self._workspaces_file_mtime()
+        if mtime is not None and mtime == self._workspaces_disk_mtime:
+            # 文件自上次加载后未变化：内存态即权威，跳过全量重读与 3 次深拷贝。
+            return
         lock_path = self.runtime_root / ".store-runtime.lock"
         with runtime_file_lock(lock_path):
             disk_workspaces = self.backend.load_workspaces()
             if not isinstance(disk_workspaces, dict):
+                self._workspaces_disk_mtime = self._workspaces_file_mtime()
                 return
             merged_workspaces = deepcopy(disk_workspaces)
             for workspace_id, workspace in self.workspaces.items():
@@ -577,6 +643,7 @@ class Store:
                 merged_workspaces.pop(deleted_id, None)
             self._install_workspaces(merged_workspaces)
             self._workspace_snapshot = deepcopy(merged_workspaces)
+        self._workspaces_disk_mtime = self._workspaces_file_mtime()
 
     def persist_deleted_workspaces(self) -> None:
         self.backend.save_deleted_workspaces(sorted(self.deleted_workspaces))
@@ -1115,10 +1182,9 @@ class Store:
             return
 
         from .document_recognition.storage import FACT_LIST_KEYS, build_company_knowledge, build_eligibility_knowledge, build_profile
-        from .m3.sync import build_m3_client, read_facts_from_m3
 
         try:
-            facts = read_facts_from_m3(build_m3_client(self))
+            facts = self._facts_repo.load()
             self.company = build_profile(facts)
             self.organization = facts.get("organization") or {}
             self.company_knowledge = {
@@ -1137,6 +1203,101 @@ class Store:
                 self._m3_counts = empty
         finally:
             self._m3_last_refresh = time.time()
+
+    # 首屏瘦身：下列字段只在详情页使用，却占了单个工作区体积的 95%+。
+    # 实测单工作区 51MB 的构成：fineReview.extraction 19.1MB、fineReview.analysisPack
+    # 10.6MB、fineReview.reviewOutput 4.5MB、reasoning.reviewOutput 4.5MB、
+    # reasoning.decisionSummary 2.5MB、fineReview.rows 4.2MB、project 3.4MB。
+    # 列表视图只读 score/decision/eligibility/fineReview.{clauseCount,rows.length}
+    # 这类摘要字段，故 bootstrap 仅发摘要，完整数据由 GET /api/workspaces/{id} 懒加载。
+    _HEAVY_REASONING_KEYS = (
+        "extraction",
+        "analysisPack",
+        "reviewOutput",
+        "decisionSummary",
+        "documentMap",
+    )
+    _HEAVY_FINEREVIEW_KEYS = (
+        "extraction",
+        "analysisPack",
+        "reviewOutput",
+        "documentMap",
+    )
+    _SLIM_TEXT_LIMIT = 300
+
+    @classmethod
+    def _slim_items(cls, value: Any) -> Any:
+        """列表项只保留标量与短字符串，丢弃嵌套结构（详情页会懒加载完整数据）。"""
+        if not isinstance(value, list):
+            return value
+        out: list[Any] = []
+        for item in value:
+            if isinstance(item, dict):
+                row: dict[str, Any] = {}
+                for key, raw in item.items():
+                    if isinstance(raw, str):
+                        row[key] = raw[: cls._SLIM_TEXT_LIMIT]
+                    elif raw is None or isinstance(raw, (int, float, bool)):
+                        row[key] = raw
+                    elif isinstance(raw, list) and all(
+                        x is None or isinstance(x, (str, int, float, bool)) for x in raw
+                    ):
+                        row[key] = [
+                            x[: cls._SLIM_TEXT_LIMIT] if isinstance(x, str) else x for x in raw
+                        ][:50]
+                out.append(row)
+            elif isinstance(item, str):
+                out.append(item[: cls._SLIM_TEXT_LIMIT])
+            else:
+                out.append(item)
+        return out
+
+    @classmethod
+    def _workspace_summary(cls, workspace: dict[str, Any]) -> dict[str, Any]:
+        """把工作区裁成首屏摘要；被剔除的字段由 GET /api/workspaces/{id} 提供。"""
+        summary = {
+            key: value for key, value in workspace.items() if key not in ("project", "reasoning")
+        }
+        project = workspace.get("project")
+        if isinstance(project, dict):
+            slim_project: dict[str, Any] = {}
+            for key, value in project.items():
+                if key == "document" and isinstance(value, dict):
+                    # 解析文档正文（sections/segments/tables 等可数 MB）只在详情/标书页用；
+                    # 列表仅读 document.kind 等轻量标量字段。
+                    slim_project["document"] = {
+                        doc_key: doc_val
+                        for doc_key, doc_val in value.items()
+                        if doc_val is None or isinstance(doc_val, (str, int, float, bool))
+                    }
+                elif isinstance(value, str):
+                    slim_project[key] = (
+                        value[: cls._SLIM_TEXT_LIMIT]
+                        if len(value) > cls._SLIM_TEXT_LIMIT
+                        else value
+                    )
+                else:
+                    slim_project[key] = value
+            summary["project"] = slim_project
+        reasoning = workspace.get("reasoning")
+        if isinstance(reasoning, dict):
+            slim = {
+                key: value for key, value in reasoning.items() if key not in cls._HEAVY_REASONING_KEYS
+            }
+            for key, value in list(slim.items()):
+                if isinstance(value, list):
+                    slim[key] = cls._slim_items(value)
+            fine = slim.get("fineReview")
+            if isinstance(fine, dict):
+                slim_fine = {
+                    key: value for key, value in fine.items() if key not in cls._HEAVY_FINEREVIEW_KEYS
+                }
+                for key, value in list(slim_fine.items()):
+                    if isinstance(value, list):
+                        slim_fine[key] = cls._slim_items(value)
+                slim["fineReview"] = slim_fine
+            summary["reasoning"] = slim
+        return summary
 
     def bootstrap(self) -> dict[str, Any]:
         from .cloud_agent.config import DifyConfig
@@ -1166,7 +1327,7 @@ class Store:
             "catalog": self.filtered_catalog(),
             "reminders": self.reminder_snapshot(),
             "automation": self.automation_status(),
-            "workspaces": list(self.workspaces.values()),
+            "workspaces": [self._workspace_summary(ws) for ws in self.workspaces.values()],
         }
 
     def public_config(self) -> dict[str, Any]:
@@ -1189,6 +1350,14 @@ class Store:
             return None
 
     def filtered_catalog(self, query: str = "", region: str = "", type: str = "", current_only: bool = False) -> list[dict[str, Any]]:
+        catalog_identity = id(self.catalog)
+        if self._catalog_filter_identity != catalog_identity:
+            self._catalog_filter_cache.clear()
+            self._catalog_filter_identity = catalog_identity
+        cache_key = (query, region, type, current_only)
+        cached = self._catalog_filter_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
         valid_items = [
             item for item in self.catalog
             if item.get("dataOrigin") != "local_upload"
@@ -1206,7 +1375,9 @@ class Store:
         manual_payload = {"query": query, "region": region, "type": type}
         if current_only:
             items = [item for item in items if item.get("publishedDate", "") >= date.today().isoformat()]
-        return [self.with_preview(item) for item in items if matches_manual_search(item, manual_payload)]
+        result = [self.with_preview(item) for item in items if matches_manual_search(item, manual_payload)]
+        self._catalog_filter_cache[cache_key] = result
+        return list(result)
 
     @staticmethod
     def _with_preview(item: dict[str, Any]) -> dict[str, Any]:
@@ -1333,6 +1504,35 @@ class Store:
     def import_document(self, name: str, content: bytes, mime_type: str, document_kind: str = "notice") -> dict[str, Any]:
         if len(content) > 100 * 1024 * 1024:
             raise ValueError("招标文件需小于100MB")
+        # 同一份文件重复导入时复用已有条目：避免生成重复的 catalog 条目与工作区，
+        # 也省掉一次完整解析（大文件解析本身很贵）。按 contentHash + kind 判重；
+        # kind 不同（招标公告 vs 完整招标文件）视为两种导入意图，各自保留。
+        content_hash = hashlib.sha256(content).hexdigest()
+        kind = "tender_document" if document_kind == "tender_document" else "notice"
+        duplicate = next(
+            (
+                entry
+                for entry in self.catalog
+                if isinstance(entry, dict)
+                and entry.get("dataOrigin") == "local_upload"
+                and isinstance(entry.get("document"), dict)
+                and entry["document"].get("contentHash") == content_hash
+                and entry["document"].get("kind") == kind
+            ),
+            None,
+        )
+        if duplicate is not None:
+            return {
+                "item": self.with_preview(duplicate),
+                "file": {
+                    "name": name,
+                    "parseStatus": "该文件已导入过，已复用既有条目",
+                    "parseMethod": str(duplicate["document"].get("parseMethod") or ""),
+                    "warnings": [],
+                    "extractedTextLength": len(str(duplicate.get("analysisText") or "")),
+                },
+                "duplicated": True,
+            }
         parsed_file = self.extract_document_content(name, content, mime_type)
         text = parsed_file["text"].strip()
         if len(text) < 20:
@@ -1349,7 +1549,6 @@ class Store:
         target = source_dir / f"{project_id}-{safe_name}"
         target.write_bytes(content)
         parsed = self.parse_tender(text, "本地上传")
-        kind = "tender_document" if document_kind == "tender_document" else "notice"
         item = {
             "id": project_id,
             "title": parsed["projectName"] if parsed["projectName"] != "未识别" else Path(name).stem,
@@ -1367,7 +1566,7 @@ class Store:
                 "name": name,
                 "storagePath": str(target.relative_to(self.root)).replace("\\", "/"),
                 "mimeType": mime_type or "application/octet-stream",
-                "contentHash": hashlib.sha256(content).hexdigest(),
+                "contentHash": content_hash,
                 "parseMethod": parsed_file["parseMethod"],
                 "warnings": parsed_file["warnings"],
                 "segments": parsed_file["segments"],
@@ -1581,7 +1780,11 @@ class Store:
         if not item:
             return None
         previous_workspace = self.workspaces.get(item.get("workspaceId"))
-        reasoning = self.match_project(item)
+        # 大模型不可用时不能静默：统计本次匹配的 LLM 调用成败并挂到工作区上，
+        # 否则失败的语义匹配会伪装成「未匹配到 / 待补材料」。
+        with capture_llm_telemetry() as llm_telemetry:
+            reasoning = self.match_project(item)
+        _attach_llm_health(reasoning, llm_telemetry)
         workspace_id = item.get("workspaceId") or uid("workspace")
         item["workspaceId"] = workspace_id
         item["status"] = "已分析"

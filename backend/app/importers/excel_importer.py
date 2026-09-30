@@ -16,10 +16,9 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from openpyxl import load_workbook
 
@@ -147,6 +146,8 @@ def _to_num(value: Any, kind: str) -> Any:
     if value is None or value == "":
         return None
     s = str(value).strip().replace(",", "").replace("，", "")
+    # 去掉常见单位后缀（万元/元/万/%/人 等），避免 "24049.15万元" 写不进 M3 的 double 字段
+    s = re.sub(r"(万元|元|万|%|人|个|家)$", "", s).strip()
     if not s:
         return None
     try:
@@ -163,18 +164,70 @@ def _norm_date(value: Any) -> str:
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, (int, float)):
+        # Excel 日期序列号（1900 纪元）→ yyyy-MM-dd（如 43469 → 2019-01-04）
+        try:
+            if 1 <= value <= 2958465:
+                return (datetime(1899, 12, 30) + timedelta(days=int(value))).strftime("%Y-%m-%d")
+        except Exception:
+            pass
         return str(int(value))
     s = str(value).strip()
+    # 纯数字字符串（可能是 Excel 日期序列号，如 "43469"）→ 转成 yyyy-MM-dd
+    if re.fullmatch(r"\d{3,7}", s):
+        try:
+            n = int(s)
+            if 1 <= n <= 2958465:
+                return (datetime(1899, 12, 30) + timedelta(days=n)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+        return ""
+    # 永久有效语义 → 哨兵日期 9999-12-31（M3 date 字段可比较，匹配引擎直接判"未过期"）
+    if s in ("长期", "长期有效", "任期内有效", "每三年一复核"):
+        return "9999-12-31"
+    # 无有效期约束 → 置空
+    if s in ("-", "--", "无"):
+        return ""
+    # 相对有效期（"三年"）→ 标记，由 _parse_table 按颁发日期 +3 年换算
+    if s == "三年":
+        return "__PLUS_3Y__"
     m = re.search(r"(\d{4})[年/\-.](\d{1,2})[月/\-.](\d{1,2})日?", s)
     if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return s
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+    # 兜底：无法解析成标准日期的文本 → 置空
+    return ""
+
+
+def _date_plus_years(base: str, years: int) -> str:
+    """基准日期 + N 年，返回 yyyy-MM-dd；基准缺失/非法时按永久有效兜底。"""
+    if not base or base in ("", "__PLUS_3Y__"):
+        return "9999-12-31"
+    try:
+        d = datetime.strptime(base.split("T")[0].split(" ")[0], "%Y-%m-%d")
+        try:
+            return d.replace(year=d.year + years).strftime("%Y-%m-%d")
+        except ValueError:
+            # 2/29 平年无此日 → 退到 2/28
+            return d.replace(year=d.year + years, month=2, day=28).strftime("%Y-%m-%d")
+    except ValueError:
+        return "9999-12-31"
 
 
 def _norm_seq(s: str) -> str:
     """归一化序号：纯数字去前导零（'003'→'3'），其余保留 strip 原文。"""
     s = (s or "").strip()
     return str(int(s)) if re.fullmatch(r"\d+", s) else s
+
+
+def _norm_name(s: str) -> str:
+    """归一化产品名：去空白 + 小写，用于容错匹配（忽略空格/大小写差异）。"""
+    return re.sub(r"\s+", "", str(s or "")).lower()
+
+
+def _split_aliases(value: str) -> list[str]:
+    """拆产品别名（中英文逗号/顿号/分号/斜杠/空白）。"""
+    return [a.strip() for a in re.split(r"[,，、;；/\s]+", str(value or "")) if a.strip()]
 
 
 def _parse_proof_arcname(arcname: str) -> tuple[str, str, str] | None:
@@ -199,7 +252,6 @@ def _parse_proof_arcname(arcname: str) -> tuple[str, str, str] | None:
 class ExcelImporter:
     def __init__(self, runtime_dir: Path | None = None):
         self.runtime_dir = Path(runtime_dir) if runtime_dir else None
-        self.batch = uuid4().hex[:8]
 
     # ---------------------------------------------------------- 入口
     def import_zip(self, zip_bytes: bytes) -> dict[str, Any]:
@@ -244,22 +296,51 @@ class ExcelImporter:
                     if any(v not in (None, "") for k, v in row.items() if k != "__seq__"):
                         facts[key].append(row)
             else:
-                warnings.append(f"缺少「{d['sheet']}」sheet，按空表处理")
+                warnings.append(f"缺少「{d['sheet']}」sheet，按空表处理（现有工作表：{', '.join(available)}）")
             stats[key] = len(facts[key])
 
-        # 3) 解析产品名 → productId
+        # 3) 生成主键 ID（必须先于产品名解析：技术产品要有 productId，参数/证照才能引用）
+        self._assign_ids(facts)
+
+        # 4) 解析产品名 → productId（把技术参数/证照凭证里的「产品名」换成产品主键）
+        #    匹配策略：精确 → 归一化（去空格/忽略大小写，含别名）；命中非精确时记 warning 便于溯源。
         product_name_to_id = {
             p.get("productName"): p.get("productId")
             for p in facts.get("technical_product", []) if p.get("productName")
         }
+        norm_to_ids: dict[str, list[tuple[str, str]]] = {}
+        for p in facts.get("technical_product", []):
+            pname = p.get("productName")
+            pid = p.get("productId")
+            if not pname or not pid:
+                continue
+            tokens = [pname] + _split_aliases(p.get("aliases"))
+            for token in tokens:
+                norm_to_ids.setdefault(_norm_name(token), []).append((pname, pid))
         for sheet_name, field in _PRODUCT_NAME_SHEETS.items():
             key = _SHEET_BY_NAME[sheet_name]["key"]
             for row in facts.get(key, []):
-                if row.get(field):
-                    row[field] = product_name_to_id.get(row[field], row[field])
-
-        # 4) 生成主键 ID
-        self._assign_ids(facts)
+                name = row.get(field)
+                if not name:
+                    continue
+                if name in product_name_to_id:
+                    row[field] = product_name_to_id[name]
+                    continue
+                candidates = norm_to_ids.get(_norm_name(name), [])
+                if not candidates:
+                    warnings.append(f"「{sheet_name}」里填的产品名「{name}」在「技术产品」表未找到，未关联")
+                    row[field] = ""
+                elif len(candidates) > 1:
+                    warnings.append(
+                        f"「{sheet_name}」里填的产品名「{name}」归一化后匹配到 {len(candidates)} 个产品"
+                        f"（{', '.join(c[0] for c in candidates[:3])}…），无法唯一确定，未关联"
+                    )
+                    row[field] = ""
+                else:
+                    row[field] = candidates[0][1]
+                    warnings.append(
+                        f"「{sheet_name}」里填的产品名「{name}」→ 归一化匹配到「{candidates[0][0]}」"
+                    )
 
         # 5) 提取证明材料文件到 runtime/libraries/company/
         self._extract_proof_files(proof_files)
@@ -353,6 +434,12 @@ class ExcelImporter:
                     item[field] = _norm_date(raw)
                 else:
                     item[field] = _cell_text(raw)
+            # 相对有效期（"三年"）→ 按颁发/签订日期 +3 年换算成具体日期
+            for f in date_fields:
+                if item.get(f) == "__PLUS_3Y__":
+                    base = (item.get("issueDate") or item.get("signedDate")
+                            or item.get("validFrom") or item.get("periodStart") or "")
+                    item[f] = _date_plus_years(base, 3)
             if any(v not in (None, "") for k, v in item.items() if k != "__seq__"):
                 rows.append(item)
         return rows
@@ -370,10 +457,12 @@ class ExcelImporter:
                 "credential": "credentialId",
             }[key]
             for i, row in enumerate(facts.get(key, [])):
-                # 序号优先用 Excel「序号」列（归一化去前导零），无序号列时回退到行号；
-                # 这样主键 ID 序号、Excel 序号列、证明材料文件夹名三者永远同源。
+                # 序号优先用 Excel「序号」列（归一化去前导零），无序号列时回退到行号。
+                # 主键 = 「前缀-序号」（不带随机批次），这样同一主表反复导入时 M3 按
+                # biz_id upsert 而不产生重复对象；序号必须按「追加式」维护（用了不重排、
+                # 删了留空洞、新增 = max+1），保证主键 ID、Excel 序号列、证明材料文件夹名三者永远同源。
                 seq = _norm_seq(row.get("__seq__") or "") or str(i + 1)
-                row[id_field] = f"{d['id_prefix']}-{self.batch}-{seq}"
+                row[id_field] = f"{d['id_prefix']}-{seq}"
 
     # ---------------------------------------------------------- 证据文件夹
     def _extract_proof_files(self, proof_files: dict[str, bytes]) -> None:
