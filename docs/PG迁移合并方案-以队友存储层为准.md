@@ -1,12 +1,25 @@
 # PG 迁移合并方案（存储层用队友的，表规格用严格的）
 
-> ⚠️ **决策已修正（2026-09-30）**：用户更正为——
-> **标书部分的「表结构」参考队友的，「规格标准」用严格的（多租户 + 值域约束）。**
-> 因此本文 **§步骤 3** 里「我方 G 组全部退役」的结论**已被取代**：
-> G 组不是退役，而是**保留他的表拆分与 `payload` 保真，叠加严格规格**。
-> 详见 `docs/PG表设计融合方案-规范化与payload保真.md` 与
-> `docs/融合方案样板验证-workspace_sections.md`（实测：49 列 → 16 列，契约 key 零丢失）。
+> ⚠️ **决策已定稿（2026-09-30，最新一次修正覆盖之前所有说法）**
 >
+> 用户原话：「**他的只做参考，大方向还是为了最后服务整个系统。**」
+>
+> **三条定论（本文与所有 PG 文档都按这个读）：**
+>
+> 1. **我方 54 张表一张都不删、不改名、不合并。** 它们是本项目的目标数据模型。
+>    本文 **§步骤 3** 里所有标「❌ 退役」的结论**全部作废**，已在该节就地改写。
+> 2. **队友的表只提供技法参考**（`payload` 全保真 / `position` / `coalesce_cols` /
+>    `touch_col` / `deleted_at` 墓碑 / `json`-`dual`-`db` 三态开关），
+>    **不是替代品**。技法加到**我方的表**上，不是把我方的表换成他的。
+> 3. **「收缩」只发生在「列」上**（按准入规则把从未被写入的列收进 `payload`），
+>    **绝不发生在「表」上**。唯一实测过的收缩是样板表 `workspace_sections`
+>    的**列**从 49 减到 16（-67%），代码契约 15 个 key 零丢失
+>    （依据：其中 12 个 jsonb 列在真实数据里全空）。详见
+>    `docs/PG表设计融合方案-规范化与payload保真.md` 与
+>    `docs/融合方案样板验证-workspace_sections.md`。
+>
+> **存储层仍然用队友的**（这是本文标题的含义，且未变）：`store.py` 的接缝统一走
+> `self.backend`（json/dual/db 三态），我方另留 `self._facts_repo`（M3 企业事实）。
 > 本文其余部分（审计结论、store.py 冲突解法、两处必须补的回归）**仍然有效**。
 >
 > ---
@@ -15,6 +28,7 @@
 >
 > 审计对象：分支 `origin/fix/evidence-fill`（比 `origin/main` 多 4 个提交，2026-09-30）
 > 我方基线：分支 `integrate/merge-origin-main`（= `origin/main` + 15 个提交）
+> 合并结果：分支 `integrate/pg-fusion`（`origin/main` = `51186ea` 已合入）
 
 ---
 
@@ -163,41 +177,49 @@ git merge origin/fix/evidence-fill
 
 ### 步骤 3：迁移文件与表的处置
 
-| 我方文件 | 处置 | 理由 |
+> ⚠️ **本节旧版本曾把 A / C / D / E / `006` 等组标为「退役」，那个结论已被用户明确否决：**
+> 「**他的只做参考，大方向还是为了最后服务整个系统。**」
+>
+> **现定论：我方 54 张表一张都不删、不改名、不合并。**
+> 队友的表只提供**技法参考**（`payload` 全保真、`position` 排序列、`coalesce_cols`、
+> `touch_col`、`deleted_at` 墓碑、`json`-`dual`-`db` 三态开关）。
+> **「收缩」只发生在「列」上（准入规则），绝不发生在「表」上。**
+
+| 我方文件 | 处置 | 说明 |
 |:--|:--|:--|
-| `001_schema_v1.sql` | ⚠️ **拆开用**（见下表） | 标书结构参考他的 + payload 保真 |
-| `004_bid_reading_columns.sql` | ❌ 退役 | 给 `match_item` 补的列，该表不再使用 |
-| `005_comments.sql` | ❌ 退役 | 治理元数据（对应 L 组）；若保留 L 组则只留 L 部分 |
-| `006_bid_writing_tables.sql` | ❌ **大部分退役** | 见下面映射 |
-| `007_bid_views_v2.sql` | ❌ 退役 | 视图是规范化表的投影，payload 模式下用不上 |
-| `008_governance_sync.sql` | ❌ 退役 | 同 005 |
+| `001_schema_v1.sql`（48 表） | ✅ **保留** | 部分表按准入规则砍列 + 加 `payload jsonb` |
+| `004_bid_reading_columns.sql` | ✅ **保留** | 给 `match_item` 补的列 |
+| `005_comments.sql` | ✅ **保留** | L 组治理元数据；L 组本身已有真实数据 |
+| `006_bid_writing_tables.sql`（6 表） | ✅ **保留** | 6 张表全部保留，见下表 |
+| `007_bid_views_v2.sql` | ✅ **保留** | 视图是行级查询便利层，payload 模式下仍然有用 |
+| `008_governance_sync.sql` | ✅ **保留** | 同 005 |
 
-**`006` 的 6 张新表映射到他的设计：**
+**`006` 的 6 张表：全部保留**（旧版标「退役」是错的）
 
-| 我方的表 | 他的对应 | 处置 |
+| 我方表 | 队友的对应 | 处置 |
 |:--|:--|:--|
-| `parse_bundle` | `parse_bundles`（表结构对应，但应用侧他不读） | ❌ 退役（用他的） |
-| `template_fragment` | `parse_artifacts`（`kind='template_fragment'`） | ❌ 退役 |
-| `evaluation_item` | `parse_bundles.payload.evaluationItems` | ❌ 退役（无损） |
-| `parse_risk` / `parse_review` | `parse_bundles.payload.riskItems` / `.parseReviewReport` | ❌ 退役（无损） |
-| `agent_result` | `parse_bundles.payload.agentResults` | ❌ 退役（无损） |
-| G 组补列（`bid_document` 37 列 / `bid_section` 50 列） | 他的 `workspaces.payload` + `workspace_sections` | ⚠️ **不退役**：**结构用他的，规格用严格的**（准入规则重排 + `org_id` + CHECK），见《PG表设计融合方案》与《融合方案样板验证》 |
+| `parse_bundle` | 他的 `parse_bundles` | ✅ **保留我方表**；参考他的 `payload` 保真手法 |
+| `template_fragment` | 他的 `parse_artifacts(kind='template_fragment')` | ✅ **保留** |
+| `evaluation_item` | 他的 `parse_bundles.payload.evaluationItems` | ✅ **保留**（保留才有行级查询能力） |
+| `parse_risk` / `parse_review` | 他的 payload 字段 | ✅ **保留** |
+| `agent_result` | 他的 `parse_bundles.payload.agentResults` | ✅ **保留** |
+| G 组补列（`bid_document` 37 列 / `bid_section` 50 列） | 他的 `workspaces.payload` + `workspace_sections` | ⚠️ **只做列级重排**：表名/主键/行数不变，按准入规则把没人用的列收进 `payload`，另加 `org_id`/CHECK/时间戳 |
 
-**`001` 里 48 张表逐组处置：**
+**`001` 里 48 张表逐组处置：全部保留**
 
-| 组 | 表数 | 他的对应 | 处置 |
+| 组 | 表数 | 处置 | 说明 |
 |:--|:--:|:--|:--|
-| **A 企业事实** | 10 | ❌ 无（他明确「M3 是单一来源，本库不复制」） | ❌ **退役**（两边都认同 M3 权威；我方 `001` 自己也写着「M3 仍是权威源，本组表是只读镜像」） |
-| **B 招标信息与文件** | 6 | ✅ `catalog_projects`（公告）；其余在 `payload.project` | ⚠️ **部分退役**：`tender_announcement`→`catalog_projects`；`tender_project`/`tender_document`→payload |
-| **C 解析结果** | 3 | 在 `payload.project.document` | ❌ 退役（无损） |
-| **D 提取结果** | 3 | 在 `payload` | ❌ 退役（无损） |
-| **E 匹配结果** | 6 | ✅ `workspace_fine_review_rows`（`fineReview.rows`）+ 其余在 payload | ❌ 退役（无损，但**丢掉行级查询能力**，见 §五 待决策） |
-| **F 运行与可观测** | 3 | ❌ **无** | ✅ **建议保留/补进他的库** |
-| **G 标书产出** | 5 | ✅ `workspaces` + `workspace_sections` | ⚠️ **不退役**：**表结构参考他的，规格标准用严格的** —— 保留他的表拆分与 `payload` 保真，叠加 `org_id`/CHECK/时间戳；我方 49 列的 `bid_section` 按准入规则重排为 16 列（实测削减 67%，契约 key 无丢失） |
-| **I 初筛与提醒链** | 6 | ⚠️ 仅 `reminders` | ⚠️ 待定（看业务） |
-| **J 抽取补齐** | 1 | ❌ 无 | ⚠️ 待定 |
-| **K 决策与运行** | 2 | ✅ `automation_runs` | ⚠️ 部分退役 |
-| **L 治理元数据** | 3 | ❌ **无** | ✅ **建议保留/补进他的库** |
+| **A 企业事实** | 10 | ✅ **保留** | M3 是权威源，本组是只读镜像；**建不建由用户拍板**，但「保留」是默认 |
+| **B 招标信息与文件** | 6 | ✅ **保留** | `tender_project` 已有 **27 行真实数据** |
+| **C 解析结果** | 3 | ✅ **保留** | 行级查询（"这张表在第几段"）靠它，payload 替代不了 |
+| **D 提取结果** | 3 | ✅ **保留** | 同上（要求项/要求组的关系查询） |
+| **E 匹配结果** | 6 | ✅ **保留** | 6 态匹配契约需要行级查询与聚合 |
+| **F 运行与可观测** | 3 | ✅ **保留** | `analysis_run` 已有 **17 行真实数据**；队友完全没有 |
+| **G 标书产出** | 5 | ✅ **保留我方表名** | 吸收他的 payload 保真手法；`bid_section` 做列级重排（49→~16 列 + payload） |
+| **I 初筛与提醒链** | 6 | ✅ **保留** | 队友只有 `reminders` |
+| **J 抽取补齐** | 1 | ✅ **保留** | 队友无对应 |
+| **K 决策与运行** | 2 | ✅ **保留** | `decision_summary` 队友无对应 |
+| **L 治理元数据** | 3 | ✅ **保留** | 已有 **1082 + 54 + 61 行真实数据**；队友完全没有 |
 
 ### 步骤 4：必须补的两处（否则是回归）
 
@@ -211,21 +233,21 @@ git merge origin/fix/evidence-fill
 ## 四、合并后的总装形态
 
 ```
-┌─ 保真层（他的 16 表）────────────────────────────────────┐
-│  workspaces / catalog_projects / libraries / library_documents │
-│  reminders / automation_runs / bid_runs                        │
-│  + 每表 payload JSONB 全保真（含 bidDocument 37 key）           │
-│  + 3 张派生投影（sections / fine_review / coverage，当前只写）  │
-│  + 6 张迁移/查询用（parse_bundles / parse_artifacts /           │
-│    evidence_files / asset_files / app_config / runtime_state）  │
+┌─ 数据模型层（我方的 54 张表，一张都不删）──────────────────────┐
+│  A 企业事实(10)   B 招标信息(6)    C 解析结果(3)   D 提取结果(3) │
+│  E 匹配结果(6)    F 运行可观测(3)  G 标书产出(5)   I 初筛链(6)   │
+│  J 抽取补齐(1)    K 决策运行(2)    L 治理元数据(3)              │
+│  ＋ 每表加 payload JSONB 全保真（借队友的技法）                 │
+│  ＋ 列按准入规则裁决：没人查的列收进 payload（只砍列，不砍表）  │
 └────────────────────────────────────────────────────────────────┘
                               │
-┌─ 切换层（他的）─────────────▼──────────────────────────────────┐
+┌─ 存储切换层（队友的，已合并）▼──────────────────────────────────┐
 │  backend/app/storage/   json（默认）/ dual（灰度）/ db（唯一源） │
+│  ＋ 我方已补回：原子写（复用 repository/io.py）                  │
 └────────────────────────────────────────────────────────────────┘
                               │
 ┌─ 接缝（合并后，只有一个）────▼──────────────────────────────────┐
-│  self.backend      ← 他的（catalog/libraries/workspaces/…）      │
+│  self.backend      ← 队友的（catalog/libraries/workspaces/…）    │
 │  self._facts_repo  ← 我方的（M3 图库直连，他的接口里没有 facts） │
 └────────────────────────────────────────────────────────────────┘
                               │
@@ -233,23 +255,25 @@ git merge origin/fix/evidence-fill
 │  零改动即可跑（读写的都是 Store 内存里的 workspace 对象）        │
 └────────────────────────────────────────────────────────────────┘
 
-仍留磁盘（他有意的范围选择）：
+仍留磁盘（队友有意的范围选择）：
   ParseBundle、证明材料、导出件、assets、config(含 API Key)
 
-可选补充（我方独有、他完全没有）：
-  F 组 运行可观测（analysis_run / analysis_run_stage / llm_call_log）
-  L 组 治理元数据（meta_table / meta_column / meta_relationship）
+借队友的技法（加到**我方的表**上，不是换表）：
+  payload 全保真 / position 排序列 / coalesce_cols（不覆盖 created_at）/
+  touch_col（只在真变化时改 updated_at）/ deleted_at 墓碑 /
+  json-dual-db 三态存储开关
 ```
 
 ---
 
-## 五、合并前必须拍板的三件事
+## 五、待拍板事项（已收敛，只剩 2 项）
 
-| # | 问题 | 选项 |
+| # | 问题 | 状态 |
 |:--|:--|:--|
-| **1** | **接受 ParseBundle 仍留磁盘吗？** | ① 接受（他的范围选择，行为与今天一致）<br>② 不接受 → 给 `parse_bundles` 加 `load/save_parse_bundle`，把 `store.get_parse_bundle` 切过去 |
-| **2** | **接受子表全局 DELETE + 重建吗？** | ① 接受（现规模无所谓）<br>② 改成按 `workspace_id` 局部重建（推荐，成本很低） |
-| **3** | **F 组 / L 组要不要补进他的库？** | ① 补（运行可观测 + 治理元数据是他完全没有的）<br>② 不补（先只跑通主干） |
+| **1** | 接受 ParseBundle 仍留磁盘吗？ | ⏳ **待拍板**：① 接受（队友的范围选择，行为与今天一致）② 不接受 → 给 `StorageBackend` 加 `load/save_parse_bundle` |
+| **2** | 子表全局 `DELETE` + 重建 | ✅ **已定**：改成按 `workspace_id` 局部重建（P0 待实施） |
+| **3** | F 组 / L 组 | ✅ **已定：保留**（`analysis_run` 已有 17 行、`meta_*` 已有 1082+54+61 行真实数据；队友完全没有） |
+| **4** | 原子写 | ✅ **已完成**：`storage/json_backend.py` 已改用 `repository/io.py` 的原子写 |
 
 ---
 

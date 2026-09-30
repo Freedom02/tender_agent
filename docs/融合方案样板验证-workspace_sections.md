@@ -214,9 +214,16 @@ Get-Content E:\code\uinoproject\tenderagent\_fusion_sample\report.txt -Encoding 
 
 ## 七、下一步建议
 
-1. **按同一模式铺开其它标书表**：`workspace`（主表）、`workspace_fine_review_rows`、`workspace_requirement_coverage`、`bid_runs`
-   - 预期同样大幅削减列，并可对 `fineReview.rows` 的 **61 个 key** 做准入裁决
+> ⚠️ **表名用我方的**——本样板是拿队友的 `workspace_sections` 做的**手法验证**，
+> 验证的是「`payload` + 准入规则」这套手法可行，**不是要用他的表替代我方的表**。
+> 我方 54 张表**一张都不删、不改名、不合并**；只做**列级**收缩。
+
+1. **按同一模式改造我方标书表**（表名与拆分保持我方的）：
+   `bid_section`（最该先改，现状 49 列）、`bid_document`、`bid_plan`、`workspace`、`workspace_draft`
+   - 预期同样大幅削减**列**；可对 `workspace` 里 `fineReview.rows` 的 **61 个 key** 做准入裁决
 2. **把准入裁决结果写进治理元数据**（L 组 `meta_column`）：记录「列 ← payload 路径 + 归一函数 + 约束」，
    然后用**代码写入的 key 集合 vs `meta_column` 路径集合的差集**做自动完整性校验，根治"漏列"
-3. **决定 `bid_section`（49 列）的处置**：本样板证明可安全重排为 16 列，需确认是否替换
+3. **`bid_section`（49 列）的处置**：本样板证明**列**可安全重排为 16 列
+   （表名 / 主键 / 行数**都不变**），需用户确认是否执行；不执行也不阻塞其他表
 4. **`match_item` / `match_assessment` 为空表**（实测 0 行）——E 组的投影设计需按同一套准入规则重新裁决
+   ⚠️ **空表 ≠ 该删表**：它们是"还没落地"，E 组的 6 态匹配契约需要行级查询与聚合能力

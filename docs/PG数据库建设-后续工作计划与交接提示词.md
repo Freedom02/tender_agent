@@ -38,13 +38,32 @@ e66cb67 fix(bid-writing): 证明材料一键填充内联真实扫描件内容
 
 ## 二、设计原则（一手定论，勿再讨论）
 
-### 2.1 分工
+### 2.1 分工（不可动摇的边界，先看这里）
 
-| 维度 | 采用 |
+| 维度 | 定论 |
 |:--|:--|
-| **表结构**（怎么拆表、主键、payload 摆放） | **队友的**（参考） |
-| **规格标准**（多租户 + 值域约束 + 审计） | **严格的**（我方的） |
+| **表本身**（表名、按域拆表、表数量） | ✅ **我方的 54 张，一张都不删、不改名、不合并** |
+| **保真技法**（借队友的） | `payload jsonb` 全保真 / `position` 排序列 / `coalesce_cols` 不覆盖 `created_at` / `touch_col` 只在真变化时改 `updated_at` / `deleted_at` 墓碑 / `json`-`dual`-`db` 三态开关 |
+| **规格标准** | **严格的**（`org_id` 多租户 + 值域 `CHECK` + 审计时间戳 + 索引） |
+| **"压缩"只发生在列上** | 按准入规则砍掉**从未被写入**的列，数据全部留在 `payload` 里，**零丢失** |
 | **大方向** | 服务整个系统，不迁就任何一方的实现 |
+
+> ⚠️ **队友的表（`workspaces` / `workspace_sections` / `workspace_fine_review_rows` / …）是技法参考，不是替代品。**
+> 我方标书表（`workspace` / `workspace_draft` / `bid_document` / `bid_section` / `bid_plan`）
+> **表名与拆分保持不变**，只吸收他的 `payload` 保真手法。
+>
+> 样板 `workspace_sections`（49→16 列）是拿队友的表做的**技术验证**——验证的是
+> 「`payload` + 准入规则」这套**手法可行**，不是"要用他的表"。
+
+### 2.1.1 关于"压缩"的澄清（避免误读）
+
+| 说法 | 含义 | 是否涉及删表 |
+|:--|:--|:--:|
+| 49 列 → 16 列 | `workspace_sections` 这**一张表**的**列**从 49 减到 16 | ❌ 不涉及 |
+| 44 张空表 | 实测 0 行、无应用写入点 → 是**还没落地**，不是冗余 | ❌ **保留** |
+| A 组 10 张 M3 镜像表 | 唯一"要不要建"的问题 | ⏳ 待你拍板 |
+
+**没有任何一条是"删你的表"。** 唯一的列级收缩有实测依据：`bid_section` 的 49 列里 12 个 jsonb 列在真实 6 行中**全空**、多列从未被写入。
 
 ### 2.2 核心原则
 
@@ -98,17 +117,21 @@ cur.execute("DELETE FROM workspace_sections")
 
 ### P1 · 表结构融合（核心工作量）
 
-**3. 按 `workspace_sections` 样板铺开其余标书表**（每张都要跑五项验证）
+**3. 按样板手法改造我方标书表**（每张都要跑五项验证）
 
-| 表（队友的表名） | 重点 | 备注 |
+> ⚠️ **表名与拆分用我方的**——下面的表是**改造对象**，不是"换成队友的表"。
+> 样板 `workspace_sections` 只是拿队友的表做了**手法验证**（`payload` + 准入规则可行），手法照搬到我方表上。
+
+| 我方表（改造对象） | 现状 | 要做的 |
 |:--|:--|:--|
-| `workspaces` | 主表，`payload` 含 `bidDocument` 37 key | `deleted_at`/`position` 他已建 |
-| `workspace_fine_review_rows` | **`fineReview.rows` 有 61 个 key**（重头） | 标书正文/偏离表的主要输入 |
-| `workspace_requirement_coverage` | 覆盖关系 | 已有 `coverage_type`/`status` 提升列 |
-| `bid_runs` | 经 `cloud_agent/run_repository.py` 独立访问 | 不走 StorageBackend |
-| `parse_bundles` / `parse_artifacts` | 解析产物 | 见 P1-2 |
+| **`bid_section`** | **49 列**，其中 12 个 jsonb 列在真实 6 行里**全空** | **最该先改**：加 `payload jsonb`，按准入规则砍到 ~16 列 |
+| `bid_document` | 1 行真实数据 | 加 `payload`，`bidDocument` 37 key 全进 payload |
+| `bid_plan` | 1 行真实数据 | 同上 |
+| `workspace` | 18 行 | 加 `payload`；`fineReview.rows` **61 key** 是重头 |
+| `workspace_draft` | 18 行 | 同上 |
+| `analysis_run` | **17 行**（F 组，队友完全没有） | 加 `payload` + 严格规格 |
 
-**每张表的动作**：① 列队友结构 ② 按准入规则裁决投影列 ③ 加 `org_id`/CHECK/时间戳 ④ 真实数据往返 + 完整性 + 负向测试
+**每张表的动作**：① 列出当前列 ② 按准入规则裁决保留哪些列 ③ 其余全部进 `payload jsonb` ④ 加 `org_id`/`CHECK`/时间戳/索引 ⑤ 用真实数据跑五项验证
 
 ### P2 · 治理自检（建议做，是"漏列"的根治手段）
 
@@ -133,7 +156,9 @@ cur.execute("DELETE FROM workspace_sections")
 | **J 采购** | `procurement_need` | 按业务 |
 | **B 组残留** | `tender_project`（**已有 27 行**）/ `tender_document` | ✅ 留（队友无对应） |
 
-### P3 · 需要拍板
+### P3 · 需要用户拍板（**这两项是问句，不要自行决定**）
+
+> ⚠️ **默认全部保留。** 没有用户的明确答复，**一张表都不许删、不许改名、不许"用队友的表替代"**。
 
 **6. A 组 10 张 M3 镜像表要不要建？**
 `fact_sync_log` / `organization` / `qualification_certificate` / `credential` / `performance_case` /
@@ -141,9 +166,14 @@ cur.execute("DELETE FROM workspace_sections")
 
 - 我方 `001` 自己写着「**M3 仍是权威源，本组表是只读镜像**」
 - 队友写着「**企业本体事实仍以 M3 图库为单一来源，本库不复制**」
-- **两边都认同 M3 权威 → 建议不建**（唯一能真正省掉的 10 张）
+- 两边的**技术判断一致**（M3 权威），但**建不建镜像表是业务选择，只有用户能定**
+- 这里是"要不要**建**"，不是"要不要**删**"——即使不建镜像表，`evidence_file` 仍对应队友的 `evidence_files`
 
-**7. `bid_section`（49 列）是否替换为 16 列样板？**（样板已证明可安全重排）
+**7. `bid_section`（49 列）是否按准入规则收缩到 ~16 列 + `payload`？**
+- 这是**列级**改造，表名、主键、行数都不变
+- 依据：49 列里 12 个 jsonb 列在真实 6 行中**全空**，多列从未被写入
+- 收缩后数据零丢失（全在 `payload` 里），样板已验证
+- 若用户希望先保持 49 列不动，也可延后——**不影响其他表的推进**
 
 ---
 
@@ -258,24 +288,50 @@ Get-Content E:\code\uinoproject\tenderagent\_fusion_sample\report.txt -Encoding 
 ## 项目位置
 - 工作区根：E:\code\uinoproject\tenderagent
 - 代码根（git 仓库）：E:\code\uinoproject\tenderagent\tender-agent\tender-agent
-- 当前分支：integrate/pg-fusion，HEAD f529779（已合并 origin/main = 51186ea）
+- 当前分支：integrate/pg-fusion，HEAD b88eb75（已合并 origin/main = 51186ea 并推送）
 - 本地库：postgresql://tender_app:tender_app_dev@127.0.0.1:5433/tender_agent
   （容器 tenderagent-pg；用 Python + pg8000 走 TCP，不要用 docker CLI）
+
+## 上一轮合并了什么（供你了解仓库现状）
+合并 origin/main 时带进来 5 个提交，其中**只有 1 个是数据库相关**：
+  a5b2e95  storage 三态后端 + 21 个迁移文件          ← 数据库（核心）
+  62fae6d  伙伴接入指南 + .gitattributes              ← 迁移文档（周边）
+  e66cb67  证明材料一键填充（bid_writing + 前端）      ← 标书功能，与数据库无关
+  f53a6d7  现状盘点文档                               ← 文档
+  51186ea  agent_bridge 残留引用清理                  ← 代码清理，与数据库无关
+store.py 的存储接缝已统一走队友的 self.backend（json/dual/db 三态），
+并保留了我方的 self._facts_repo（M3 企业事实）与数据懒加载/缓存优化。
 
 ## 不要提交这 3 个文件（另一个对话正在改）
 docs/PostgreSQL表字段总清单与补表计划.md
 docs/标书表替换可行性核对.md
 scripts/backfill_bid_writing.py
 
+## 最高优先级的约束（先读这条，违反即错）
+1) **我方的 54 张表一张都不删、不改名、不合并、不用队友的表替代。** 它们是本项目的目标数据模型。
+2) 队友的表（workspaces / workspace_sections / workspace_fine_review_rows / bid_runs /
+   parse_bundles …）**只是技法参考**。参考的是他的手法，不是他的表：
+     - payload jsonb 全保真（结构多变的字段全塞 payload，不丢数据）
+     - position 排序列 / coalesce_cols（不覆盖 created_at）/ touch_col（只在真变化时改 updated_at）
+     - deleted_at 墓碑 / json-dual-db 三态开关
+   这些手法要**加到我方的表上**，不是把我方的表换成他的。
+3) **"压缩"只发生在列上，不发生在表上。** 唯一被验证过的收缩是：
+   样板表 workspace_sections 的**列**从 49 减到 16（-67%），代码契约 15 个 key 零丢失。
+   依据是实测：其中 12 个 jsonb 列在真实数据里**全空**、多列从未被写入。
+   数据全部保留在 payload 里 → **零丢失**。
+4) 44 张空表（0 行、无应用写入点）是**还没落地**，不是冗余 → **保留**，按域逐步落地。
+5) A 组 10 张 M3 镜像表建不建、bid_section 收不收缩，**都是问句，必须问用户，不许自行决定**。
+   （详见本文档 §三 P3；默认全部保留。）
+
 ## 设计原则（已定，勿再讨论）
-1) 表结构参考队友的（他的 16 张表 + payload 保真），规格标准用严格的（org_id 多租户 +
-   值域 CHECK + 审计时间戳）。大方向是服务整个系统，不迁就任何一方实现。
+1) 表用我方的（54 张，按域拆分），保真技法借队友的，规格标准用严格的
+   （org_id 多租户 + 值域 CHECK + 审计时间戳 + 索引）。大方向是服务整个系统，不迁就任何一方实现。
 2) 核心原则：payload 是事实（全保真，永不加约束）；提升列是投影（归一 + 约束，允许为空）。
    写入流程：先写 payload（永不失败）→ 再归一填提升列 → 归一失败留 NULL + 记治理告警。
    CHECK 一律写成 CHECK (col IS NULL OR col IN (...))。
 3) 提升列准入规则（满足至少一条才建列）：要 WHERE / 要 JOIN / 要 ORDER BY / 要参与唯一键 /
    要 CHECK / 要建索引 / 要进治理元数据。其余一律进 payload。
-   实测有效：workspace_sections 从 49 列压到 16 列（-67%），代码契约 15 个 key 零丢失。
+   这条规则用于**删列**（把没人用的列收进 payload），不用于删表。
 
 ## 任务（按优先级）
 
@@ -283,21 +339,24 @@ scripts/backfill_bid_writing.py
 修复 backend/app/storage/postgres_backend.py::save_workspaces() 里三处无 WHERE 的 DELETE
 （workspace_requirement_coverage / workspace_fine_review_rows / workspace_sections），
 每次保存全表删全插是 O(总行数)。改为 DELETE ... WHERE workspace_id = ANY(%s)，只重建传入的工作区。
+（注：这里改的是队友 storage 层的**实现缺陷**，不涉及表的取舍。）
 
 ### P1 打通 db 模式
 db 模式下 ParseBundle 仍读磁盘（store.get_parse_bundle/save_parse_bundle 读写
 runtime/projects/<id>/parse/parse-bundle.json），而队友的 StorageBackend 没有 parse_bundle 方法。
-要么给 StorageBackend 加 load/save_parse_bundle，要么明确接受"解析产物留盘"（先问我）。
+要么给 StorageBackend 加 load/save_parse_bundle，要么明确接受"解析产物留盘"（先问用户）。
 
-### P1 表结构融合（核心工作量）
-按 docs/融合方案样板验证-workspace_sections.md 的样板逐张做：
-  workspaces（主表，payload 含 bidDocument 37 key）
-  workspace_fine_review_rows（fineReview.rows 有 61 个 key，是重头）
-  workspace_requirement_coverage
-  bid_runs
-  parse_bundles / parse_artifacts
-每张表的动作：① 列队友结构 ② 按准入规则裁决投影列 ③ 加 org_id/CHECK/时间戳
-④ 用真实数据跑五项验证（A 往返保真 / B 投影正确 / C 完整性 / D 规格生效 / E 加字段免迁移）
+### P1 按样板手法改造「我方」标书表（核心工作量）
+把 workspace_sections 样板验证过的**手法**照搬到我方表上。表名与拆分保持我方的：
+  bid_section        ← 最该先改：现状 49 列，其中 12 个 jsonb 列在真实 6 行里全空
+  bid_document       ← 加 payload，bidDocument 的 37 个 key 全进 payload
+  bid_plan           ← 同上
+  workspace          ← 加 payload；fineReview.rows 有 61 个 key，是重头
+  workspace_draft    ← 同上
+  analysis_run       ← F 组，队友完全没有，已有 17 行真实数据
+每张表的动作：① 列出当前列 ② 按准入规则裁决保留哪些列 ③ 其余全部进 payload jsonb
+④ 加 org_id/CHECK/时间戳/索引 ⑤ 用真实数据跑五项验证
+（A 往返保真 / B 投影正确 / C 完整性 / D 规格生效 / E 加字段免迁移）
 复用脚本：_fusion_sample/roundtrip.py（改表名与投影映射即可）
 
 ### P2 治理自检
@@ -309,9 +368,18 @@ runtime/projects/<id>/parse/parse-bundle.json），而队友的 StorageBackend �
 F 组运行可观测（analysis_run 已有 17 行真实数据）/ L 组治理元数据（已有数据）/
 I 组初筛链 / J procurement_need / B 组 tender_project（已有 27 行）
 
-### P3 需拍板（先问我，别自己决定）
-1) A 组 10 张 M3 镜像表要不要建？（两边都认同 M3 是权威源 → 建议不建）
-2) 我方 49 列的 bid_section 是否替换为 16 列样板？
+### P3 需拍板（**这两项是问句，必须问用户，不许自行决定；默认全部保留**）
+1) A 组 10 张 M3 镜像表**要不要建**？（我方 001 与队友都认同 M3 是权威源，但建不建是业务选择）
+   注意这里是"要不要**建**"，不是"要不要**删**"。
+2) 我方 49 列的 bid_section **是否**按准入规则收缩到 ~16 列 + payload？
+   这是**列级**改造（表名/主键/行数都不变）；用户想先不动也可以，不阻塞其他表。
+
+## 禁止事项（违反即错）
+- ❌ 不许删任何表、改任何表名、把两张表合并成一张
+- ❌ 不许用队友的表（workspaces / workspace_sections / bid_runs / parse_bundles …）替代我方的表
+- ❌ 不许因为"表太多"就建议精简——44 张空表是**未落地**，不是冗余
+- ❌ 不许把"列压缩"（49→16 列）说成或做成"表压缩"
+- ❌ 不要把队友的 schema.sql / migrate_to_db.py 当成目标 schema 直接执行
 
 ## 硬性约束（踩过的坑，务必遵守）
 - ❌ 不要跑 scripts/tender-agent-migration/migrate_to_db.py（读本地 runtime/*.json，跨机读到空）
