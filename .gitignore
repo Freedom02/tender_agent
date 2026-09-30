@@ -47,6 +47,11 @@ docs/P05-reclassification-*-evaluation.md
 docs/WorkBuddy与纯规则LLM通道对比.md
 docs/P04-P05-document-map-evaluation.md
 
+# Local PostgreSQL migration verification artifacts (one-off probes,
+# regenerable via scripts/backfill_bid_writing.py; reports kept outside git)
+_backfill/
+_verify006/
+
 # Local handoff notes and one-off probes
 docs/A01-*.md
 docs/B0*.md

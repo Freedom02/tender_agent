@@ -341,6 +341,14 @@ def _fact_records(
             "validFrom": str(row.get("validFrom") or ""),
             "validUntil": str(row.get("validUntil") or ""),
         }
+        # 同时保留事实「族内主键字段名」（technical_parameter → parameterId、
+        # technical_product → productId …）。匹配层的 _fact_id()/_fact_primary_id()
+        # 取主键的顺序是「族内主键 → productId → id」，而本投影此前只写通用 id：
+        # 技术参数记录因此只剩 productId（父产品引用）可命中，于是每条参数都被解析成
+        # 所属产品的主键，_facts_by_ids() 会把该产品的**全部参数**当成"命中证据"灌进
+        # 每条技术要求（表现为前端每条技术参数挂几十条企业证据）。
+        if record["id"]:
+            record[id_field] = record["id"]
         if row.get("productId"):
             record["productId"] = str(row["productId"])
         if row.get("brand"):

@@ -1,7 +1,7 @@
 # PostgreSQL 表与字段总清单 + 补表实施计划
 
-> 版本：V3（在 `匹配数据持久化设计（PostgreSQL）.md` 与 `数据读写架构与迁移实施方案.md` 基础上重写；V3 同步 003 去重结果 + 004 标书读取列）
-> 状态：**✅ 48 表 / 918 字段 / 4 视图 / 语义字典全部就位（live，001–005 均通过幂等验收）。治理元数据（005）已完成，未等 skill**
+> 版本：V5（在 V4 基础上同步 **008 治理元数据同步 + 字段检阅清单重跑** 的结果）
+> 状态：**✅ 54 表 / 5 视图 / 语义字典全部就位（live，001–008 均通过幂等验收）。标书模块的 schema 债已由 006/007 清完；008 把治理元数据补齐到 54 表 / 1082 列**
 > 目标库：`postgresql://tender_app:***@127.0.0.1:5433/tender_agent`（本地 Docker，postgres:16，UTF8）
 
 ---
@@ -20,14 +20,16 @@
 
 ---
 
-## 二、现状：已建成 48 表 + 4 视图（已完成，已验收）
+## 二、现状：已建成 54 表 + 5 视图（已完成，已验收）
 
-> **最终结构**：001 建 36 表 + 002 补 12 表 = **48 表**；003 去重补列、004 补标书读取列，**都不建表**。
+> **最终结构**：001 建 36 表 + 002 补 12 表 = **48 表**；003 去重补列、004 补标书读取列、
+> 005 治理元数据、**008 治理元数据同步**，**都不建表**；**006 补 6 表 → 54 表**；007 重建 4 视图 + 新增 1 视图 → **5 视图**。
 > `evaluation_criterion` / `project_info_item` / `document_template` 三张表**已直接从 001/002 移除**——
 > 实测它们与 `tender_requirement` 存的是同一批 items（8 个模块共享同一套基础字段），
 > 故按「方案 A」统一并入 `tender_requirement`，用 `target_module` 列区分模块。
 
-验收结果（最新）：`48 tables / 918 字段 / 4 views / 138 indexes / 157 constraints / encoding=UTF8`，四份迁移二次执行全部 `skipping`，**幂等验收通过**。
+验收结果（最新，008 后）：`54 tables / 5 views / encoding=UTF8`，八份迁移二次执行全部 `skipping`，**幂等验收通过**；
+治理元数据已与真实结构对齐：`meta_table=54`、`meta_column=1082`（= 实际列数）、`meta_relationship=61`。
 
 | 组 | 主题 | 表数 | 表名 |
 |:--|:--|:--|:--|
@@ -36,21 +38,31 @@
 | **C** | 解析结果 | 3 | `document_segment` `document_section` `document_table` |
 | **D** | 提取结果 | 3 | `requirement_group` `tender_requirement` `requirement_segment` |
 | **E** | 匹配结果（核心） | 6 | `match_assessment` `match_item` `match_item_evidence` `match_item_fact` `match_risk` `review_record` |
-| **F** | 运行记录 | 3 | `analysis_run` `analysis_run_stage` `llm_call_log` |
-| **G** | 标书 | 5 | `workspace` `workspace_draft` `bid_document` `bid_section` `bid_plan` |
+| **F** | 运行记录 | 4 | `analysis_run` `analysis_run_stage` `llm_call_log` + **`agent_result`（006）** |
+| **G** | 标书 | 5 | `workspace` `workspace_draft` `bid_document` `bid_section` `bid_plan`（006 补 37 + 39 列） |
+| **P** | **解析包（006 新增）** | 5 | `parse_bundle` `evaluation_item` `template_fragment` `parse_risk` `parse_review` |
 | **I** | 初筛与提醒（002） | 6 | `monitoring_rule` `screening_profile` `screening_constraint` `screening_assessment` `screening_check` `reminder` |
 | **J** | 抽取补齐（002） | 1 | `procurement_need` |
 | **K** | 决策与运行（002） | 2 | `decision_summary` `automation_run` |
 | **L** | 治理元数据（002） | 3 | `meta_table` `meta_column` `meta_relationship` |
-| **H** | 视图 | 4 | `v_match_item_full` `v_parameter_match` `v_qualification_match` `v_deviation_row` |
+| **H** | 视图 | 5 | `v_match_item_full` `v_parameter_match` `v_qualification_match` `v_deviation_row` + **`v_parameter_deviation_row`（007 新增）** |
 
 > **D 组变更说明**：原 4 张表（含 `evaluation_criterion`）→ 现 3 张。评分项不再是独立表，
 > 而是 `tender_requirement` 中 `target_module='evaluation'` 的行（用 `criterion_name` / `scoring_rule` /
 > `max_score` / `required_evidence` 四列承载）。
 > **J 组变更说明**：原 3 张表（`document_template` / `project_info_item` / `procurement_need`）→ 现 1 张。
 > 前两张删表，模板块与项目信息块同样并入 `tender_requirement`（`target_module='template'` / `'project_info'`）。
+> **P 组说明（006 新增）**：合并「标书制作」代码引入的**全新解析包数据层**
+> （`agent_runtime.contracts.ParseBundle`，20 字段，落 `projects/<id>/parse/parse-bundle.json`）
+> 在 48 张表里一张都没有对应。006 按「读+写两向取并集」补 5 张：
+> `parse_bundle`（汇总 + `submissionStructure`/`bidFormatSpec`/`documentBlocks`/… jsonb）、
+> `evaluation_item`（B 档：本地 `eval_parser` 确定性产出）、`template_fragment`（B 档：本地 `template_fragments.py` 产出）、
+> `parse_risk`（C 档：Pi 侧风险，本地无法重算）、`parse_review`（C 档：`parseReviewReport`）。
+> **刻意不建的**：`compliance_review` → `bid_document.compliance_review` jsonb；`section_edit_history` → `bid_section.edit_history` jsonb。
+> **`agent_result` 为什么不并入 `llm_call_log`**：后者语义是「一次 LLM 调用」，`AgentResultEnvelope` 是「一次智能体运行」
+> （一次运行可能含多次调用），粒度不同，故独立建表。
 
-**逐表逐字段完整清单** → 见 `表字段检阅清单.md`（+ 可批注的 `表字段检阅清单.csv`）。该文件由 `scripts/gen_field_checklist.py` **从全部迁移文件程序化提取**，含 001+002+003+004 的最终状态（含 ALTER 补列、`storage_kind` 等），改 DDL 重跑即同步，不会与库不一致。
+**逐表逐字段完整清单** → 见 `表字段检阅清单.md`（+ 可批注的 `表字段检阅清单.csv`）。该文件由 `scripts/gen_field_checklist.py` **从全部迁移文件程序化提取**，含 001–008 的最终状态（含 ALTER 补列、`storage_kind` 等），改 DDL 重跑即同步，不会与库不一致。
 
 ---
 
@@ -453,9 +465,10 @@ ScreeningProfile ->applies-> ScreeningAssessment ->evaluates-> TenderAnnouncemen
 | **第二批（延后）** | F + G + I + J + K | **17** | 初筛与提醒、标书产出、运行记录、采购需求、决策摘要 |
 | **已完成（治理）** | L | **3** | meta_table / meta_column / meta_relationship |
 
-> ⚠️ **2026 标书代码合并后的重要修正（见 `标书表替换可行性核对.md`）**：G 组 5 张表是在标书代码合并**之前**设计的，实测**无法替换**——`bid_document` 缺 ~37 个 key、`bid_section` 缺 ~50 个 key，且新代码引入了整层 `ParseBundle`（含 evaluationItems / bidFormatSpec / submissionStructure / templateFragments / agentResults）**在 48 张表里一张都没有对应**。
-> **影响**：G 组不能按原计划"直接迁"，必须先出 `006_bid_writing_tables.sql` 补列补表。**第二批范围因此从 17 表扩到约 26 表**（新增 parse_bundle / agent_result / template_fragment / evaluation_item / compliance_review / section_edit_history 等）。
-> **好消息**：H 组视图的缺口（evidence / evidenceIds / matchedMaterialIds / matchedParameters / coverage / gaps）**全部可在 SQL 层重建**，源数据已在 `match_item.technical_alignment`、`gaps`、`match_item_evidence` 里，不需要改表。
+> ⚠️ **2026 标书代码合并后的修正（见 `标书表替换可行性核对.md`）——已由 006/007 解决 ✅**：G 组 5 张表是在标书代码合并**之前**设计的，实测曾**无法替换**——`bid_document` 缺 ~37 个 key、`bid_section` 缺 ~50 个 key，且新代码引入了整层 `ParseBundle`（含 evaluationItems / bidFormatSpec / submissionStructure / templateFragments / agentResults）在 48 张表里一张都没有对应。
+> **已修复**：`006_bid_writing_tables.sql` 给 `bid_document` 补 37 列、`bid_section` 补 39 列，新增 `parse_bundle` / `evaluation_item` / `template_fragment` / `parse_risk` / `parse_review` / `agent_result` 6 表；`compliance_review`、`section_edit_history` 不建表，落 `bid_document.compliance_review`、`bid_section.edit_history` jsonb。
+> **H 组视图缺口也已修复**（`007_bid_views_v2.sql`）：evidence / evidenceIds / matchedMaterialIds / matchedParameters / coverage / gaps / category(table_key) / matchedFacts 全部在 SQL 层重建，源数据在 `match_item.technical_alignment`、`gaps`、`match_item_evidence` 里，无需改表。
+> **第二批范围仍按 V3 从 17 表扩到约 26 表**——006 只是把 schema 债补齐，读写迁移仍分批做（双写、读逐步切不变）。
 
 > A 组（企业事实镜像）说明：迁移机制是 **M3 → PG 同步**（`read_facts_from_m3` 已独立封装），不是 JSON 回填；放进第一批是因为匹配需要它作"企业侧"输入。
 
@@ -503,6 +516,27 @@ ScreeningProfile ->applies-> ScreeningAssessment ->evaluates-> TenderAnnouncemen
   - 自动灌 `meta_table`（48 行，全有中文名 + 分组 + 层级）、`meta_column`（919 行，全部字段）、`meta_relationship`（57 条外键）
   - 验收：`48 tables / 4 views / 139 indexes / 157 constraints / UTF8`，二次执行 `skipping` 零报错；`\d+ match_item` 可看中文说明
   - 踩坑：① `information_schema.columns` 含视图列 → 须 JOIN `tables` 过滤 `BASE TABLE`；② `to` 是 PG 保留字，不能做表别名
+- ✅ `backend/migrations/006_bid_writing_tables.sql`：**标书模块补列 + 补表**——已完成并通过幂等验收
+  - 依据：`docs/标书表替换可行性核对.md` §8.2/§8.3（写方向 37+50 key 对拍 + 读方向 ParseBundle 缺表）
+  - `bid_document` 补 37 列（21 标量 + 16 jsonb，覆盖 workspace["bidDocument"] 全部 ~40 key）
+  - `bid_section` 补 39 列（标量 + 数组 + jsonb + `extension` 兜底，覆盖 ~60 key）
+  - 新增 6 表：`parse_bundle` / `evaluation_item` / `template_fragment` / `parse_risk` / `parse_review` / `agent_result`
+  - **结构决策（§2.2 拍板）**：`bid_plan.plan` 存章节元数据（sectionId/title/kind/order/requirementIds…），`bid_section` 存内容与生成态；读取层按 `order_no` 拼回 `bidDocument.plan`
+  - 验收：`54 tables`，二次执行 `skipping` 零报错（见 `docs/标书表替换可行性核对.md` §九「006/007 完成记录」）
+- ✅ `backend/migrations/007_bid_views_v2.sql`：**重建 4 视图 + 新增 1 视图**——已完成并通过幂等验收
+  - `v_match_item_full` 补 `evidence`（与 `_evidence_summary` 逐字一致）/ `evidenceIds` / `matchedMaterialIds`
+  - `v_deviation_row` 补 `category` + `table_key`（还原 technical/commercial 二分的结构列）+ `evidence` / `evidencePath` / `requirementFull` / `requirementNumber` / `productName` / `matchedFacts`
+  - `v_parameter_match` 投影 `technical_alignment` → `matchedParameters`（三层嵌套整列透出）/ `coverage` / `coveredPoints` / `gaps`；join 证据表 → `evidenceItems`
+  - `v_qualification_match` 补 `evidenceItems`；域过滤补 `eligibility` + targetModule/category/matchDomain 别名
+  - **新增** `v_parameter_deviation_row`（参数级技术规格偏离表，多 `matchedParameter` 列，`evidence` 语义 = 证据路径换行拼接）
+  - 验收：`5 views`，二次执行 `skipping` 零报错；`evidence` 摘要串与 Python `_evidence_summary` 合成对拍 9/9 逐字一致
+- ✅ `backend/migrations/008_governance_sync.sql`：**治理元数据同步（对齐 54 表 / 1082 列）**——已完成并通过幂等验收
+  - 背景：005 是给 48 表灌的；006 之后 `meta_table` 仍 48 行（缺 6 表）、`meta_column` 仍 919 行（缺 163 列 = bid_document 37 + bid_section 39 + 6 新表 87）
+  - `COMMENT ON TABLE` ×6 + `COMMENT ON COLUMN`（bid_document/bid_section/解析包 6 表的新列，全中文说明）
+  - `meta_table` 补 6 行（P 解析包组 5 表 + F 运行记录组 `agent_result`）；`meta_column`/`meta_relationship` 沿用 005 的派生语句原样重跑自动吸收新列新外键
+  - `meta_column.column_cn_name` 从 COLUMN COMMENT 直接回填（`col_description`，DRY 免维护两遍），带 `IS NULL` 守卫
+  - 验收：`meta_table=54 / meta_column=1082（=实际列数）/ meta_relationship=61 / meta_column 有中文名 419`，二次执行 `skipping` 零报错
+  - 顺带修掉 006 一处**多行 CHECK 约束**（`agent_result.confidence` 的 CHECK 跨行会让清单生成器把 `confidence IS NULL` 误解析成伪列 → 压成单行，SQL 语义不变）
 
 > **与 skill 的衔接（已决策：不等 skill）**：组长给的「PG 导入本体 skill」（`promt.md` + `JSONRULE-Sample.json`）是"从 Excel 建 PG 库 + 生成 JSONRULE 接 M3 问数"的流程——**工作流对我们不适用**（表已在 PG、数据在 JSON，不经过 Excel）。
 > 但其 `JSONRULE` 格式与我们的 `meta_*` 表**一一对应**，已完成对齐（补 `is_enabled`）。将来若要接 M3 问数，可由 `meta_*` 表**无损反生成 JSONRULE.json**。
@@ -554,7 +588,7 @@ ScreeningProfile ->applies-> ScreeningAssessment ->evaluates-> TenderAnnouncemen
 ## 七、附录
 
 - `标书读取接口说明.md` — **给标书同学看的接口约定**（5 个场景 × 表/列落点 + 待确认项），迁移后他们从 PG 读数据就看这份
-- `表字段检阅清单.md` / `表字段检阅清单.csv` — **字段级权威清单**（48 表最终态）。逐表检阅就靠它，由 `scripts/gen_field_checklist.py` 从全部迁移文件程序化提取（含 ALTER 补列），改 DDL 重跑即同步
+- `表字段检阅清单.md` / `表字段检阅清单.csv` — **字段级权威清单**（已由 `scripts/gen_field_checklist.py` 重跑到 **54 表 / 1082 字段 / 5 视图，缺中文说明 0**，与真实库逐列对拍 0 差异）。逐表检阅就靠它，由脚本从全部迁移文件程序化提取（含 ALTER 补列），改 DDL 重跑即同步
 - `匹配数据持久化设计（PostgreSQL）.md` — 可行性分析、本体映射与决策依据（D1–D5 的详细论证）
 - `数据读写架构与迁移实施方案.md` — 读写点清单（W1–W7 / R1–R5）与 9 步迁移方案
 - `招标初筛与详细匹配本体设计方案.md` — 本体蓝图（24 类），I 组初筛表与 D 组表的设计依据

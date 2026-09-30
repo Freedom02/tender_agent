@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from backend.app.document_recognition.storage import build_company_knowledge, build_eligibility_knowledge
+from backend.app.tender_matching.builtin_target_processing import _facts_by_ids
 from backend.app.tender_matching.company_facts import build_company_ledger
 from backend.app.tender_matching.deterministic import deterministic_match
 from backend.app.tender_matching.document_matching import _fact_to_evidence
@@ -122,6 +123,36 @@ class EligibilityKnowledgeTests(unittest.TestCase):
         self.assertEqual(evidence["sourceType"], "evidence")
         self.assertEqual(evidence["sourceLocator"], "libraries/company/证明材料/资质认证/1/")
         self.assertEqual(evidence["id"], "qc-1")
+
+    def test_technical_parameter_records_resolve_to_own_id_not_parent_product(self) -> None:
+        """回归：技术参数记录必须解析成自身 parameterId，而非父产品 productId。
+
+        此前 _fact_records 只写通用 id 字段、不写 parameterId，导致 _facts_by_ids
+        按「parameterId → productId → id」取主键时，技术参数记录（id=param-x +
+        productId=prd-1）全部塌陷成 prd-1；一旦匹配集含产品 ID，就会把该产品的
+        **全部参数**当成命中证据灌进一条技术要求（前端每条技术参数挂几十条企业证据）。
+        """
+        facts = {
+            "technical_product": [
+                {"productId": "prd-1", "productName": "ThingJS平台", "evidencePath": ""},
+            ],
+            "technical_parameter": [
+                {"parameterId": "param-1", "productId": "prd-1", "description": "参数一", "evidencePath": "libraries/company/证明材料/技术参数/1/"},
+                {"parameterId": "param-2", "productId": "prd-1", "description": "参数二", "evidencePath": "libraries/company/证明材料/技术参数/2/"},
+                {"parameterId": "param-3", "productId": "prd-1", "description": "参数三", "evidencePath": ""},
+            ],
+        }
+        knowledge = {**build_company_knowledge(facts), **build_eligibility_knowledge(facts)}
+
+        # 技术对齐产生的匹配集：命中参数 + 产品兜底
+        matched = _facts_by_ids(knowledge, ["param-2", "prd-1"])
+        ids = sorted(_fact_to_evidence(f)["id"] for f in matched)
+        # 只该命中「产品本体 + 对口参数」两条，而不是产品全部参数
+        self.assertEqual(ids, ["param-2", "prd-1"])
+
+        # 参数记录自身应带 parameterId 字段，供各 _fact_id 变体按族内主键解析
+        param_record = next(c for c in knowledge["capabilities"] if c.get("id") == "param-2")
+        self.assertEqual(param_record["parameterId"], "param-2")
 
 
 if __name__ == "__main__":
