@@ -98,9 +98,43 @@
 
 ## 五、里程碑
 
-### M2′-0 可行性 spike（先证明再动手）
-写一个最小扩展（只注册一个 `ping` 工具）+ 最小技能，用一次真实 Pi 调用确认：扩展被加载、工具被模型调用、返回值进入后续推理。
-**这一步不通过就不进入 M2′。** 产出：一段可复现的命令 + 一次调用日志。
+### M2′-0 可行性 spike（先证明再动手）— ✅ 已通过
+写一个最小扩展（只注册一个 `ping` 工具）用一次真实 Pi 调用确认：扩展被加载、工具被模型调用、返回值进入后续推理。
+
+**实测结论（本机 Pi 0.84.4 + 公司网关 deepseek-v4-pro）**
+
+```
+$env:COMPANY_LLM_API_KEY = <agent-config.json 的 ai.apiKey>
+$env:PI_CODING_AGENT_DIR = <可写的 pi 配置目录>
+$env:BID_WORKSPACE_ID   = workspace-spike-001
+pi --provider company-ai --model deepseek-v4-pro --no-session \
+   --no-builtin-tools --tools bid_ping \
+   -e <扩展绝对路径>.ts --mode json \
+   -p "调用 bid_ping 工具，name 传 spike-ok，然后原样转述工具返回的内容。"
+```
+
+调用日志（节选）：
+
+```
+tool_execution_start  toolName=bid_ping  args={"name":"spike-ok"}
+tool_execution_end    result={"content":[{"type":"text","text":"pong:spike-ok|workspace:workspace-spike-001"}],"isError":false}
+assistant             工具返回内容原样转述：pong:spike-ok|workspace:workspace-spike-001
+```
+
+一次调用约 1.8k tokens、两轮结束。证明：① `-e` 加载扩展生效；② `--no-builtin-tools` + `--tools` 白名单下自定义工具可被调用；
+③ 工具返回值进入模型后续推理；④ **子进程环境变量注入可用** —— 将来用它把 workspaceId / 数据快照路径传给工具。
+
+**操作要点（踩过的坑）**
+
+| 事项 | 结论 |
+| --- | --- |
+| provider 从哪来 | `~/.pi/agent/models.json` 定义 `company-ai`（baseUrl `https://token.uino.com/v1`，apiKey 写的是 `$COMPANY_LLM_API_KEY`）→ 后端用环境变量注入密钥，不写进提示词 |
+| Pi 需要写自己的配置目录 | 启动时会写 `settings.json.lock` / `auth.json.lock`；配置目录必须可写，否则报 EPERM 后直接退出 |
+| 隔离测试 | 把 `PI_CODING_AGENT_DIR` 指向一个只放了 `models.json`/`settings.json` 副本的临时目录即可，不必碰真实用户配置 |
+| 模型实际后端 | 网关返回 `responseModel: deepseek-flash`（对外型号名与后端型号不同，不影响） |
+
+> 这一步不通过就不进入 M2′。**现已通过，可以动手。**
+
 
 ### M2′ 给目录智能体装上「技能 + 工具」
 - 建技能正文（SKILL.md）与提示词接线；Python 读技能文件注入提示词（**不开放通用 `read` 工具**，理由见「六、安全」）。
