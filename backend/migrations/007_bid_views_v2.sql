@@ -371,20 +371,25 @@ LEFT JOIN LATERAL (
         ORDER BY mf.id
     ) AS matched_facts
     FROM match_item_fact mf
+    -- A 组 M3 镜像表已移除（见 009_drop_company_mirror_tables.sql）：
+    -- 名称/证据路径改从「命中时的事实快照」取，不再 JOIN 镜像表。
+    -- 快照是命中时刻的冻结值，既自包含，也不会因 M3 变动而与结论分叉。
     LEFT JOIN LATERAL (
-        SELECT u.name, u.evidence_path
-        FROM (
-            SELECT biz_id, qualification_name AS name, evidence_path FROM qualification_certificate
-            UNION ALL SELECT biz_id, credential_name,  evidence_path FROM credential
-            UNION ALL SELECT biz_id, case_name,         evidence_path FROM performance_case
-            UNION ALL SELECT biz_id, name,              evidence_path FROM staff_member
-            UNION ALL SELECT biz_id, evidence_type AS name, evidence_path FROM financial_evidence
-            UNION ALL SELECT biz_id, product_name AS name, evidence_path FROM technical_product
-            UNION ALL SELECT biz_id, description AS name, evidence_path FROM technical_parameter
-            UNION ALL SELECT biz_id, organization_name AS name, NULL::text FROM organization
-        ) u
-        WHERE u.biz_id = mf.fact_biz_id
-        LIMIT 1
+        SELECT
+            COALESCE(
+                NULLIF(mf.fact_snapshot ->> 'name', ''),
+                NULLIF(mf.fact_snapshot ->> 'organization_name', ''),
+                NULLIF(mf.fact_snapshot ->> 'qualification_name', ''),
+                NULLIF(mf.fact_snapshot ->> 'credential_name', ''),
+                NULLIF(mf.fact_snapshot ->> 'case_name', ''),
+                NULLIF(mf.fact_snapshot ->> 'product_name', ''),
+                NULLIF(mf.fact_snapshot ->> 'evidence_type', ''),
+                NULLIF(mf.fact_snapshot ->> 'description', '')
+            ) AS name,
+            COALESCE(
+                NULLIF(mf.fact_snapshot ->> 'evidencePath', ''),
+                NULLIF(mf.fact_snapshot ->> 'evidence_path', '')
+            ) AS evidence_path
     ) fr ON true
     WHERE mf.match_item_id = i.id
 ) f ON true;

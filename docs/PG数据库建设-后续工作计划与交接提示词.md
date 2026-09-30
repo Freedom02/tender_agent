@@ -42,7 +42,7 @@ e66cb67 fix(bid-writing): 证明材料一键填充内联真实扫描件内容
 
 | 维度 | 定论 |
 |:--|:--|
-| **表本身**（表名、按域拆表、表数量） | ✅ **我方的 54 张，一张都不删、不改名、不合并** |
+| **表本身**（表名、按域拆表、表数量） | ✅ **我方的 44 张，一张都不删、不改名、不合并**（A 组 10 张已按决定删除） |
 | **保真技法**（借队友的） | `payload jsonb` 全保真 / `position` 排序列 / `coalesce_cols` 不覆盖 `created_at` / `touch_col` 只在真变化时改 `updated_at` / `deleted_at` 墓碑 / `json`-`dual`-`db` 三态开关 |
 | **规格标准** | **严格的**（`org_id` 多租户 + 值域 `CHECK` + 审计时间戳 + 索引） |
 | **"压缩"只发生在列上** | 按准入规则砍掉**从未被写入**的列，数据全部留在 `payload` 里，**零丢失** |
@@ -61,7 +61,7 @@ e66cb67 fix(bid-writing): 证明材料一键填充内联真实扫描件内容
 |:--|:--|:--:|
 | 49 列 → 16 列 | `workspace_sections` 这**一张表**的**列**从 49 减到 16 | ❌ 不涉及 |
 | 44 张空表 | 实测 0 行、无应用写入点 → 是**还没落地**，不是冗余 | ❌ **保留** |
-| A 组 10 张 M3 镜像表 | ✅ **已拍板：不建**（预留不启用，DDL 保留在 001 里） | ❌ 不涉及 |
+| A 组 10 张 M3 镜像表 | ✅ **已删除**（从 001/005/007 移除 + `009` 清存量库） | ❌ **已删除** |
 
 **没有任何一条是"删你的表"。** 唯一的列级收缩有实测依据：`bid_section` 的 49 列里 12 个 jsonb 列在真实 6 行中**全空**、多列从未被写入。
 
@@ -87,7 +87,8 @@ CHECK 一律写成 CHECK (col IS NULL OR col IN (...))   -- NULL 合法
 1. `docs/融合方案样板验证-workspace_sections.md` —— **样板 + 实测数据 + 复现脚本**（最具体）
 2. `docs/PG表设计融合方案-规范化与payload保真.md` —— 融合原则与逐维度对照
 3. `docs/PG迁移合并方案-以队友存储层为准.md` —— 审计结论 + 存储层冲突解法
-4. `docs/PostgreSQL表字段总清单与补表计划.md` —— 我方 54 表全字段清单
+4. `docs/PostgreSQL表字段总清单与补表计划.md` —— 我方全字段清单
+   ⚠️ 该文件仍是删除前口径（54 张，含 A 组）；**以本文档的 44 张为准**
 
 ---
 
@@ -135,7 +136,7 @@ cur.execute("DELETE FROM workspace_sections")
 
 ### P2 · 治理自检（建议做，是"漏列"的根治手段）
 
-**4. 把裁决结果写进 `meta_column`**（L 组，**已有数据**：`meta_table` 54 / `meta_column` 1082 / `meta_relationship` 61）
+**4. 把裁决结果写进 `meta_column`**（L 组，**已有数据**：`meta_table` 44 / `meta_column` 893 / `meta_relationship` 52）
 记录「列 ← payload 路径 + 归一函数 + 约束」，例如：
 
 | 列名 | payload 路径 | 归一函数 | 约束 |
@@ -158,16 +159,26 @@ cur.execute("DELETE FROM workspace_sections")
 
 ### P3 · 已拍板（2026-09-30，**结论已定，勿再讨论**）
 
-**6. A 组 10 张 M3 镜像表 → ✅ 决定：不建（预留不启用）**
+**6. A 组 10 张 M3 镜像表 → ✅ 已执行：删除（不是"预留"，是真的删了）**
 `fact_sync_log` / `organization` / `qualification_certificate` / `credential` / `performance_case` /
 `staff_member` / `financial_evidence` / `technical_product` / `technical_parameter` / `evidence_file`
 
-- 依据：我方 `001` 自己写着「**M3 仍是权威源，本组表是只读镜像**」；队友也写着
+- **依据**：① 实测 **0 行、无任何 `.py` 代码读写**（仅 `005`/`007` 两个 SQL 文件引用过）
+  ② 我方 `001` 自己写着「**M3 仍是权威源，本组表是只读镜像**」，队友也写着
   「**企业本体事实仍以 M3 图库为单一来源，本库不复制**」→ 两边技术判断一致
-- **执行口径**：这 10 张表的 DDL **保留在 `001_schema_v1.sql` 里并标注「预留 / 不启用」**，
-  **不写数据、不依赖、不纳入本轮迁移**；将来业务需要时启用即可（成本低）
-- ⚠️ **这不是"删表"**：DDL 仍在文件里，只是本轮不落地。企业事实继续由 M3 图库提供
-- ⚠️ 注意 `evidence_file` 与队友的 `evidence_files` 同名不同物——本组不启用，证明材料走 M3 + 文件系统
+  ③ **空的镜像表是陷阱**：留着会诱导有人往里写，导致企业事实存在两份并与 M3 分叉
+- **已完成动作**：
+  | 对象 | 改了什么 |
+  |:--|:--|
+  | `001_schema_v1.sql` | 删除 L27–L254（10 张表 + 1 索引 + 段头注释）；现 26 张表（+`002` 12 张 = 38） |
+  | `005_comments.sql` | 删除 10 行 `COMMENT ON TABLE` + 10 行 `meta_table` 种子；说明改「38 张表」 |
+  | `007_bid_views_v2.sql` | `v_deviation_row` 的 `matched_facts` 不再 JOIN 镜像表，改从 `match_item_fact.fact_snapshot` 取名称/证据路径（输出形状不变） |
+  | **`009_drop_company_mirror_tables.sql`**（新增） | 给已跑过旧 `001` 的库存量清理：DROP 10 表 + 清 `meta_*` 行；执行后须重跑 `007` |
+  | 本地库 | 已执行 009 + 重跑 007：**表 54 → 44**，`meta_table` 54→44、`meta_column` 1082→893、`meta_relationship` 61→52，5 个视图全部重建，真实数据 10 张表行数逐张核对无变化 |
+- **视图为何改得更好**：`fact_snapshot` 的注释是「命中时刻的企业事实快照（防事后被改）」——
+  从快照取名称/证据路径**自包含**，且不会因 M3 变动而与历史结论分叉；JOIN 镜像表反而是多余且有风险的设计
+- **恢复成本极低**：DDL 在 git 历史里，需要时一行 migration 就能加回
+- ⚠️ 注意 `evidence_file` 与队友的 `evidence_files` 同名不同物——本组已删，证明材料走 M3 + 文件系统
 
 **7. `bid_section` 的 49 列 → ✅ 决定：执行列级收缩（49 列 → ~16 列 + `payload`）**
 - **这是列级改造**：表名、主键、行数、外键关系**全都不变**
@@ -181,13 +192,13 @@ cur.execute("DELETE FROM workspace_sections")
 
 ## 四、关键事实（避免重复调研）
 
-### 4.1 我方 54 张表的真实状态（实测行数）
+### 4.1 我方 44 张表的真实状态（实测行数，A 组删除后）
 
-**只有 10 张有数据**：`meta_column`(1082) / `meta_relationship`(61) / `meta_table`(54) / `tender_project`(27) /
+**只有 10 张有数据**：`meta_column`(893) / `meta_relationship`(52) / `meta_table`(44) / `tender_project`(27) /
 `workspace`(18) / `workspace_draft`(18) / `analysis_run`(17) / `bid_section`(6) / `bid_document`(1) / `bid_plan`(1)
 
-**其余 44 张全空，且没有任何一张有应用侧写入点。** 数据全部来自 `scripts/backfill_bid_writing.py` 回填。
-→ 说明这 54 张是**设计目标**，不是**在用现状**；且**表数多不是问题**（按域拆实体是对的），**列数多才是**（已修）。
+**其余 34 张全空，且没有任何一张有应用侧写入点。**（44 − 10 张有数据） 数据全部来自 `scripts/backfill_bid_writing.py` 回填。
+→ 说明这些表是**设计目标**，不是**在用现状**；且**表数多不是问题**（按域拆实体是对的），**列数多才是**（已修）。
 
 ### 4.2 真实的标书数据结构（实测，纠正了之前的误判）
 
@@ -211,14 +222,28 @@ cur.execute("DELETE FROM workspace_sections")
 
 ## 五、环境与工具约束（踩过的坑，勿重复）
 
-### 5.1 数据库
+### 5.1 数据库与 Python 环境
 
 | 项 | 值 |
 |:--|:--|
+| **Python 环境** | ✅ **统一用 `finance`**：`D:\APP\anaconda\envs\finance\python.exe`（用户指定，2026-09-30） |
 | 本地库（我方） | `postgresql://tender_app:tender_app_dev@127.0.0.1:5433/tender_agent`，容器 `tenderagent-pg` |
 | 队友库 | `tender_agent_dev`，容器 `tender-pg`，端口 5432 |
-| 连接方式 | **用 Python 走 TCP 5433**（`pg8000`），**不要用 docker CLI**——沙箱禁 Docker 命名管道 |
+| 连接方式 | **用 Python 走 TCP 5433**，**不要用 docker CLI**——沙箱禁 Docker 命名管道 |
+| 驱动 | 应用代码用 **`psycopg` v3**（`postgres_backend.py::_connect` → `psycopg.connect(dsn)`，见 `requirements.txt` 的 `psycopg[binary]`）<br>临时脚本用 `pg8000`（`_fusion_sample/lib/` 内有解包版，`sys.path.insert` 即可） |
 | `psql` | 宿主机没有；容器内有 |
+
+> **`finance` 环境现状（实测）**：Python 3.12.14；已装 `pytest 9.1.1`、`fastapi 0.115.14`、
+> `uvicorn 0.52.4`、`pydantic 2.13.5`、`python-docx 1.2.0`、`requests 2.34.2`。
+> ✅ **已验证可用**：`finance` 环境跑全量测试得 **89 failed / 407 passed / 16 skipped**，
+> 与 base 环境结果**完全一致**，且耗时 **22.84s**（base 为 70.82s，快约 3 倍）。
+> ⚠️ **`psycopg` / `psycopg2` / `pg8000` 均未安装** → 要连库先补装：
+> ```powershell
+> & "D:\APP\anaconda\envs\finance\python.exe" -m pip install "psycopg[binary]>=3.1,<4"
+> ```
+> 沙箱下写 `D:\APP\anaconda\envs\finance` 可能被拒（该路径在工作区外）→ 提权重试一次，
+> 或退回「下载 wheel + `zipfile` 解到工作区 + `sys.path.insert`」的老办法
+> （`_fusion_sample/lib/` 已有可用样例）。
 
 ### 5.2 必须遵守的禁忌
 
@@ -290,9 +315,13 @@ Get-Content E:\code\uinoproject\tenderagent\_fusion_sample\report.txt -Encoding 
 ## 项目位置
 - 工作区根：E:\code\uinoproject\tenderagent
 - 代码根（git 仓库）：E:\code\uinoproject\tenderagent\tender-agent\tender-agent
-- 当前分支：integrate/pg-fusion，HEAD 70082d1（已合并 origin/main = 51186ea 并推送）
+- 当前分支：integrate/pg-fusion
+- Python 环境：**统一用 `finance`** → D:\APP\anaconda\envs\finance\python.exe
+  （实测已装 pytest/fastapi/uvicorn/pydantic/docx/requests；**缺 psycopg，连库前先补装**：
+   & "D:\APP\anaconda\envs\finance\python.exe" -m pip install "psycopg[binary]>=3.1,<4"）
 - 本地库：postgresql://tender_app:tender_app_dev@127.0.0.1:5433/tender_agent
-  （容器 tenderagent-pg；用 Python + pg8000 走 TCP，不要用 docker CLI）
+  （容器 tenderagent-pg；应用用 psycopg v3，临时脚本可用 pg8000；不要用 docker CLI）
+- 当前表数：**44 张**（原 54，A 组 10 张 M3 镜像表已删除）
 
 ## 上一轮合并了什么（供你了解仓库现状）
 合并 origin/main 时带进来 5 个提交，其中**只有 1 个是数据库相关**：
@@ -310,7 +339,9 @@ docs/标书表替换可行性核对.md
 scripts/backfill_bid_writing.py
 
 ## 最高优先级的约束（先读这条，违反即错）
-1) **我方的 54 张表一张都不删、不改名、不合并、不用队友的表替代。** 它们是本项目的目标数据模型。
+1) **我方的 44 张表一张都不删、不改名、不合并、不用队友的表替代。** 它们是本项目的目标数据模型。
+   原有 54 张；其中 A 组 10 张 M3 镜像表已按用户决定**删除**并完成（见第 5 条）——
+   那是**唯一一处删表**，此后不得再删任何表。
 2) 队友的表（workspaces / workspace_sections / workspace_fine_review_rows / bid_runs /
    parse_bundles …）**只是技法参考**。参考的是他的手法，不是他的表：
      - payload jsonb 全保真（结构多变的字段全塞 payload，不丢数据）
@@ -321,15 +352,18 @@ scripts/backfill_bid_writing.py
    样板表 workspace_sections 的**列**从 49 减到 16（-67%），代码契约 15 个 key 零丢失。
    依据是实测：其中 12 个 jsonb 列在真实数据里**全空**、多列从未被写入。
    数据全部保留在 payload 里 → **零丢失**。
-4) 44 张空表（0 行、无应用写入点）是**还没落地**，不是冗余 → **保留**，按域逐步落地。
-5) **三项已拍板的结论（勿再讨论）：**
-   - A 组 10 张 M3 镜像表 → **不建**（DDL 保留在 001 并标注「预留 / 不启用」，不写数据、不依赖、不纳入迁移）。
-     **这不等于删表**；企业事实继续由 M3 图库提供。
+4) 空表（0 行、无应用写入点）是**还没落地**，不是冗余 → **保留**，按域逐步落地。
+5) **已拍板且已执行的结论（勿再讨论）：**
+   - A 组 10 张 M3 镜像表 → **已删除**（不是"预留"）。
+     已完成：`001` 删 L27-L254、`005` 删 10 行注释+10 行 meta 种子、`007` 的 v_deviation_row
+     改从 `match_item_fact.fact_snapshot` 取名称/证据路径、新增 `009_drop_company_mirror_tables.sql`
+     清存量库、本地库已执行（表 54→44，meta_* 同步收缩，视图全部重建）。
+     **企业事实继续由 M3 图库提供**（它是唯一权威源）。
    - `bid_section` 49 列 → **执行列级收缩为 ~16 列 + `payload`**（表名/主键/行数/外键全不变）。
    - 合并范围 → **保持全合**（origin/main 的 5 个提交全部保留）。
 
 ## 设计原则（已定，勿再讨论）
-1) 表用我方的（54 张，按域拆分），保真技法借队友的，规格标准用严格的
+1) 表用我方的（44 张，按域拆分；A 组 10 张镜像表已删），保真技法借队友的，规格标准用严格的
    （org_id 多租户 + 值域 CHECK + 审计时间戳 + 索引）。大方向是服务整个系统，不迁就任何一方实现。
 2) 核心原则：payload 是事实（全保真，永不加约束）；提升列是投影（归一 + 约束，允许为空）。
    写入流程：先写 payload（永不失败）→ 再归一填提升列 → 归一失败留 NULL + 记治理告警。
@@ -373,17 +407,20 @@ runtime/projects/<id>/parse/parse-bundle.json），而队友的 StorageBackend �
 F 组运行可观测（analysis_run 已有 17 行真实数据）/ L 组治理元数据（已有数据）/
 I 组初筛链 / J procurement_need / B 组 tender_project（已有 27 行）
 
-### P3 已拍板（结论已定，勿再讨论）
-1) A 组 10 张 M3 镜像表 → **不建**（预留不启用）。DDL 保留在 001 里标注「预留 / 不启用」，
-   不写数据、不依赖、不纳入迁移。企业事实继续由 M3 图库提供。**这不等于删表。**
+### P3 已拍板且已执行（勿再讨论）
+1) A 组 10 张 M3 镜像表 → **已删除**（不是"预留"）。已完成：001 删 L27-L254、
+   005 删 10 行注释+10 行 meta 种子、007 的 v_deviation_row 改从 fact_snapshot 取值、
+   新增 009_drop_company_mirror_tables.sql 清存量库、本地库已执行（表 54→44，视图已重建）。
+   企业事实继续由 M3 图库提供（唯一权威源）。
 2) 我方 bid_section 的 49 列 → **执行列级收缩为 ~16 列 + payload**。
    表名/主键/行数/外键全不变；裁决结果登记进 L 组 meta_column。
 3) 合并范围 → **保持全合**（origin/main = 51186ea 的 5 个提交全部保留）。
 
 ## 禁止事项（违反即错）
 - ❌ 不许删任何表、改任何表名、把两张表合并成一张
+  （**唯一的例外是 A 组 10 张 M3 镜像表，已按用户决定删除并完成**；此后再无例外）
 - ❌ 不许用队友的表（workspaces / workspace_sections / bid_runs / parse_bundles …）替代我方的表
-- ❌ 不许因为"表太多"就建议精简——44 张空表是**未落地**，不是冗余
+- ❌ 不许因为"表太多"就建议精简——空表是**未落地**，不是冗余
 - ❌ 不许把"列压缩"（49→16 列）说成或做成"表压缩"
 - ❌ 不要把队友的 schema.sql / migrate_to_db.py 当成目标 schema 直接执行
 
@@ -391,14 +428,17 @@ I 组初筛链 / J procurement_need / B 组 tender_project（已有 27 行）
 - ❌ 不要跑 scripts/tender-agent-migration/migrate_to_db.py（读本地 runtime/*.json，跨机读到空）
 - ❌ 不要用 PowerShell `>` 导出 pg dump（实测把 7.1MB 写成 13.6MB 损坏文件）
 - ❌ 不要用 `docker compose`（空格），用 `docker-compose`
+- ⚠️ **Python 统一用 finance 环境**：D:\APP\anaconda\envs\finance\python.exe
+  （缺 psycopg，连库前先 & "...python.exe" -m pip install "psycopg[binary]>=3.1,<4"）
 - ⚠️ docker / git push / git fetch 在沙箱下被拒 → 提权重试一次即可
-- ⚠️ pip 装不上（anaconda 在工作区外）→ 下载 wheel + zipfile 解到工作区加 sys.path
+- ⚠️ 往 finance 环境 pip 装包可能被拒（路径在工作区外）→ 提权重试，或退回
+  「下载 wheel + zipfile 解到工作区 + sys.path.insert」（_fusion_sample/lib 有样例）
 - ⚠️ pg8000 用 `:name` 命名参数，不是 %s；jsonb 写 `:p::jsonb`
 - ⚠️ 控制台 GBK 会乱码 → 中文输出写 UTF-8 文件再读
 - ⚠️ 容器首次启动可能 exit 127（CRLF 导致），再 `up -d` 一次即可
 
 ## 测试基线
-python -m pytest backend/tests -q --no-header -p no:cacheprovider
+& "D:\APP\anaconda\envs\finance\python.exe" -m pytest backend/tests -q --no-header -p no:cacheprovider
 当前 89 failed / 407 passed / 16 skipped（89 个失败是既有问题，非本轮引入）
 每改一处都要跑测试，并用失败清单 A/B 对照确认失败集合同源。
 
@@ -410,7 +450,21 @@ python -m pytest backend/tests -q --no-header -p no:cacheprovider
 
 ---
 
-## 八、本轮遗留（未做，明确记录）
+## 八、本轮完成与遗留
+
+### 已完成（2026-09-30）
+
+| # | 事项 | 结果 |
+|:--|:--|:--|
+| A | 拉取 `origin/main` = `51186ea` 并合并 | ✅ 分支 `integrate/pg-fusion`，唯一冲突 `store.py`（6 处）已解 |
+| B | 原子写回归 | ✅ `storage/json_backend.py` 改用 `repository/io.py` |
+| C | 零行为回归验证 | ✅ worktree A/B：合并前后**失败集合逐条相同**（89=89） |
+| D | 文档口径统一（"压缩表"误解） | ✅ 4 份文档全部改口径 + 新增「禁止事项」「最高优先级约束」 |
+| E | 三项拍板固化 | ✅ A 组 / bid_section / 合并范围 |
+| F | **A 组 10 张 M3 镜像表删除** | ✅ `001`/`005`/`007` 已改 + 新增 `009` + 本地库已执行（**54 → 44 张**） |
+| G | Python 环境统一 `finance` | ✅ 已写入文档（含缺 `psycopg` 的补装说明） |
+
+### 遗留（未做，明确记录）
 
 | # | 事项 | 状态 |
 |:--|:--|:--|
@@ -418,9 +472,7 @@ python -m pytest backend/tests -q --no-header -p no:cacheprovider
 | 2 | `parse_bundle` 读写方法（是否让 ParseBundle 进库） | ⏳ **唯一还待拍板的**（见 §三 P1） |
 | 3 | 标书表按样板手法改造（`bid_section` 列收缩等） | ❌ 未做（**已拍板要执行**） |
 | 4 | `meta_column` 登记 + 完整性校验脚本 | ❌ 未做 |
-| 5 | A 组 10 张 M3 镜像表 | ✅ **已拍板：不建**（预留不启用）；只需在 `001` 里加「预留」标注 |
-| 6 | `bid_section` 49→16 列收缩 | ✅ **已拍板：执行**（列级改造，表名不变） |
-| 7 | 合并范围 | ✅ **已拍板：保持全合** |
-| 8 | `docs/PostgreSQL表字段总清单与补表计划.md` 里的 A 组说明 | ⚠️ 需补「预留不启用」标注（该文件被另一对话占用，暂不动） |
-| 9 | 本地 `_baseline_wt` 目录 | 已从 git 注册表移除；剩 6 个沙箱临时目录删不掉，在仓库外无害 |
+| 5 | `docs/PostgreSQL表字段总清单与补表计划.md` 仍是删除前口径（54 张、含 A 组） | ⚠️ 该文件被另一对话占用，暂不动；**以本文档的 44 张为准** |
+| 6 | 本地 `_baseline_wt` 目录 | 已从 git 注册表移除；剩 6 个沙箱临时目录删不掉，在仓库外无害 |
+
 

@@ -216,7 +216,7 @@ Get-Content E:\code\uinoproject\tenderagent\_fusion_sample\report.txt -Encoding 
 
 > ⚠️ **表名用我方的**——本样板是拿队友的 `workspace_sections` 做的**手法验证**，
 > 验证的是「`payload` + 准入规则」这套手法可行，**不是要用他的表替代我方的表**。
-> 我方 54 张表**一张都不删、不改名、不合并**；只做**列级**收缩。
+> 我方 **44 张**表**一张都不删、不改名、不合并**（A 组 10 张已删）；只做**列级**收缩。
 
 1. **按同一模式改造我方标书表**（表名与拆分保持我方的）：
    `bid_section`（最该先改，现状 49 列）、`bid_document`、`bid_plan`、`workspace`、`workspace_draft`

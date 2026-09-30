@@ -33,18 +33,8 @@ ALTER TABLE meta_relationship
     ALTER COLUMN relation_cn_name DROP NOT NULL;
 
 -- ---------------------------------------------------------------------
--- (1) COMMENT ON TABLE：48 张表（含业务含义）
+-- (1) COMMENT ON TABLE：38 张表（含业务含义）
 -- ---------------------------------------------------------------------
-COMMENT ON TABLE fact_sync_log             IS '企业事实同步日志：每次从 M3 图库同步企业本体时写一行（sync_batch_id 是结论可复现的关键）';
-COMMENT ON TABLE organization              IS '企业组织（M3 镜像，权威在 M3）';
-COMMENT ON TABLE qualification_certificate IS '资质证书（M3 镜像）';
-COMMENT ON TABLE credential                IS '认证与知识产权（M3 镜像，含产品认证/软著/商标）';
-COMMENT ON TABLE performance_case          IS '业绩案例（M3 镜像）';
-COMMENT ON TABLE staff_member              IS '人员（M3 镜像）';
-COMMENT ON TABLE financial_evidence        IS '财务证据（M3 镜像）';
-COMMENT ON TABLE technical_product         IS '技术产品（M3 镜像）';
-COMMENT ON TABLE technical_parameter       IS '技术参数（M3 镜像）';
-COMMENT ON TABLE evidence_file             IS '证据文件登记（文件本体在磁盘，这里只存 path+sha256）';
 
 COMMENT ON TABLE source_site               IS '招标来源网站';
 COMMENT ON TABLE tender_announcement       IS '招标公告（从来源网站采集的一条公告，不等同于完整招标文件）';
@@ -193,16 +183,6 @@ COMMENT ON COLUMN workspace.title                      IS '工作区标题';
 -- (4) 自动灌 meta_table（表名 + 中文名 + 分组 + 层级）
 -- ---------------------------------------------------------------------
 INSERT INTO meta_table (table_name, table_cn_name, domain, layer) VALUES
-    ('fact_sync_log','企业事实同步日志','A企业事实','fact'),
-    ('organization','企业组织','A企业事实','fact'),
-    ('qualification_certificate','资质证书','A企业事实','fact'),
-    ('credential','认证与知识产权','A企业事实','fact'),
-    ('performance_case','业绩案例','A企业事实','fact'),
-    ('staff_member','人员','A企业事实','fact'),
-    ('financial_evidence','财务证据','A企业事实','fact'),
-    ('technical_product','技术产品','A企业事实','fact'),
-    ('technical_parameter','技术参数','A企业事实','fact'),
-    ('evidence_file','证据文件登记','A企业事实','fact'),
     ('source_site','招标来源网站','B招标与文件','tender'),
     ('tender_announcement','招标公告','B招标与文件','tender'),
     ('announcement_match_term','公告匹配维度打分','B招标与文件','tender'),
