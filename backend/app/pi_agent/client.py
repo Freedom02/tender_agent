@@ -124,15 +124,32 @@ class PiClient:
             )
         return resolved
 
-    def _command(self) -> list[str]:
+    def _command(
+        self,
+        *,
+        tools: str = "",
+        extensions: tuple[str, ...] = (),
+    ) -> list[str]:
+        """组装 Pi 启动参数。
+
+        默认（``tools`` 为空）沿用 ``--no-tools``：解析类等不需要工具的智能体保持最小能力面。
+        传入 ``tools`` 时改为「只放行白名单工具」：``--no-builtin-tools`` 关掉内置的
+        read/bash/write/edit/powershell，再用 ``--tools`` 精确放行扩展注册的只读工具。
+        """
+
         resolved = self._resolve_command()
         command_path = Path(resolved)
         launch_args = [
             "--mode",
             "rpc",
             "--no-session",
-            "--no-tools",
         ]
+        if tools:
+            launch_args.extend(["--no-builtin-tools", "--tools", tools])
+        else:
+            launch_args.append("--no-tools")
+        for extension in extensions:
+            launch_args.extend(["--extension", str(extension)])
         if self.config.provider:
             launch_args.extend(["--provider", self.config.provider])
         if self.config.model:
@@ -169,11 +186,16 @@ class PiClient:
         prompt: str,
         *,
         timeout_seconds: float | None = None,
+        tools: str = "",
+        extensions: tuple[str, ...] = (),
+        env_extra: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         runtime_env = {
             **os.environ,
             "PI_OFFLINE": os.getenv("PI_OFFLINE", "0"),
         }
+        if env_extra:
+            runtime_env.update({str(key): str(value) for key, value in env_extra.items() if value})
         if self.config.provider == "company-ai" and self.config.api_key:
             # ~/.pi/agent/models.json defines company-ai's apiKey as
             # $COMPANY_LLM_API_KEY. Keep the secret out of the prompt and
@@ -181,7 +203,7 @@ class PiClient:
             runtime_env["COMPANY_LLM_API_KEY"] = self.config.api_key
         try:
             process = subprocess.Popen(
-                self._command(),
+                self._command(tools=tools, extensions=extensions),
                 cwd=self.config.working_dir or None,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -895,6 +917,10 @@ class PiClient:
         existing_plan: list[dict[str, Any]],
         workspace_id: str,
         project_id: str,
+        tools: str = "",
+        extensions: tuple[str, ...] = (),
+        env_extra: dict[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         return self.run_json(
             outline_plan_prompt(
@@ -902,7 +928,11 @@ class PiClient:
                 existing_plan=existing_plan,
                 workspace_id=workspace_id,
                 project_id=project_id,
-            )
+            ),
+            tools=tools,
+            extensions=extensions,
+            env_extra=env_extra,
+            timeout_seconds=timeout_seconds,
         )
 
     def map_requirements(

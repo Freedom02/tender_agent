@@ -176,6 +176,41 @@ _MAX_REQUIREMENT_SAMPLES = 20
 _MAX_UNBOUND_SAMPLES = 10
 
 
+# ---------------------------------------------------------------------------
+# 供其它模块复用的公共入口（工具上下文 / 智能体侧只读工具都基于同一套口径）
+# ---------------------------------------------------------------------------
+def requirement_id_of(item: dict[str, Any]) -> str:
+    """条款 ID（解析结果里 id/requirementId 两种写法都兼容）。"""
+
+    return _requirement_id(item)
+
+
+def requirement_text_of(item: dict[str, Any]) -> str:
+    """条款正文（用于聚类与检索，已归一化空白）。"""
+
+    return _requirement_text(item)
+
+
+def requirement_domain_of(item: dict[str, Any]) -> str:
+    """条款领域键（technical / compliance / qualification …）。"""
+
+    return _requirement_domain_of(item)
+
+
+def index_plan_bindings(plan: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """当前目录对条款的绑定情况：叙述性承载 / 表格式承载 / 响应章节。"""
+
+    index = _index_plan([row for row in (plan or []) if isinstance(row, dict)])
+    return {
+        "narrative": set(index["boundNarrative"]),
+        "table": set(index["boundTable"]),
+        "evaluations": set(index["boundEvaluations"]),
+        "responseSections": index["responseSections"],
+        "formatItems": index["formatItems"],
+        "volumes": index["volumes"],
+    }
+
+
 def _text(value: Any, limit: int = 200) -> str:
     return " ".join(str(value or "").split())[:limit]
 

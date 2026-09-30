@@ -2569,6 +2569,11 @@ class Store:
         levels_by_id: dict[str, int] = {}
         sibling_orders: dict[str, int] = {}
         for item, section_id, source_section_id in assigned_rows:
+            # 每个节点必须重新取自己的标题。此处若沿用上一个循环残留的 title，
+            # 会把所有节点（含卷与格式条目）的标题覆盖成最后一项的标题。
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
             source = str(item.get("source") or SECTION_SOURCE_AI).strip()
             kind = str(item.get("kind") or SECTION_KIND_TECHNICAL).strip()
             if source == "deviation":
@@ -2650,6 +2655,17 @@ class Store:
             ):
                 if str(item.get(key) or "").strip():
                     section[key] = str(item.get(key)).strip()
+            # 目录智能体新增章节的依据字段：必须落盘，否则前端看不到依据，
+            # 放置层也会因为“缺少依据”把节点当普通节点丢弃。
+            for key in (
+                "derived",
+                "derivedOrigin",
+                "derivedArchetype",
+                "derivedBasis",
+            ):
+                value = item.get(key)
+                if value not in (None, "", [], {}):
+                    section[key] = value
             sections.append(section)
             levels_by_id[section_id] = level
         from .bid_writing.plan_tree import normalize_plan_tree
@@ -2670,6 +2686,9 @@ class Store:
             normalized_sections = reconcile_plan_with_submission_structure(
                 normalized_sections,
                 submission_structure,
+                # Pi 目录规划新增的叙述章节（带 derivedBasis）在保存时同样保留，
+                # 否则会在落盘这一步被"没有原文父级"的规则丢掉。
+                keep_derived=True,
             )
         else:
             for section_id, title in (("d-01", "技术规格偏离表"), ("d-02", "商务偏离表")):

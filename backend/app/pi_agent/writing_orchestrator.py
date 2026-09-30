@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
@@ -9,6 +11,13 @@ from ..agent_runtime.contracts import build_agent_result, now_iso
 from ..bid_writing.schemas import (
     material_keys_for_writing_profile,
     resolve_writing_profile,
+)
+from .outline_agent_context import (
+    OUTLINE_TOOL_ALLOWLIST,
+    build_context,
+    extension_path,
+    resolve_policy,
+    write_context,
 )
 
 
@@ -164,6 +173,11 @@ def _normalize_plan(
     levels_by_id: dict[str, int] = {}
     sibling_orders: dict[str, int] = {}
     for item, section_id, source_section_id in assigned_rows:
+        # 每个节点必须重新取自己的标题。此处若沿用上一个循环残留的 title，
+        # 会把所有节点（含卷与格式条目）的标题覆盖成最后一项的标题。
+        title = _text(item.get("title") or item.get("name"), 240)
+        if not title:
+            continue
         requirement_ids = [
             _text(entry, 80)
             for entry in _as_list(item.get("requirementIds"))
@@ -955,6 +969,30 @@ class PiWritingOrchestrator:
             warnings.append("卷规划未返回有效卷，已使用单卷逻辑分组。")
         outline_bundle = dict(parse_bundle)
         outline_bundle["plannedVolumes"] = planned_volumes
+
+        policy = resolve_policy()
+        outline_tools = ""
+        outline_extensions: tuple[str, ...] = ()
+        outline_env: dict[str, str] = {}
+        if policy["enabled"]:
+            extension = extension_path()
+            if extension.is_file():
+                context_path = write_context(
+                    build_context(
+                        outline_bundle,
+                        existing_plan,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        policy=policy,
+                    )
+                )
+                outline_tools = OUTLINE_TOOL_ALLOWLIST
+                outline_extensions = (str(extension),)
+                outline_env = {"BID_OUTLINE_CONTEXT": str(context_path)}
+            else:
+                warnings.append(
+                    "未找到目录规划工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。"
+                )
         outline_raw = run_agent(
             "OutlinePlanAgent",
             lambda: self.client.plan_outline_agent(
@@ -962,6 +1000,9 @@ class PiWritingOrchestrator:
                 existing_plan=existing_plan,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                tools=outline_tools,
+                extensions=outline_extensions,
+                env_extra=outline_env,
             ),
             ["parse:ParseBundle", "writing:plannedVolumes", "workspace:existingPlan"],
         )
@@ -993,6 +1034,7 @@ class PiWritingOrchestrator:
         plan = reconcile_plan_with_submission_structure(
             plan,
             {**parsed_structure, "volumes": planned_volumes},
+            keep_derived=policy["enabled"],
         )
         if not plan:
             raise PiWritingOrchestrationError(
@@ -1010,9 +1052,12 @@ class PiWritingOrchestrator:
             )
             for item in plan
         )
+        # 智能体据证据新增的叙述章节本身就直接挂在卷下（level=2），也算“卷内成章”。
+        has_derived_section = any(item.get("derived") for item in plan)
         if (
             len(requirement_ids) > 1
             and has_narrative_item
+            and not has_derived_section
             and not any(
                 item.get("level", 1) >= 3
                 and item.get("responseType") != "section_group"
@@ -1042,6 +1087,9 @@ class PiWritingOrchestrator:
                     existing_plan=[],
                     workspace_id=workspace_id,
                     project_id=project_id,
+                    tools=outline_tools,
+                    extensions=outline_extensions,
+                    env_extra=outline_env,
                 ),
                 ["parse:outlineInstructionContext", "writing:outlineQualityFeedback"],
             )
@@ -1054,6 +1102,7 @@ class PiWritingOrchestrator:
                 retry_plan = reconcile_plan_with_submission_structure(
                     retry_plan,
                     {**parsed_structure, "volumes": planned_volumes},
+                    keep_derived=policy["enabled"],
                 )
                 retry_plan, retry_volume_warnings = arrange_volumes(
                     retry_plan, {**parsed_structure, "volumes": planned_volumes}
@@ -1075,6 +1124,22 @@ class PiWritingOrchestrator:
         if successful_agents == 0:
             raise PiWritingOrchestrationError("Pi 撰写编排没有任何子智能体成功")
 
+        derived_sections = [item for item in plan if item.get("derived")]
+        if outline_env.get("BID_OUTLINE_CONTEXT"):
+            shutil.rmtree(
+                Path(outline_env["BID_OUTLINE_CONTEXT"]).parent,
+                ignore_errors=True,
+            )
+        if derived_sections:
+            warnings.append(
+                "目录智能体新增 %d 个章节（%s）。"
+                % (
+                    len(derived_sections),
+                    "、".join(
+                        str(item.get("title") or "") for item in derived_sections[:8]
+                    ),
+                )
+            )
         return {
             "plan": plan,
             "coverage": [],
@@ -1086,6 +1151,16 @@ class PiWritingOrchestrator:
             "phase": "outline",
             "requirementMappingStatus": "pending",
             "requirementMapBatchCount": 0,
+            "derivedSections": [
+                {
+                    "sectionId": str(item.get("sectionId") or ""),
+                    "title": str(item.get("title") or ""),
+                    "origin": str(item.get("derivedOrigin") or ""),
+                    "archetype": str(item.get("derivedArchetype") or ""),
+                    "basis": str(item.get("derivedBasis") or ""),
+                }
+                for item in derived_sections
+            ],
         }
 
     def map_requirement_coverage(
