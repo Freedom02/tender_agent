@@ -290,7 +290,7 @@ Get-Content E:\code\uinoproject\tenderagent\_fusion_sample\report.txt -Encoding 
 ## 项目位置
 - 工作区根：E:\code\uinoproject\tenderagent
 - 代码根（git 仓库）：E:\code\uinoproject\tenderagent\tender-agent\tender-agent
-- 当前分支：integrate/pg-fusion，HEAD b88eb75（已合并 origin/main = 51186ea 并推送）
+- 当前分支：integrate/pg-fusion，HEAD 70082d1（已合并 origin/main = 51186ea 并推送）
 - 本地库：postgresql://tender_app:tender_app_dev@127.0.0.1:5433/tender_agent
   （容器 tenderagent-pg；用 Python + pg8000 走 TCP，不要用 docker CLI）
 
@@ -322,8 +322,11 @@ scripts/backfill_bid_writing.py
    依据是实测：其中 12 个 jsonb 列在真实数据里**全空**、多列从未被写入。
    数据全部保留在 payload 里 → **零丢失**。
 4) 44 张空表（0 行、无应用写入点）是**还没落地**，不是冗余 → **保留**，按域逐步落地。
-5) A 组 10 张 M3 镜像表建不建、bid_section 收不收缩，**都是问句，必须问用户，不许自行决定**。
-   （详见本文档 §三 P3；默认全部保留。）
+5) **三项已拍板的结论（勿再讨论）：**
+   - A 组 10 张 M3 镜像表 → **不建**（DDL 保留在 001 并标注「预留 / 不启用」，不写数据、不依赖、不纳入迁移）。
+     **这不等于删表**；企业事实继续由 M3 图库提供。
+   - `bid_section` 49 列 → **执行列级收缩为 ~16 列 + `payload`**（表名/主键/行数/外键全不变）。
+   - 合并范围 → **保持全合**（origin/main 的 5 个提交全部保留）。
 
 ## 设计原则（已定，勿再讨论）
 1) 表用我方的（54 张，按域拆分），保真技法借队友的，规格标准用严格的
