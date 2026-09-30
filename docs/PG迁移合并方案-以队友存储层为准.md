@@ -1,6 +1,16 @@
-# PG 迁移合并方案（标书表以队友存储层为准）
+# PG 迁移合并方案（存储层用队友的，表规格用严格的）
 
-> 决策前提（用户 2026-09-30 定）：**标书制作的表以队友的为准。**
+> ⚠️ **决策已修正（2026-09-30）**：用户更正为——
+> **标书部分的「表结构」参考队友的，「规格标准」用严格的（多租户 + 值域约束）。**
+> 因此本文 **§步骤 3** 里「我方 G 组全部退役」的结论**已被取代**：
+> G 组不是退役，而是**保留他的表拆分与 `payload` 保真，叠加严格规格**。
+> 详见 `docs/PG表设计融合方案-规范化与payload保真.md` 与
+> `docs/融合方案样板验证-workspace_sections.md`（实测：49 列 → 16 列，契约 key 零丢失）。
+>
+> 本文其余部分（审计结论、store.py 冲突解法、两处必须补的回归）**仍然有效**。
+>
+> ---
+>
 > 本文是审计结论 + 可执行的合并步骤。
 >
 > 审计对象：分支 `origin/fix/evidence-fill`（比 `origin/main` 多 4 个提交，2026-09-30）
@@ -155,7 +165,7 @@ git merge origin/fix/evidence-fill
 
 | 我方文件 | 处置 | 理由 |
 |:--|:--|:--|
-| `001_schema_v1.sql` | ⚠️ **拆开用**（见下表） | 标书以他为准 + payload 保真 |
+| `001_schema_v1.sql` | ⚠️ **拆开用**（见下表） | 标书结构参考他的 + payload 保真 |
 | `004_bid_reading_columns.sql` | ❌ 退役 | 给 `match_item` 补的列，该表不再使用 |
 | `005_comments.sql` | ❌ 退役 | 治理元数据（对应 L 组）；若保留 L 组则只留 L 部分 |
 | `006_bid_writing_tables.sql` | ❌ **大部分退役** | 见下面映射 |
@@ -171,7 +181,7 @@ git merge origin/fix/evidence-fill
 | `evaluation_item` | `parse_bundles.payload.evaluationItems` | ❌ 退役（无损） |
 | `parse_risk` / `parse_review` | `parse_bundles.payload.riskItems` / `.parseReviewReport` | ❌ 退役（无损） |
 | `agent_result` | `parse_bundles.payload.agentResults` | ❌ 退役（无损） |
-| G 组补列（`bid_document` 37 列 / `bid_section` 50 列） | 他的 `workspaces.payload` + `workspace_sections` | ❌ 退役（**标书以他为准**） |
+| G 组补列（`bid_document` 37 列 / `bid_section` 50 列） | 他的 `workspaces.payload` + `workspace_sections` | ⚠️ **不退役**：**结构用他的，规格用严格的**（准入规则重排 + `org_id` + CHECK），见《PG表设计融合方案》与《融合方案样板验证》 |
 
 **`001` 里 48 张表逐组处置：**
 
@@ -183,7 +193,7 @@ git merge origin/fix/evidence-fill
 | **D 提取结果** | 3 | 在 `payload` | ❌ 退役（无损） |
 | **E 匹配结果** | 6 | ✅ `workspace_fine_review_rows`（`fineReview.rows`）+ 其余在 payload | ❌ 退役（无损，但**丢掉行级查询能力**，见 §五 待决策） |
 | **F 运行与可观测** | 3 | ❌ **无** | ✅ **建议保留/补进他的库** |
-| **G 标书产出** | 5 | ✅ `workspaces` + `workspace_sections` | ❌ 退役（**以他为准**） |
+| **G 标书产出** | 5 | ✅ `workspaces` + `workspace_sections` | ⚠️ **不退役**：**表结构参考他的，规格标准用严格的** —— 保留他的表拆分与 `payload` 保真，叠加 `org_id`/CHECK/时间戳；我方 49 列的 `bid_section` 按准入规则重排为 16 列（实测削减 67%，契约 key 无丢失） |
 | **I 初筛与提醒链** | 6 | ⚠️ 仅 `reminders` | ⚠️ 待定（看业务） |
 | **J 抽取补齐** | 1 | ❌ 无 | ⚠️ 待定 |
 | **K 决策与运行** | 2 | ✅ `automation_runs` | ⚠️ 部分退役 |

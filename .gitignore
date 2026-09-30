@@ -51,6 +51,10 @@ docs/P04-P05-document-map-evaluation.md
 # regenerable via scripts/backfill_bid_writing.py; reports kept outside git)
 _backfill/
 _verify006/
+# Fusion-design sample verification (schema fusion_sample + pg8000 wheel,
+# regenerable via _fusion_sample/roundtrip.py; results in docs/)
+_fusion_sample/
+_pg_compare/
 
 # Local handoff notes and one-off probes
 docs/A01-*.md
