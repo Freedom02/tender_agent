@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -158,6 +159,87 @@ def _dropped_derived_titles(
     return titles
 
 
+def _is_agent_added(item: dict[str, Any]) -> bool:
+    """是否为「智能体主动新增」的章节（方案 B 类）。
+
+    只有智能体在目录结果里显式声明 ``derived`` 的节点才算；招标文件原文骨架
+    （卷、格式条目、响应表）永远不改 ID，这是硬约束。
+    """
+
+    if not item.get("derived"):
+        return False
+    if _text(item.get("nodeType"), 40) in {"volume", "format_item"}:
+        return False
+    return _text(item.get("structureSource"), 60) != "招标文件原文"
+
+
+def _id_token(value: str) -> str:
+    """把一段文本压成可放进 ID 的短 token；中文等非 ASCII 走内容哈希。"""
+
+    ascii_token = re.sub(r"[^0-9a-zA-Z]+", "-", value or "").strip("-").lower()
+    if ascii_token:
+        return ascii_token[:40]
+    if not value:
+        return ""
+    return "h" + hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+
+
+def _agent_added_section_base(item: dict[str, Any]) -> str:
+    """智能体新增章节的基础 ID：「父级 + 章节原型」。"""
+
+    parent_token = _id_token(_text(item.get("parentSectionId") or item.get("parentId"), 80))
+    basis = _text(item.get("derivedArchetype"), 60) or _text(
+        item.get("title") or item.get("name"), 240
+    )
+    parts = [part for part in (parent_token, _id_token(basis)) if part]
+    return "d-" + "-".join(parts) if parts else "d-section"
+
+
+def _contending_agent_added_bases(items: list[Any]) -> set[str]:
+    """同一父级下出现两次以上的原型：这些基础 ID 需要用标题进一步区分。"""
+
+    counts: dict[str, int] = {}
+    for item in items:
+        if isinstance(item, dict) and _is_agent_added(item):
+            base = _agent_added_section_base(item)
+            counts[base] = counts.get(base, 0) + 1
+    return {base for base, count in counts.items() if count > 1}
+
+
+def _agent_added_section_id(
+    item: dict[str, Any],
+    taken: set[str],
+    contending: set[str] | None = None,
+) -> str:
+    """给智能体新增的章节生成**稳定** ID：同一目录两次运行结果一致。
+
+    ID 由「父级 + 章节原型（derivedArchetype，缺失时退回标题）」推导，
+    与模型这次顺手起的名字、以及节点顺序都无关——模型每次给的 ``sectionId``
+    （``technical-plan`` / ``technical-narr-01`` 之类）本身就是不稳定的来源。
+
+    当同一父级下出现同原型的多个章节（模型用词重复）时，再加上标题 token 区分，
+    保证「换个顺序摆放，ID 映射不变」；标题也撞车才退化成 ``-2``/``-3`` 序号。
+    """
+
+    base = _agent_added_section_base(item)
+    title_token = _id_token(_text(item.get("title") or item.get("name"), 240))
+    # 同原型多章时一律带标题 token（对每一章都生效，因此与摆放顺序无关）
+    token = title_token if (contending and base in contending) else ""
+    candidate = f"{base}-{token}" if token else base
+    if candidate not in taken:
+        return candidate
+    if title_token and not token:
+        candidate = f"{base}-{title_token}"
+        if candidate not in taken:
+            return candidate
+    disambiguated = candidate
+    index = 2
+    while candidate in taken:
+        candidate = f"{disambiguated}-{index}"
+        index += 1
+    return candidate
+
+
 def _normalize_plan(
     value: Any,
     *,
@@ -174,6 +256,7 @@ def _normalize_plan(
         return []
 
     raw_items = _flatten_plan_items(raw_plan)
+    contending_bases = _contending_agent_added_bases(raw_items)
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     assigned_ids: set[str] = set()
@@ -186,7 +269,10 @@ def _normalize_plan(
             continue
         source_section_id = _text(item.get("sectionId") or item.get("id"), 80)
         section_id = source_section_id
-        if not section_id or section_id in assigned_ids:
+        if _is_agent_added(item):
+            # 智能体新增章节的 ID 由 Python 稳定推导，模型给的 ID 只用于父子引用映射。
+            section_id = _agent_added_section_id(item, assigned_ids, contending_bases)
+        elif not section_id or section_id in assigned_ids:
             section_id = f"custom-{custom_index:02d}"
             custom_index += 1
             while section_id in assigned_ids:
