@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from backend.app.agent_runtime.run_state import FailureKind, input_digest
 from backend.app.agent_runtime.specs import (
     AGENT_SPECS,
     ARTIFACT_SCHEMA_SOURCES,
@@ -45,6 +46,7 @@ from backend.app.pi_agent.transport import (
     PiError,
     PiTransport,
     agent_id_from_prompt,
+    classify_failure,
     validation_enabled,
 )
 
@@ -343,6 +345,123 @@ class ValidationWiringTests(unittest.TestCase):
     def test_validation_section_is_json_serializable(self) -> None:
         report = validate_agent_output("OutlinePlanAgent", {"plan": "不是数组"})
         json.dumps(validation_section("OutlinePlanAgent", report), ensure_ascii=False)
+
+
+class RunStateWiringTests(unittest.TestCase):
+    """运行记账只接在 plan_outline 一条链路上，且只进返回结构、不落盘。"""
+
+    VALID_OUTLINE = {"plan": [{"sectionId": "ai-technical-plan", "title": "技术方案"}], "warnings": []}
+
+    def test_outline_chain_records_a_succeeded_node(self) -> None:
+        transport = StubTransport(payload=self.VALID_OUTLINE)
+        payload = transport.run_json(OUTLINE_PROMPT)
+
+        section = payload["runState"]
+        self.assertFalse(section["persisted"], "Wave 1 明确不落盘")
+        self.assertEqual(section["node"]["nodeId"], "OutlinePlanAgent")
+        self.assertEqual(section["node"]["agentId"], "OutlinePlanAgent")
+        self.assertEqual(section["node"]["stage"], "plan")
+        self.assertEqual(section["node"]["status"], "succeeded")
+        self.assertEqual(section["node"]["artifactStatus"], "complete")
+        self.assertEqual(section["node"]["attempt"], 1)
+        self.assertTrue(section["node"]["inputDigest"])
+        self.assertEqual(section["run"]["total"], 1)
+        self.assertEqual(section["run"]["completed"], 1)
+
+    def test_volume_plan_and_outline_share_one_run(self) -> None:
+        transport = StubTransport(payload={"volumes": []})
+        transport.run_json("你是 VolumePlanAgent，只规划投标文件的卷。")
+        transport.run_json(OUTLINE_PROMPT)
+
+        state = transport.current_run_state
+        self.assertIsNotNone(state)
+        self.assertEqual([node.nodeId for node in state.nodes], ["VolumePlanAgent", "OutlinePlanAgent"])
+        self.assertEqual(
+            [node.artifactStatus.value for node in state.nodes],
+            ["partial", "partial"],
+            "空卷集合与空目录都算产物不完整",
+        )
+
+    def test_same_prompt_yields_the_same_input_digest(self) -> None:
+        """幂等键的前提：同输入同摘要（真跑两次 VolumePlanAgent 提示词）。"""
+
+        prompt = "你是 VolumePlanAgent，只规划投标文件的卷。\n工作区：w1；项目：p1"
+        transport = StubTransport(payload={"volumes": []})
+        transport.run_json(prompt)
+        transport.run_json(prompt)
+        node = transport.current_run_state.node("VolumePlanAgent")
+        self.assertEqual(node.attempt, 2)
+        self.assertEqual(node.inputDigest, input_digest(prompt))
+
+    def test_quality_retry_is_recorded_as_a_second_attempt(self) -> None:
+        transport = StubTransport(payload=self.VALID_OUTLINE)
+        transport.run_json(OUTLINE_PROMPT)
+        retried = transport.run_json("你是 OutlinePlanAgent，负责重新规划目录。\n【目录修正要求】上次重复。")
+        self.assertEqual(retried["runState"]["node"]["attempt"], 2)
+        self.assertEqual(len(transport.current_run_state.nodes), 1, "同一 nodeId 不产生重复行")
+
+    def test_schema_invalid_downgrades_artifact_status(self) -> None:
+        transport = StubTransport(payload={"plan": "不是数组"})
+        payload = transport.run_json(OUTLINE_PROMPT)
+
+        node = payload["runState"]["node"]
+        self.assertEqual(node["status"], "succeeded", "记账不改变执行事实")
+        self.assertEqual(node["artifactStatus"], "partial", "产物不合规就不能记 complete")
+        self.assertEqual(node["failureKind"], "")
+
+    def test_incomplete_artifact_is_partial_not_complete(self) -> None:
+        transport = StubTransport(payload={"plan": []})
+        payload = transport.run_json(OUTLINE_PROMPT)
+        self.assertTrue(payload["validation"]["ok"], "空目录是合法返回，只记 warning 不记错误")
+        self.assertEqual(payload["validation"]["warningCount"], 1)
+        self.assertEqual(payload["validation"]["issues"][0]["code"], "artifact_incomplete")
+        self.assertEqual(payload["runState"]["node"]["artifactStatus"], "partial")
+
+    def test_failure_kind_is_recorded_and_the_exception_still_propagates(self) -> None:
+        cases = [
+            ("Pi 智能体执行超时（provider=x）", FailureKind.TIMEOUT, True),
+            ("Pi 返回内容不是合法 JSON：{", FailureKind.SCHEMA_INVALID, True),
+            ("Pi 执行失败（provider=x）：通道错误", FailureKind.PROVIDER_ERROR, True),
+            ("说不清的失败", FailureKind.UNKNOWN, False),
+        ]
+        for message, expected_kind, retryable in cases:
+            transport = StubTransport(error=PiError(message))
+            with self.assertRaises(PiError) as caught:
+                transport.run_json(OUTLINE_PROMPT)
+            self.assertEqual(str(caught.exception), message, "异常必须原样抛出")
+            node = transport.current_run_state.node("OutlinePlanAgent")
+            self.assertEqual(node.status.value, "failed")
+            self.assertEqual(node.failureKind, expected_kind.value)
+            self.assertEqual(node.retryable, retryable)
+            self.assertEqual(node.artifactStatus.value, "missing")
+
+    def test_classify_failure_covers_transport_errors(self) -> None:
+        self.assertIs(classify_failure(PiError("Pi 返回内容不是合法 JSON：{")), FailureKind.SCHEMA_INVALID)
+        self.assertIs(classify_failure(PiError("Pi 没有返回文本")), FailureKind.PROVIDER_ERROR)
+        self.assertIs(classify_failure(PiError("无法向 Pi 发送请求：子进程已退出")), FailureKind.PROVIDER_ERROR)
+        self.assertIs(classify_failure(PiError("未知情况")), FailureKind.UNKNOWN)
+
+    def test_untracked_agent_is_not_recorded(self) -> None:
+        transport = StubTransport(payload={"rows": [{"requirementId": "technical-0001", "response": "满足"}]})
+        payload = transport.run_json(RESPONSE_TABLE_PROMPT)
+        self.assertNotIn("runState", payload)
+        self.assertIsNone(transport.current_run_state, "不在试点链路上的智能体不建运行态")
+
+    def test_begin_run_injects_identity(self) -> None:
+        transport = StubTransport(payload=self.VALID_OUTLINE)
+        transport.begin_run(project_id="local-690263cac1", workspace_id="workspace-f22e272de6", stage="outline")
+        payload = transport.run_json(OUTLINE_PROMPT)
+
+        run = payload["runState"]["run"]
+        self.assertEqual(run["projectId"], "local-690263cac1")
+        self.assertEqual(run["workspaceId"], "workspace-f22e272de6")
+        self.assertEqual(run["status"], "running", "链路未收尾时只能是当下快照")
+
+    def test_validation_switch_does_not_disable_bookkeeping(self) -> None:
+        transport = StubTransport(payload=self.VALID_OUTLINE)
+        payload = transport.run_json(OUTLINE_PROMPT, validate=False)
+        self.assertNotIn("validation", payload)
+        self.assertIn("runState", payload)
 
 
 class CommandArgvTests(unittest.TestCase):
