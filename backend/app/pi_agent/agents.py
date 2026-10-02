@@ -622,11 +622,157 @@ class PiAgentMethods:
         workspace_id: str,
         project_id: str,
     ) -> dict[str, Any]:
-        return self.run_json(
-            requirement_map_prompt(
+        """条款-章节映射：短任务说明 + 只读工具按需取数。
+
+        改造前这里把「条款映射用 ParseBundle 精简视图」整块内联进提示词（本机实测
+        单批约 66 KB），而映射真正需要的是**本批条款原文**与**可挂载的目录章节**。
+        现在只给：任务说明 + 本批条款 ID 清单 + 章节 ID 清单 + 工具使用约定 + 输出
+        schema + 映射规则；条款原文由 `search_requirements` 取、章节细节由
+        `list_chapters` 取、候选由 `validate_coverage_candidate` 自检。
+
+        输出 JSON 的字段名与旧提示词完全一致（`REQUIREMENT_MAP_SCHEMA` 原样内联）。
+        工具扩展缺失或策略关掉时，退回**逐字节相同**的旧提示词（`requirement_map_prompt`），
+        保证任何环境都不会因为这次改造而失去可用路径。
+        """
+
+        import json
+
+        from .agent_context import (
+            MAP_TOOL_ALLOWLIST,
+            build_context,
+            extension_path,
+            resolve_policy,
+            write_context,
+        )
+        from .prompts import REQUIREMENT_MAP_SCHEMA
+
+        policy = resolve_policy()
+        extension = extension_path()
+        context_path: Path | None = None
+        tools = ""
+        extensions: tuple[str, ...] = ()
+        env_extra: dict[str, str] = {}
+        if policy["enabled"] and extension.is_file():
+            context_path = write_context(
+                build_context(
+                    parse_bundle,
+                    outline_plan,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    policy=policy,
+                )
+            )
+            tools = MAP_TOOL_ALLOWLIST
+            extensions = (str(extension),)
+            env_extra = {"BID_MAP_CONTEXT": str(context_path)}
+
+            requirement_lines: list[str] = []
+            for item in parse_bundle.get("requirements") or []:
+                if not isinstance(item, dict):
+                    continue
+                requirement_id = str(item.get("id") or item.get("requirementId") or "").strip()
+                if not requirement_id:
+                    continue
+                flags = "".join(
+                    flag
+                    for flag, active in (
+                        ("m", bool(item.get("mandatory"))),
+                        ("r", bool(item.get("isRejection"))),
+                    )
+                    if active
+                )
+                requirement_lines.append(
+                    f"{requirement_id}{' [' + flags + ']' if flags else ''}"
+                )
+            chapter_lines: list[str] = []
+            for row in outline_plan or []:
+                if not isinstance(row, dict):
+                    continue
+                section_id = str(row.get("sectionId") or "").strip()
+                if not section_id:
+                    continue
+                chapter_lines.append(
+                    " | ".join(
+                        part
+                        for part in (
+                            section_id,
+                            " ".join(str(row.get("title") or "").split())[:60],
+                            f"L{row.get('level') or 1}",
+                            str(row.get("responseType") or ""),
+                        )
+                        if part
+                    )
+                )
+            evaluation_lines = [
+                str(item.get("id") or "").strip()
+                for item in parse_bundle.get("evaluationItems") or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
+            prompt = f"""
+你是 RequirementMapAgent，负责建立招标要求、评分项与投标目录之间的覆盖关系。
+
+你只负责映射和覆盖检查，不撰写正文，不修改招标原文，不编造企业能力。
+必须只输出一个合法 JSON 对象，不要输出 Markdown、代码块、解释或额外文字。
+所有 ID 必须来自本批条款清单、目录章节清单或工具返回结果；不得自行编造 ID。
+
+工作区：{workspace_id}
+项目：{project_id}
+
+【本批条款待办清单】（共 {len(requirement_lines)} 条；格式：条款ID [m=强制, r=废标]）
+{chr(10).join(requirement_lines)}
+
+【可引用的目录章节】（格式：sectionId | 标题 | 层级 | responseType）
+{chr(10).join(chapter_lines)}
+
+【可引用的评分项 ID】{", ".join(evaluation_lines) or "（无）"}
+
+【可用工具（只读，按需调用）】
+1. get_requirement_batch 一次取全本批（limit 直接写 80），不要分页反复调用。
+2. 只有当摘要不足以判断该条款由哪个章节响应时，才用 search_requirements 读原文；
+   一次查询问一个主题（例如“质保 售后 培训”），一次覆盖一批条款，不要逐条查询，最多 3 次。
+3. 用 list_chapters 取章节细节（层级、responseType、已有 requirementIds/evaluationIds），最多 1 次；
+   sectionId 只能取自它返回的节点（或上面章节清单）。
+4. 定稿前必须调用 validate_coverage_candidate 自检，直到它返回 ok=true 再输出；
+   它会指出不存在的 sectionId/requirementId、非法取值与漏掉的条款。
+条款原文不在提示词里；但请把工具往返控制在 6 次以内，凑齐判断依据后立即输出结果。
+
+【输出结构】
+{json.dumps(REQUIREMENT_MAP_SCHEMA, ensure_ascii=False)}
+
+映射规则：
+0. 即使要求或评分项数量为 0，也必须返回合法的空数组；本批条款清单中的每一条都必须出现，要么在 coverage 里，要么在 uncoveredRequirements 里。
+1. 每一条 requirement 都要判断是否被目录覆盖；mandatory 或 isRejection 条款不能无理由遗漏。
+2. coverageType 使用 chapter_text、table、attachment、commitment、fixed_form 或 other。
+3. status 使用 planned、covered、uncovered 或 needs_review。
+4. evaluationIds 只能引用上面评分项 ID 清单中存在的 id。
+5. sectionId 只能引用目录章节清单（或 list_chapters 返回）中存在的 sectionId。
+6. 同一条款确实需要多个章节响应时才放入 duplicatedRequirements，否则只保留一个主响应章节。
+7. uncoveredRequirements 和 duplicatedRequirements 使用对象数组，至少包含 requirementId、reason。
+8. reason 必须说明映射依据或风险，不得用空泛表述掩盖没有来源的判断；每条控制在一句话内（不超过 60 字），
+   保证整批输出能在一次回复里写完，不被截断。
+""".strip()
+        else:
+            prompt = requirement_map_prompt(
                 parse_bundle=parse_bundle,
                 outline_plan=outline_plan,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-        )
+        try:
+            raw = self.run_json(
+                prompt,
+                tools=tools,
+                extensions=extensions,
+                env_extra=env_extra,
+            )
+        finally:
+            if context_path is not None:
+                import shutil
+
+                shutil.rmtree(Path(context_path).parent, ignore_errors=True)
+        if not tools and policy["enabled"] and isinstance(raw, dict):
+            raw["warnings"] = [
+                *(raw.get("warnings") if isinstance(raw.get("warnings"), list) else []),
+                "未找到条款映射工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。",
+            ]
+        return raw
