@@ -335,12 +335,54 @@ def spec_summary() -> list[dict[str, Any]]:
     ]
 
 
+# ── Wave 1 · A 追加（只增不改：上面所有字段的语义保持不变）──────────────
+
+#: 产物 → 该产物「示例 schema」的出处（提示词里的 `*_SCHEMA` 常量，或提示词内联样例）。
+#: 只做登记，供偏差扫描与文档引用，不参与任何运行时判定。
+#: 注意 `volumePlan` 没有独立常量（样例内联在提示词正文里），这是偏差扫描发现的
+#: 契约缺口之一，登记在此以便 Wave 2 收敛。
+ARTIFACT_SCHEMA_SOURCES: dict[str, str] = {
+    "documentStructure": "prompts.parse.DOCUMENT_STRUCTURE_SCHEMA",
+    "projectMeta": "prompts.parse.PROJECT_META_SCHEMA",
+    "requirements": "prompts.parse.REQUIREMENT_SCHEMA",
+    "evaluationItems": "prompts.parse.EVALUATION_SCHEMA",
+    "bidFormatSpec": "prompts.parse.TEMPLATE_SCHEMA",
+    "parseReviewReport": "prompts.parse.PARSE_REVIEW_SCHEMA",
+    "volumePlan": "prompts.plan.volume_plan_prompt 内联样例（plan.py:135）",
+    "outlinePlan": "prompts.plan.OUTLINE_PLAN_SCHEMA",
+    "requirementCoverage": "prompts.plan.REQUIREMENT_MAP_SCHEMA",
+    "materialMatches": "prompts.draft.MATERIAL_MATCH_SCHEMA",
+    "writingPlan": "prompts.draft.SECTION_PLAN_SCHEMA",
+    "sectionContent": "prompts.draft.SECTION_DRAFT_SCHEMA / SECTION_REWRITE_SCHEMA",
+    "templateFragmentFields": "prompts.fill.TABLE_FORM_FILL_SCHEMA",
+    "requirementResponseRows": "prompts.fill.REQUIREMENT_RESPONSE_TABLE_SCHEMA",
+    "complianceFindings": "prompts.review.COMPLIANCE_REVIEW_SCHEMA",
+}
+
+
+def artifact_for(agent_id: str) -> str:
+    """取智能体的规范化产物名；未登记时返回空串（不抛错，供只读场景使用）。"""
+
+    spec = resolve_spec(agent_id)
+    return spec.artifact if spec is not None else ""
+
+
+def agents_for_artifact(artifact: str) -> tuple[str, ...]:
+    """反查：某个产物由哪些智能体写（改产物结构时用来回答「会影响谁」）。"""
+
+    name = str(artifact or "")
+    return tuple(spec.agent_id for spec in AGENT_SPECS if spec.artifact == name)
+
+
 __all__ = [
     "AGENT_SPECS",
     "ARTIFACT_KINDS",
+    "ARTIFACT_SCHEMA_SOURCES",
     "WORKFLOW_TEMPLATES",
     "AgentSpec",
+    "agents_for_artifact",
     "all_specs",
+    "artifact_for",
     "get_spec",
     "normalize_agent_id",
     "resolve_spec",

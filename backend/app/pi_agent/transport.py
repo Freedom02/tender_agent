@@ -3,6 +3,15 @@
 
 由原 `client.py` 机械拆分而来（Wave 0 · 0.3），代码一字未改。
 本模块**不含任何 agent 级方法**；那些在 `agents.py`，二者由 `client.PiClient` 组合。
+
+Wave 1 · A 在 `run_json` 这一层接上了「产物容错校验」（`agent_runtime.validation`）：
+智能体返回不符合示例 schema 时，写一条人读告警进 `warnings`、并把 `validation`
+段附进返回结构。**只记录、不阻断。**
+
+硬约束（有测试守着）：
+  - 原实现整体保留在 `_run_json_raw` 里，argv、超时、异常类型一字未改；
+  - `_command()` 的签名与 argv 语义不受影响（校验接线不碰启动参数）；
+  - 校验失败**不抛异常**，不新增任何默认阻断分支。
 """
 from __future__ import annotations
 
@@ -16,6 +25,14 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from ..agent_runtime.specs import resolve_spec
+from ..agent_runtime.validation import (
+    VALIDATION_SECTION,
+    shape_for_agent,
+    validate_payload,
+    validation_section,
+    validation_warnings,
+)
 from .config import PiConfig
 
 
@@ -78,6 +95,40 @@ def _extract_text_from_message(message: Any) -> str:
         if isinstance(item, dict) and item.get("type") == "text":
             parts.append(str(item.get("text") or ""))
     return "".join(parts)
+
+
+# ── Wave 1 · A：校验接线的辅助（不改变原有行为）──────────────────────────
+
+#: 关掉校验接线（排查/对照用）：`PI_AGENT_VALIDATION=0|false|off|no`
+VALIDATION_ENV = "PI_AGENT_VALIDATION"
+
+_FALSY = {"0", "false", "off", "no"}
+
+#: 各智能体提示词都以「你是 XxxAgent，……」开头，用它把返回归因到具体智能体，
+#: 从而不必改动编排层就能在真实调用点上接校验。
+_AGENT_DECLARATION = re.compile(r"你是\s*([A-Za-z][A-Za-z0-9]*Agent)")
+
+
+def validation_enabled(explicit: bool | None = None) -> bool:
+    """校验接线是否生效：显式参数优先，其次看 `PI_AGENT_VALIDATION`。"""
+
+    if explicit is not None:
+        return bool(explicit)
+    return str(os.getenv(VALIDATION_ENV, "")).strip().lower() not in _FALSY
+
+
+def agent_id_from_prompt(prompt: str) -> str:
+    """从提示词的「你是 XxxAgent」声明解析出已登记的 agent_id（解析不到返回空串）。
+
+    解析不到、或该名字未在 `specs.AGENT_SPECS` 登记时一律返回空串，
+    调用方据此跳过校验——宁可少校验，也不制造假问题。
+    """
+
+    match = _AGENT_DECLARATION.search(str(prompt or ""))
+    if not match:
+        return ""
+    agent_id = match.group(1)
+    return agent_id if resolve_spec(agent_id) is not None else ""
 
 
 class PiTransport:
@@ -174,7 +225,61 @@ class PiTransport:
         tools: str = "",
         extensions: tuple[str, ...] = (),
         env_extra: dict[str, str] | None = None,
+        agent_id: str = "",
+        validate: bool | None = None,
     ) -> dict[str, Any]:
+        """调用 Pi 并解析 JSON；返回前补上「只记录不阻断」的产物校验。
+
+        `agent_id` 不传时从提示词的「你是 XxxAgent」声明推断（各智能体提示词都这么写），
+        因此编排层不改一行也能在真实调用点上接上校验；推断不到就不校验。
+        返回结构与 `_run_json_raw` 相比**只多不少**：多出 `validation` 段，
+        以及（有问题时）人读告警追加进 `warnings`。
+        """
+
+        payload = self._run_json_raw(
+            prompt,
+            timeout_seconds=timeout_seconds,
+            tools=tools,
+            extensions=extensions,
+            env_extra=env_extra,
+        )
+        if not isinstance(payload, dict) or not validation_enabled(validate):
+            return payload
+        resolved_agent = str(agent_id or "") or agent_id_from_prompt(prompt)
+        self._attach_validation(payload, resolved_agent)
+        return payload
+
+    def _attach_validation(self, payload: dict[str, Any], agent_id: str) -> None:
+        """把一个智能体的返回接到形态表上：记录问题，绝不抛异常、绝不改分支。"""
+
+        if not agent_id:
+            return
+        shape = shape_for_agent(agent_id)
+        if shape is None:
+            return
+        report = validate_payload(payload, shape)
+        payload[VALIDATION_SECTION] = validation_section(agent_id, report)
+        messages = validation_warnings(agent_id, report)
+        if not messages:
+            return
+        existing = payload.get("warnings")
+        if isinstance(existing, list):
+            payload["warnings"] = [*existing, *messages]
+        elif "warnings" not in payload:
+            # 模型没给 warnings 时补一个，好让编排层把它记进 agentResult.warnings
+            payload["warnings"] = list(messages)
+
+    def _run_json_raw(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: float | None = None,
+        tools: str = "",
+        extensions: tuple[str, ...] = (),
+        env_extra: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Wave 0 · 0.3 的原始实现（进程启动、RPC、超时、JSON 解析），一字未改。"""
+
         runtime_env = {
             **os.environ,
             "PI_OFFLINE": os.getenv("PI_OFFLINE", "0"),
