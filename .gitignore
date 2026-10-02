@@ -68,3 +68,6 @@ scripts/_*.py
 
 # 治理校验脚本的输出报告（每次运行重新生成，不入库）
 scripts/projection_coverage_report.txt
+
+# 并行会话的 Pi 配置副本（每会话一份，含 auth.json 凭据，禁止入库）
+.pi-agent/
