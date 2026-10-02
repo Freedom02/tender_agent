@@ -65,7 +65,10 @@ class OutlineContextTests(unittest.TestCase):
             ["req-format"],
         )
         self.assertIn("投标文件应包含投标函", prompt)
-        self.assertIn("不得按每条要求单独创建一个目录节点", prompt)
+        # M2′ 起规则由“不得新增章节”改为“取证后必须带依据地新增章节”，
+        # 但仍然禁止为单条要求机械造节点。
+        self.assertIn("不得为单条要求各造一个节点", prompt)
+        self.assertIn("derivedBasis", prompt)
         self.assertNotIn(
             "req-qualification",
             [item["id"] for item in context["requirements"]],

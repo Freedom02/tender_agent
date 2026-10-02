@@ -43,6 +43,8 @@ import type {
   EvidenceAssetFile,
   LibrarySummary,
   MaterialProfile,
+  OutlineDiagnosis,
+  OutlineDiagnosisSuggestion,
   SubmissionStructure,
   Workspace
 } from "../../shared/types";
@@ -170,6 +172,70 @@ const workspaceId = computed(() => props.workspace?.id || "");
 const currentProject = computed(() => props.workspace?.project || props.project);
 const currentProjectTitle = computed(() => currentProject.value?.title || props.workspace?.title || "");
 const plan = computed(() => bidDocument.value?.plan || []);
+
+// ---- 目录规划诊断（只读，不改动目录；先让用户校准“要求章节 / 自由发挥章节”口径）----
+const outlineDiagnosis = ref<OutlineDiagnosis | null>(null);
+const outlineDiagnosisLoading = ref(false);
+const outlineDiagnosisOpen = ref(true);
+
+async function loadOutlineDiagnosis() {
+  const id = workspaceId.value;
+  if (!id) {
+    outlineDiagnosis.value = null;
+    return;
+  }
+  outlineDiagnosisLoading.value = true;
+  try {
+    outlineDiagnosis.value = await api.bidDocumentOutlineDiagnosis(id);
+  } catch {
+    // 诊断只是辅助信息：失败不打断目录流程
+    outlineDiagnosis.value = null;
+  } finally {
+    outlineDiagnosisLoading.value = false;
+  }
+}
+function diagnosisOriginLabel(origin: string): string {
+  return origin === "ai_initiative" ? "自由发挥" : "要求响应";
+}
+function diagnosisOriginTagType(origin: string): "warning" | "success" {
+  return origin === "ai_initiative" ? "success" : "warning";
+}
+function diagnosisRequirementSummary(item: OutlineDiagnosisSuggestion): string {
+  const parts: string[] = [];
+  if (item.requirementCount) parts.push(`相关条款 ${item.requirementCount} 条`);
+  if (item.tableBoundCount) parts.push(`其中仅响应表承载 ${item.tableBoundCount} 条`);
+  if (item.unboundCount) parts.push(`完全未绑定 ${item.unboundCount} 条`);
+  if (item.evaluationIds.length) parts.push(`评分点 ${item.evaluationIds.length} 个`);
+  return parts.join(" · ") || "依据评分项判断";
+}
+/** 目录智能体新增章节的标记与依据（M2′）。 */
+function derivedOriginLabel(section: BidSection): string {
+  return section.derivedOrigin === "ai_initiative" ? "智能体·主动发挥" : "智能体·要求响应";
+}
+function derivedOriginTagType(section: BidSection): "success" | "warning" {
+  return section.derivedOrigin === "ai_initiative" ? "success" : "warning";
+}
+function derivedBasisText(section: BidSection): string {
+  const parts: string[] = [];
+  if (section.derivedArchetype) parts.push(`原型：${section.derivedArchetype}`);
+  parts.push(section.derivedBasis || "依据不足");
+  const requirementCount = section.requirementIds?.length || 0;
+  const evaluationCount = section.evaluationIds?.length || 0;
+  if (requirementCount) parts.push(`引用条款 ${requirementCount} 条`);
+  if (evaluationCount) parts.push(`引用评分项 ${evaluationCount} 个`);
+  return parts.join("\n");
+}
+
+watch(() => props.workspace?.id, () => void loadOutlineDiagnosis(), { immediate: true });
+watch(
+  () => plan.value.length,
+  () => {
+    if (activeStep.value === 2) void loadOutlineDiagnosis();
+  }
+);
+watch(activeStep, (step) => {
+  if (step === 2) void loadOutlineDiagnosis();
+});
 
 // ---- 工具函数 ----
 const STATUS_NAMES: Record<string, string> = {
@@ -613,6 +679,11 @@ const treePlan = computed<PlanTreeNode[]>(() => {
   }
   return roots;
 });
+
+/** 目录智能体据证据新增的章节（M2′）：直接取自已保存的目录。 */
+const derivedPlanSections = computed(() =>
+  plan.value.filter((section) => section.derived && section.nodeType !== "volume" && section.nodeType !== "format_item")
+);
 
 function sectionRole(section: BidSection): string {
   if (section.nodeType === "volume") return "卷";
@@ -2249,6 +2320,177 @@ async function previewExport() {
           :title="warning"
         />
 
+        <!-- 目录规划诊断（只读）：先看清“已有章节 / 缺哪些要求章节 / 建议哪些自由发挥章节” -->
+        <div class="diagnosis-panel">
+          <div class="diagnosis-head" @click="outlineDiagnosisOpen = !outlineDiagnosisOpen">
+            <el-icon><ListTree /></el-icon>
+            <span class="diagnosis-title">规划诊断</span>
+            <template v-if="outlineDiagnosis">
+              <el-tag size="small" type="info" effect="plain">
+                原文条目 {{ outlineDiagnosis.summary.formatItems }} · 响应章节 {{ outlineDiagnosis.summary.responseSections }}
+              </el-tag>
+              <el-tag v-if="outlineDiagnosis.requiredGaps.length" size="small" type="warning" effect="plain">
+                建议补充要求章节 {{ outlineDiagnosis.requiredGaps.length }}
+              </el-tag>
+              <el-tag v-if="outlineDiagnosis.initiatives.length" size="small" type="success" effect="plain">
+                自由发挥建议 {{ outlineDiagnosis.initiatives.length }}
+              </el-tag>
+            </template>
+            <span class="diagnosis-spacer" />
+            <el-button
+              size="small"
+              text
+              type="primary"
+              :loading="outlineDiagnosisLoading"
+              @click.stop="loadOutlineDiagnosis"
+            >
+              重新诊断
+            </el-button>
+            <el-icon class="diagnosis-caret" :class="{ 'is-open': outlineDiagnosisOpen }">
+              <ArrowDown />
+            </el-icon>
+          </div>
+          <div v-show="outlineDiagnosisOpen" v-loading="outlineDiagnosisLoading" class="diagnosis-body">
+            <el-alert
+              v-if="!outlineDiagnosis"
+              type="info"
+              :closable="false"
+              show-icon
+              title="暂无诊断数据：请先在第一、二步生成目录后再查看。"
+            />
+            <template v-else>
+              <div class="diagnosis-stats">
+                <span>
+                  条款 {{ outlineDiagnosis.summary.requirements }} 条：叙述章节承载
+                  {{ outlineDiagnosis.summary.narrativeBound }} · 仅响应表承载
+                  {{ outlineDiagnosis.summary.tableBound }} · 完全未绑定 {{ outlineDiagnosis.summary.unbound }}
+                </span>
+                <span>
+                  评分项 {{ outlineDiagnosis.summary.evaluationItems }} 个：已归位
+                  {{ outlineDiagnosis.summary.evaluationMapped }} · 未归位
+                  {{ outlineDiagnosis.summary.evaluationUnmapped }}
+                </span>
+                <span>
+                  {{ outlineDiagnosis.summary.hasNarrativeCapacity
+                    ? "目录中已有可撰写正文的章节"
+                    : "目录中没有任何可撰写正文的章节" }}
+                </span>
+              </div>
+              <el-alert
+                v-for="(warning, index) in outlineDiagnosis.warnings"
+                :key="`diagnosis-warning-${index}`"
+                class="diagnosis-alert"
+                type="warning"
+                :closable="false"
+                show-icon
+                :title="warning"
+              />
+              <el-alert
+                v-for="(note, index) in outlineDiagnosis.notes"
+                :key="`diagnosis-note-${index}`"
+                class="diagnosis-alert"
+                type="info"
+                :closable="false"
+                show-icon
+                :title="note"
+              />
+              <div class="diagnosis-columns">
+                <section class="diagnosis-column">
+                  <header>规则聚类参考：要求响应缺口</header>
+                  <p v-if="!outlineDiagnosis.requiredGaps.length" class="diagnosis-empty">
+                    暂未发现要求响应缺口。
+                  </p>
+                  <article
+                    v-for="item in outlineDiagnosis.requiredGaps"
+                    :key="`gap-${item.archetype}`"
+                    class="diagnosis-card"
+                  >
+                    <div class="diagnosis-card-head">
+                      <strong>{{ item.title }}</strong>
+                      <el-tag size="small" effect="plain" :type="diagnosisOriginTagType(item.origin)">
+                        {{ diagnosisOriginLabel(item.origin) }}
+                      </el-tag>
+                      <el-tag v-if="item.targetVolumeTitle" size="small" type="info" effect="plain">
+                        拟归属：{{ item.targetVolumeTitle }}
+                      </el-tag>
+                    </div>
+                    <p class="diagnosis-card-meta">{{ diagnosisRequirementSummary(item) }}</p>
+                    <p class="diagnosis-card-reason">{{ item.reason }}</p>
+                    <p class="diagnosis-card-basis">建议依据：{{ item.basis }}</p>
+                    <p v-for="label in item.evaluationLabels" :key="label" class="diagnosis-card-eval">
+                      评分项：{{ label }}
+                    </p>
+                  </article>
+                </section>
+                <section class="diagnosis-column">
+                  <header>规则聚类参考：可自由发挥</header>
+                  <p v-if="!outlineDiagnosis.initiatives.length" class="diagnosis-empty">
+                    暂未识别到需要自主补充的章节。
+                  </p>
+                  <article
+                    v-for="item in outlineDiagnosis.initiatives"
+                    :key="`initiative-${item.archetype}`"
+                    class="diagnosis-card"
+                  >
+                    <div class="diagnosis-card-head">
+                      <strong>{{ item.title }}</strong>
+                      <el-tag size="small" effect="plain" :type="diagnosisOriginTagType(item.origin)">
+                        {{ diagnosisOriginLabel(item.origin) }}
+                      </el-tag>
+                      <el-tag v-if="item.targetVolumeTitle" size="small" type="info" effect="plain">
+                        拟归属：{{ item.targetVolumeTitle }}
+                      </el-tag>
+                    </div>
+                    <p class="diagnosis-card-meta">{{ diagnosisRequirementSummary(item) }}</p>
+                    <p class="diagnosis-card-reason">{{ item.reason }}</p>
+                    <p class="diagnosis-card-basis">建议依据：{{ item.basis }}</p>
+                  </article>
+                </section>
+              </div>
+              <div class="diagnosis-decided">
+                <header>
+                  目录智能体已新增的章节（{{ derivedPlanSections.length }}）
+                  <span class="diagnosis-decided-hint">章节由目录智能体取证后自行决定并写入目录，这里展示它的依据</span>
+                </header>
+                <p v-if="!derivedPlanSections.length" class="diagnosis-empty">
+                  本次目录没有新增章节。若规则聚类仍提示缺口，说明智能体取证后认为依据不足（见上方智能体 warnings）。
+                </p>
+                <article
+                  v-for="section in derivedPlanSections"
+                  :key="`derived-${section.sectionId}`"
+                  class="diagnosis-card"
+                >
+                  <div class="diagnosis-card-head">
+                    <strong>{{ section.title }}</strong>
+                    <el-tag size="small" effect="plain" :type="derivedOriginTagType(section)">
+                      {{ derivedOriginLabel(section) }}
+                    </el-tag>
+                    <el-tag v-if="section.derivedArchetype" size="small" type="info" effect="plain">
+                      {{ section.derivedArchetype }}
+                    </el-tag>
+                    <el-tag v-if="section.required === false" size="small" type="info" effect="plain">
+                      非必交项
+                    </el-tag>
+                  </div>
+                  <p class="diagnosis-card-basis">依据：{{ section.derivedBasis || "（未填写依据）" }}</p>
+                  <p class="diagnosis-card-meta">
+                    引用条款 {{ section.requirementIds?.length || 0 }} 条 · 引用评分项
+                    {{ section.evaluationIds?.length || 0 }} 个
+                  </p>
+                </article>
+              </div>
+              <div v-if="outlineDiagnosis.unboundRequirementSamples.length" class="diagnosis-samples">
+                <header>完全未绑定到任何章节的条款（样例）</header>
+                <p v-for="row in outlineDiagnosis.unboundRequirementSamples" :key="row.requirementId">
+                  <span class="diagnosis-sample-id">{{ row.requirementId }}</span>
+                  <span class="diagnosis-sample-domain">{{ row.domain }}</span>
+                  {{ row.text }}
+                </p>
+              </div>
+            </template>
+          </div>
+        </div>
+
         <div class="toc-tree-wrap">
           <el-tree
             :data="treePlan"
@@ -2270,6 +2512,21 @@ async function previewExport() {
                 <span class="toc-role">{{ sectionRole(data.section) }}</span>
                 <span class="toc-number">{{ sectionNumber(data.section) }}</span>
                 <el-input v-model="data.section.title" size="small" class="toc-title-input" />
+                <el-tooltip
+                  v-if="data.section.derived"
+                  placement="top"
+                  :show-after="200"
+                  :content="derivedBasisText(data.section)"
+                >
+                  <el-tag
+                    size="small"
+                    :type="derivedOriginTagType(data.section)"
+                    effect="plain"
+                    class="toc-origin-tag"
+                  >
+                    {{ derivedOriginLabel(data.section) }}
+                  </el-tag>
+                </el-tooltip>
                 <el-tag
                   v-if="data.section.structureSource"
                   size="small"
@@ -3872,5 +4129,135 @@ async function previewExport() {
   color: var(--el-text-color-secondary);
   font-size: 12px;
   background: var(--el-fill-color-light);
+}
+
+/* 目录规划诊断面板（只读） */
+.diagnosis-panel {
+  margin: 12px 0 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-blank);
+}
+.diagnosis-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.diagnosis-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.diagnosis-spacer {
+  flex: 1;
+}
+.diagnosis-caret {
+  transition: transform 0.2s ease;
+}
+.diagnosis-caret.is-open {
+  transform: rotate(180deg);
+}
+.diagnosis-body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.diagnosis-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  padding: 8px 0;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+.diagnosis-alert {
+  margin-bottom: 6px;
+}
+.diagnosis-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+.diagnosis-decided {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.diagnosis-decided > header {
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--el-text-color-primary);
+}
+.diagnosis-decided-hint {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-column > header {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-card {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+}
+.diagnosis-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+}
+.diagnosis-card-meta,
+.diagnosis-card-reason,
+.diagnosis-card-basis,
+.diagnosis-card-eval {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-regular);
+}
+.diagnosis-card-basis {
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-card-eval {
+  color: var(--el-color-primary);
+}
+.diagnosis-samples {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.diagnosis-samples > header {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-samples > p {
+  margin: 2px 0;
+  line-height: 1.5;
+}
+.diagnosis-sample-id {
+  display: inline-block;
+  min-width: 132px;
+  color: var(--el-text-color-secondary);
+}
+.diagnosis-sample-domain {
+  display: inline-block;
+  min-width: 96px;
+  color: var(--el-text-color-placeholder);
 }
 </style>

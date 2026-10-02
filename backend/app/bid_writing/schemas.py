@@ -197,6 +197,39 @@ def build_source_ref(
 # ---------------------------------------------------------------------------
 # 章节（BidSection）
 # ---------------------------------------------------------------------------
+#: 模型常把 itemType 词表写进 responseType，这里统一收口，避免下游/前端认不出。
+_RESPONSE_TYPE_ALIASES = {
+    "narrative": "chapter_text",
+    "text": "chapter_text",
+    "chapter": "chapter_text",
+    "section": "chapter_text",
+    "paragraph": "chapter_text",
+    "fixed": "fixed_form",
+    "form": "fixed_form",
+    "fixed_table": "fixed_form",
+    "table_response": "table",
+    "response_table": "table",
+    "evidence": "attachment",
+    "material": "attachment",
+    "table_deviation": "deviation",
+    "group": "section_group",
+}
+
+
+def normalize_response_type(value: Any) -> str:
+    """把模型输出的响应类型收敛到系统词表。
+
+    合法值：``section_group`` / ``chapter_text`` / ``fixed_form`` / ``table`` /
+    ``attachment`` / ``deviation``。未知值原样返回（由调用方决定如何兜底）。
+    """
+
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return ""
+    key = text.lower().replace("-", "_").replace(" ", "_")
+    return _RESPONSE_TYPE_ALIASES.get(key, text)
+
+
 def build_section(
     section_id: str,
     title: str,
@@ -215,7 +248,7 @@ def build_section(
 ) -> dict[str, Any]:
     normalized_level = max(int(level or 1), 1)
     normalized_order = max(int(order or 0), 0)
-    normalized_response_type = response_type.strip() if isinstance(response_type, str) else ""
+    normalized_response_type = normalize_response_type(response_type)
     if not normalized_response_type:
         normalized_response_type = (
             "fixed_form"

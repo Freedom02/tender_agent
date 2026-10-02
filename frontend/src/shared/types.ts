@@ -620,6 +620,14 @@ export interface BidSection {
   conditional?: boolean;
   conditionText?: string;
   structureSource?: string;
+  /** 目录智能体据证据新增的章节（M2′）。 */
+  derived?: boolean;
+  /** required_by_tender = 招标文件事实上有要求；ai_initiative = 智能体主动发挥。 */
+  derivedOrigin?: string;
+  /** 章节原型：technical_plan / training / understanding … */
+  derivedArchetype?: string;
+  /** 一句话依据，说明为什么需要这一章（引用了哪些条款/评分项）。 */
+  derivedBasis?: string;
   parentSectionId?: string;
   level?: number;
   order?: number;
@@ -731,6 +739,71 @@ export interface EvidenceChapterPreview {
   entries: EvidenceEntry[];
   summary: EvidenceChapterSummary;
   blanksToFill: string[];
+}
+
+/** 目录规划诊断（只读）：已有章节 / 要求响应缺口 / 自由发挥建议 */
+export interface OutlineDiagnosisVolume {
+  volumeId: string;
+  title: string;
+  kind?: string;
+  formatItemCount: number;
+  responseSectionCount: number;
+  narrativeItemCount: number;
+  canHostNarrative: boolean;
+}
+
+export interface OutlineDiagnosisSuggestion {
+  archetype: string;
+  title: string;
+  origin: "required_by_tender" | "ai_initiative" | string;
+  targetVolumeId: string;
+  targetVolumeTitle: string;
+  requirementIds: string[];
+  requirementCount: number;
+  tableBoundCount: number;
+  unboundCount: number;
+  evaluationIds: string[];
+  evaluationScore: number | null;
+  evaluationLabels: string[];
+  domainCounts: Record<string, number>;
+  reason: string;
+  basis: string;
+}
+
+export interface OutlineDiagnosisSummary {
+  volumes: number;
+  formatItems: number;
+  responseSections: number;
+  requirements: number;
+  narrativeBound: number;
+  tableBound: number;
+  unbound: number;
+  evaluationItems: number;
+  evaluationMapped: number;
+  evaluationUnmapped: number;
+  hasNarrativeCapacity: boolean;
+}
+
+export interface OutlineDiagnosisSample {
+  requirementId: string;
+  domain: string;
+  responseType: string;
+  mandatory: boolean;
+  text: string;
+  sourceLocator: string;
+}
+
+export interface OutlineDiagnosis {
+  workspaceId: string;
+  planSource: string;
+  summary: OutlineDiagnosisSummary;
+  volumes: OutlineDiagnosisVolume[];
+  requiredGaps: OutlineDiagnosisSuggestion[];
+  initiatives: OutlineDiagnosisSuggestion[];
+  unboundRequirementSamples: OutlineDiagnosisSample[];
+  warnings: string[];
+  notes: string[];
+  planningWarnings: string[];
 }
 
 export interface DeviationRow {

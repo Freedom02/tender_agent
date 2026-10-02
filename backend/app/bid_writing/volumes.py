@@ -70,16 +70,56 @@ def _item_supports_children(item: dict[str, Any]) -> bool:
     )
 
 
+#: 允许出现「智能体新增叙述章节」的来源标记（对应 outline_diagnosis 的两类产出线）。
+DERIVED_ORIGINS = ("required_by_tender", "ai_initiative")
+
+#: 智能体新增章节**不允许**使用的响应类型：卷分组、固定格式件与偏离表只能来自原文。
+DERIVED_REJECTED_RESPONSE_TYPES = ("section_group", "fixed_form", "deviation")
+
+
+def _is_derived_narrative(row: dict[str, Any]) -> bool:
+    """判断一行是否为「智能体新增、且带依据」的叙述章节。
+
+    这是放置层的护栏而不是业务判断：只有同时满足
+    ① 显式 ``derived=true``；② ``derivedOrigin`` 属于两类产出线；
+    ③ ``derivedBasis`` 非空（真的写明了依据）；④ 不是卷/格式条目；
+    ⑤ 响应类型不是卷分组/固定格式件/偏离表
+    的节点，才会被容许挂到卷下。任何一条不满足都按原有规则丢弃。
+
+    这里对 ``responseType`` 用**黑名单**而非白名单：模型经常把 itemType 词表
+    （``narrative``）写进 responseType，白名单会让整章静默消失。
+    """
+
+    if not bool(row.get("derived")):
+        return False
+    if str(row.get("derivedOrigin") or "").strip() not in DERIVED_ORIGINS:
+        return False
+    if not str(row.get("derivedBasis") or "").strip():
+        return False
+    if str(row.get("nodeType") or "").strip() in {"volume", "format_item"}:
+        return False
+    return (
+        str(row.get("responseType") or "").strip()
+        not in DERIVED_REJECTED_RESPONSE_TYPES
+    )
+
+
 def plan_from_submission_structure(
     submission_structure: Any,
     fine_review: dict[str, Any] | None = None,
     generated_plan: list[dict[str, Any]] | None = None,
+    *,
+    keep_derived: bool = False,
 ) -> list[dict[str, Any]]:
     """严格按招标文件卷内条目生成目录骨架。
 
     卷和文件条目来自招标文件原文，不能被 Pi 的通用模板替换。若传入
     ``generated_plan``，只吸收挂在“叙述型文件条目”下面的 Pi 子章节，
     其余没有原文父级的通用章节全部丢弃。
+
+    ``keep_derived=True`` 时额外保留 ``_is_derived_narrative`` 认可的
+    「智能体新增叙述章节」：原文只列了表格、卷内没有任何可承载正文的条目时，
+    它允许这类章节直接挂在卷下（以及挂在另一个已被保留的新增章节下）。
     """
 
     structure = normalize_submission_structure(submission_structure)
@@ -258,20 +298,29 @@ def plan_from_submission_structure(
         if not candidate_id or candidate_id in candidate_to_target:
             continue
         mapped_parent = candidate_to_target.get(parent_id)
+        parent_is_volume = False
         if not mapped_parent:
-            # Pi 直接挂在卷下的“技术方案/商务响应”等通用节点没有招标
-            # 文件条目父级，不能混入明确格式目录。
-            continue
+            if keep_derived and _is_derived_narrative(row) and parent_id in volume_targets:
+                # 智能体据证据新增的叙述章节：原文只列了响应表/附件，卷内没有任何
+                # 可承载正文的条目，此时允许它挂在卷下（仍受策略上限与质量检查约束）。
+                mapped_parent = parent_id
+                parent_is_volume = True
+            else:
+                # Pi 直接挂在卷下的“技术方案/商务响应”等通用节点没有招标
+                # 文件条目父级，不能混入明确格式目录。
+                continue
         parent_item = target_by_id.get(mapped_parent)
         if not parent_item:
             continue
         if (
-            mapped_parent in item_targets
+            not parent_is_volume
+            and mapped_parent in item_targets
             and not _item_supports_children(parent_item)
         ):
             continue
         if (
-            mapped_parent not in item_targets
+            not parent_is_volume
+            and mapped_parent not in item_targets
             and mapped_parent not in generated_target_ids
         ):
             continue
@@ -306,6 +355,8 @@ def plan_from_submission_structure(
 def reconcile_plan_with_submission_structure(
     plan: list[dict[str, Any]],
     submission_structure: Any,
+    *,
+    keep_derived: bool = False,
 ) -> list[dict[str, Any]]:
     """把已有 Pi/历史目录收敛到明确的卷和卷内文件条目。"""
 
@@ -315,6 +366,7 @@ def reconcile_plan_with_submission_structure(
     return plan_from_submission_structure(
         structure,
         generated_plan=plan,
+        keep_derived=keep_derived,
     )
 
 

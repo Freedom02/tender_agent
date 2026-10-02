@@ -2512,6 +2512,7 @@ class Store:
             SECTION_SOURCE_TABLE,
             SECTION_SOURCE_TEMPLATE,
             build_section,
+            normalize_response_type,
         )
 
         if not isinstance(payload, dict):
@@ -2569,6 +2570,11 @@ class Store:
         levels_by_id: dict[str, int] = {}
         sibling_orders: dict[str, int] = {}
         for item, section_id, source_section_id in assigned_rows:
+            # 每个节点必须重新取自己的标题。此处若沿用上一个循环残留的 title，
+            # 会把所有节点（含卷与格式条目）的标题覆盖成最后一项的标题。
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
             source = str(item.get("source") or SECTION_SOURCE_AI).strip()
             kind = str(item.get("kind") or SECTION_KIND_TECHNICAL).strip()
             if source == "deviation":
@@ -2616,7 +2622,9 @@ class Store:
                 level=level,
                 order=order,
                 required=bool(item.get("required", True)),
-                response_type=str(item.get("responseType") or "").strip(),
+                response_type=normalize_response_type(
+                    str(item.get("responseType") or "").strip()
+                ),
             )
             section["sourceSectionId"] = source_section_id or section_id
             section["evaluationIds"] = [
@@ -2650,6 +2658,17 @@ class Store:
             ):
                 if str(item.get(key) or "").strip():
                     section[key] = str(item.get(key)).strip()
+            # 目录智能体新增章节的依据字段：必须落盘，否则前端看不到依据，
+            # 放置层也会因为“缺少依据”把节点当普通节点丢弃。
+            for key in (
+                "derived",
+                "derivedOrigin",
+                "derivedArchetype",
+                "derivedBasis",
+            ):
+                value = item.get(key)
+                if value not in (None, "", [], {}):
+                    section[key] = value
             sections.append(section)
             levels_by_id[section_id] = level
         from .bid_writing.plan_tree import normalize_plan_tree
@@ -2670,6 +2689,9 @@ class Store:
             normalized_sections = reconcile_plan_with_submission_structure(
                 normalized_sections,
                 submission_structure,
+                # Pi 目录规划新增的叙述章节（带 derivedBasis）在保存时同样保留，
+                # 否则会在落盘这一步被"没有原文父级"的规则丢掉。
+                keep_derived=True,
             )
         else:
             for section_id, title in (("d-01", "技术规格偏离表"), ("d-02", "商务偏离表")):
@@ -3773,6 +3795,52 @@ class Store:
         summary["scannedTotal"] = len(cache)
         section["evidenceSummary"] = summary
         return summary
+
+    def _parse_bundle_artifact_path(self, workspace: dict[str, Any]) -> Path:
+        """解析包落盘位置（与 get_parse_bundle 的寻址一致，但不做任何修复/补写）。"""
+
+        ref = workspace.get("parseBundleRef")
+        artifact = str(ref.get("artifact") or "") if isinstance(ref, dict) else ""
+        if artifact:
+            return self.root / artifact
+        project_id = str(workspace.get("projectId") or "unassigned")
+        safe_project_id = re.sub(r"[^A-Za-z0-9_.-]", "_", project_id) or "unassigned"
+        return self.runtime_root / "projects" / safe_project_id / "parse" / "parse-bundle.json"
+
+    def outline_diagnosis(self, workspace_id: str) -> dict[str, Any] | None:
+        """目录规划诊断（只读）：已有章节 / 要求响应缺口 / 自由发挥建议。
+
+        严格只读：不生成目录、不调用 LLM、不写盘。工作区还没有目录时返回带 warning
+        的空诊断，而不是顺手触发一次目录规划（那会调用 Pi）。
+
+        解析包走 :meth:`_parse_bundle_artifact_path` 直读文件，不复用
+        :meth:`get_parse_bundle` —— 后者在缺少解析包时会尝试从 reasoning 兜底构建
+        并落盘一份旧版解析包，那就不是「只读」了，用户点一下「重新诊断」不该改变
+        工作区状态。
+        """
+
+        workspace = self.workspaces.get(workspace_id)
+        if not isinstance(workspace, dict):
+            return None
+        bid_doc = workspace.get("bidDocument")
+        bid_doc = bid_doc if isinstance(bid_doc, dict) else {}
+        plan = bid_doc.get("plan") if isinstance(bid_doc.get("plan"), list) else []
+        parse_bundle = read_json(self._parse_bundle_artifact_path(workspace), None)
+        parse_bundle = parse_bundle if isinstance(parse_bundle, dict) else {}
+
+        from .bid_writing.outline_diagnosis import diagnose
+
+        result = diagnose(parse_bundle, plan, workspace_id=workspace_id)
+        result["planSource"] = str(
+            bid_doc.get("planSource")
+            or bid_doc.get("planningSource")
+            or bid_doc.get("planningProvider")
+            or ""
+        )
+        result["planningWarnings"] = [
+            str(item) for item in (bid_doc.get("planningWarnings") or []) if str(item).strip()
+        ]
+        return result
 
     def build_evidence_chapter(self, workspace_id: str) -> dict[str, Any] | None:
         """一键生成/刷新「技术参数证明材料」章节（纯确定性，不调 LLM）。

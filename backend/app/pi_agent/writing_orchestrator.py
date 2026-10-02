@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
 from ..agent_runtime.contracts import build_agent_result, now_iso
 from ..bid_writing.schemas import (
     material_keys_for_writing_profile,
+    normalize_response_type,
     resolve_writing_profile,
+)
+from .outline_agent_context import (
+    OUTLINE_TOOL_ALLOWLIST,
+    build_context,
+    extension_path,
+    resolve_policy,
+    write_context,
 )
 
 
@@ -122,6 +133,113 @@ def _flatten_plan_items(
     return flattened
 
 
+def _dropped_derived_titles(
+    plan: list[dict[str, Any]],
+    outline_raw: dict[str, Any],
+) -> list[str]:
+    """找出智能体声明新增、但没能在放置后留在目录里的章节标题。
+
+    放置规则对「挂错父级」的章节是丢弃处理；静默丢弃会让人完全看不出
+    智能体到底做没做事，所以这里把差异显式报出来。
+    """
+
+    kept = {
+        _text(item.get("title"), 240)
+        for item in plan
+        if isinstance(item, dict) and item.get("derived")
+    }
+    titles: list[str] = []
+    raw_plan = outline_raw.get("plan") if isinstance(outline_raw, dict) else None
+    for item in _as_list(raw_plan):
+        if not isinstance(item, dict) or not item.get("derived"):
+            continue
+        title = _text(item.get("title"), 240)
+        if title and title not in kept and title not in titles:
+            titles.append(title)
+    return titles
+
+
+def _is_agent_added(item: dict[str, Any]) -> bool:
+    """是否为「智能体主动新增」的章节（方案 B 类）。
+
+    只有智能体在目录结果里显式声明 ``derived`` 的节点才算；招标文件原文骨架
+    （卷、格式条目、响应表）永远不改 ID，这是硬约束。
+    """
+
+    if not item.get("derived"):
+        return False
+    if _text(item.get("nodeType"), 40) in {"volume", "format_item"}:
+        return False
+    return _text(item.get("structureSource"), 60) != "招标文件原文"
+
+
+def _id_token(value: str) -> str:
+    """把一段文本压成可放进 ID 的短 token；中文等非 ASCII 走内容哈希。"""
+
+    ascii_token = re.sub(r"[^0-9a-zA-Z]+", "-", value or "").strip("-").lower()
+    if ascii_token:
+        return ascii_token[:40]
+    if not value:
+        return ""
+    return "h" + hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+
+
+def _agent_added_section_base(item: dict[str, Any]) -> str:
+    """智能体新增章节的基础 ID：「父级 + 章节原型」。"""
+
+    parent_token = _id_token(_text(item.get("parentSectionId") or item.get("parentId"), 80))
+    basis = _text(item.get("derivedArchetype"), 60) or _text(
+        item.get("title") or item.get("name"), 240
+    )
+    parts = [part for part in (parent_token, _id_token(basis)) if part]
+    return "d-" + "-".join(parts) if parts else "d-section"
+
+
+def _contending_agent_added_bases(items: list[Any]) -> set[str]:
+    """同一父级下出现两次以上的原型：这些基础 ID 需要用标题进一步区分。"""
+
+    counts: dict[str, int] = {}
+    for item in items:
+        if isinstance(item, dict) and _is_agent_added(item):
+            base = _agent_added_section_base(item)
+            counts[base] = counts.get(base, 0) + 1
+    return {base for base, count in counts.items() if count > 1}
+
+
+def _agent_added_section_id(
+    item: dict[str, Any],
+    taken: set[str],
+    contending: set[str] | None = None,
+) -> str:
+    """给智能体新增的章节生成**稳定** ID：同一目录两次运行结果一致。
+
+    ID 由「父级 + 章节原型（derivedArchetype，缺失时退回标题）」推导，
+    与模型这次顺手起的名字、以及节点顺序都无关——模型每次给的 ``sectionId``
+    （``technical-plan`` / ``technical-narr-01`` 之类）本身就是不稳定的来源。
+
+    当同一父级下出现同原型的多个章节（模型用词重复）时，再加上标题 token 区分，
+    保证「换个顺序摆放，ID 映射不变」；标题也撞车才退化成 ``-2``/``-3`` 序号。
+    """
+
+    base = _agent_added_section_base(item)
+    title_token = _id_token(_text(item.get("title") or item.get("name"), 240))
+    # 同原型多章时一律带标题 token（对每一章都生效，因此与摆放顺序无关）
+    token = title_token if (contending and base in contending) else ""
+    candidate = f"{base}-{token}" if token else base
+    if candidate not in taken:
+        return candidate
+    if title_token and not token:
+        candidate = f"{base}-{title_token}"
+        if candidate not in taken:
+            return candidate
+    disambiguated = candidate
+    index = 2
+    while candidate in taken:
+        candidate = f"{disambiguated}-{index}"
+        index += 1
+    return candidate
+
+
 def _normalize_plan(
     value: Any,
     *,
@@ -138,6 +256,7 @@ def _normalize_plan(
         return []
 
     raw_items = _flatten_plan_items(raw_plan)
+    contending_bases = _contending_agent_added_bases(raw_items)
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     assigned_ids: set[str] = set()
@@ -150,7 +269,10 @@ def _normalize_plan(
             continue
         source_section_id = _text(item.get("sectionId") or item.get("id"), 80)
         section_id = source_section_id
-        if not section_id or section_id in assigned_ids:
+        if _is_agent_added(item):
+            # 智能体新增章节的 ID 由 Python 稳定推导，模型给的 ID 只用于父子引用映射。
+            section_id = _agent_added_section_id(item, assigned_ids, contending_bases)
+        elif not section_id or section_id in assigned_ids:
             section_id = f"custom-{custom_index:02d}"
             custom_index += 1
             while section_id in assigned_ids:
@@ -164,6 +286,11 @@ def _normalize_plan(
     levels_by_id: dict[str, int] = {}
     sibling_orders: dict[str, int] = {}
     for item, section_id, source_section_id in assigned_rows:
+        # 每个节点必须重新取自己的标题。此处若沿用上一个循环残留的 title，
+        # 会把所有节点（含卷与格式条目）的标题覆盖成最后一项的标题。
+        title = _text(item.get("title") or item.get("name"), 240)
+        if not title:
+            continue
         requirement_ids = [
             _text(entry, 80)
             for entry in _as_list(item.get("requirementIds"))
@@ -205,7 +332,7 @@ def _normalize_plan(
         sibling_orders[sibling_key] = max(sibling_orders.get(sibling_key, 0), order)
         source = _text(item.get("source"), 60) or "ai"
         kind = _text(item.get("kind"), 60) or "technical"
-        response_type = _text(item.get("responseType"), 60)
+        response_type = normalize_response_type(_text(item.get("responseType"), 60))
         if not response_type:
             response_type = (
                 "fixed_form"
@@ -955,6 +1082,30 @@ class PiWritingOrchestrator:
             warnings.append("卷规划未返回有效卷，已使用单卷逻辑分组。")
         outline_bundle = dict(parse_bundle)
         outline_bundle["plannedVolumes"] = planned_volumes
+
+        policy = resolve_policy()
+        outline_tools = ""
+        outline_extensions: tuple[str, ...] = ()
+        outline_env: dict[str, str] = {}
+        if policy["enabled"]:
+            extension = extension_path()
+            if extension.is_file():
+                context_path = write_context(
+                    build_context(
+                        outline_bundle,
+                        existing_plan,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        policy=policy,
+                    )
+                )
+                outline_tools = OUTLINE_TOOL_ALLOWLIST
+                outline_extensions = (str(extension),)
+                outline_env = {"BID_OUTLINE_CONTEXT": str(context_path)}
+            else:
+                warnings.append(
+                    "未找到目录规划工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。"
+                )
         outline_raw = run_agent(
             "OutlinePlanAgent",
             lambda: self.client.plan_outline_agent(
@@ -962,6 +1113,9 @@ class PiWritingOrchestrator:
                 existing_plan=existing_plan,
                 workspace_id=workspace_id,
                 project_id=project_id,
+                tools=outline_tools,
+                extensions=outline_extensions,
+                env_extra=outline_env,
             ),
             ["parse:ParseBundle", "writing:plannedVolumes", "workspace:existingPlan"],
         )
@@ -993,7 +1147,16 @@ class PiWritingOrchestrator:
         plan = reconcile_plan_with_submission_structure(
             plan,
             {**parsed_structure, "volumes": planned_volumes},
+            keep_derived=policy["enabled"],
         )
+        if policy["enabled"]:
+            dropped = _dropped_derived_titles(plan, outline_raw)
+            if dropped:
+                warnings.append(
+                    "目录智能体新增的 %d 个章节未通过放置规则被丢弃（%s）："
+                    "它们必须挂在既有卷下或可承载正文的文件项下。"
+                    % (len(dropped), "、".join(dropped[:6]))
+                )
         if not plan:
             raise PiWritingOrchestrationError(
                 "明确的投标文件格式未能生成有效卷内目录"
@@ -1010,9 +1173,12 @@ class PiWritingOrchestrator:
             )
             for item in plan
         )
+        # 智能体据证据新增的叙述章节本身就直接挂在卷下（level=2），也算“卷内成章”。
+        has_derived_section = any(item.get("derived") for item in plan)
         if (
             len(requirement_ids) > 1
             and has_narrative_item
+            and not has_derived_section
             and not any(
                 item.get("level", 1) >= 3
                 and item.get("responseType") != "section_group"
@@ -1042,6 +1208,9 @@ class PiWritingOrchestrator:
                     existing_plan=[],
                     workspace_id=workspace_id,
                     project_id=project_id,
+                    tools=outline_tools,
+                    extensions=outline_extensions,
+                    env_extra=outline_env,
                 ),
                 ["parse:outlineInstructionContext", "writing:outlineQualityFeedback"],
             )
@@ -1054,6 +1223,7 @@ class PiWritingOrchestrator:
                 retry_plan = reconcile_plan_with_submission_structure(
                     retry_plan,
                     {**parsed_structure, "volumes": planned_volumes},
+                    keep_derived=policy["enabled"],
                 )
                 retry_plan, retry_volume_warnings = arrange_volumes(
                     retry_plan, {**parsed_structure, "volumes": planned_volumes}
@@ -1075,6 +1245,22 @@ class PiWritingOrchestrator:
         if successful_agents == 0:
             raise PiWritingOrchestrationError("Pi 撰写编排没有任何子智能体成功")
 
+        derived_sections = [item for item in plan if item.get("derived")]
+        if outline_env.get("BID_OUTLINE_CONTEXT"):
+            shutil.rmtree(
+                Path(outline_env["BID_OUTLINE_CONTEXT"]).parent,
+                ignore_errors=True,
+            )
+        if derived_sections:
+            warnings.append(
+                "目录智能体新增 %d 个章节（%s）。"
+                % (
+                    len(derived_sections),
+                    "、".join(
+                        str(item.get("title") or "") for item in derived_sections[:8]
+                    ),
+                )
+            )
         return {
             "plan": plan,
             "coverage": [],
@@ -1086,6 +1272,16 @@ class PiWritingOrchestrator:
             "phase": "outline",
             "requirementMappingStatus": "pending",
             "requirementMapBatchCount": 0,
+            "derivedSections": [
+                {
+                    "sectionId": str(item.get("sectionId") or ""),
+                    "title": str(item.get("title") or ""),
+                    "origin": str(item.get("derivedOrigin") or ""),
+                    "archetype": str(item.get("derivedArchetype") or ""),
+                    "basis": str(item.get("derivedBasis") or ""),
+                }
+                for item in derived_sections
+            ],
         }
 
     def map_requirement_coverage(
