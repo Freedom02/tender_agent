@@ -1,0 +1,26 @@
+{
+  "说明": "提示词构造函数输出的 sha256 基线；改动提示词后必须重新生成并在提交信息说明原因。",
+  "fixtures": "generate_prompt_baseline.py 内置的确定性夹具",
+  "prompts": {
+    "compliance_review_prompt": "387ba100f897059673b5dde751b689405abf82cc127264d8ce0cd7a6a545f83d",
+    "document_structure_prompt": "662ca456a8b8c8c83adc3ddad4e416da849ddd62aea7c39bdf041c40990149c0",
+    "evaluation_extract_prompt": "b4bb69698b6ddd1c53c44889ed51d7ba9dd5d5cdfd4a7443265454619754a1b0",
+    "material_match_prompt": "1d8e59d2526c1338633635b98f98ce03a94c984995cc51c169dff136064bf706",
+    "outline_plan_prompt": "7628cd613162d775e50123e040d84cd9192526098fbb7ca7d249a11bedffb8d9",
+    "parse_prompt": "8d8c76a90b150a136883373b0c8d8c2e8b37e4aabb9ea1aeb2c78a3d5a825788",
+    "parse_review_prompt": "c7de731e2bacd0efea2097eff654989aa46b37c1b257d2381628f96059f03a42",
+    "plan_prompt": "036a305d7413b42d0ad0142e13bda14d4f5632c78db9acaf28acfbd600de13b8",
+    "project_meta_prompt": "b3142dea4d1647040f7434775d0cd7b98847d8b4d596ca16497e13f674ec714a",
+    "requirement_extract_prompt": "cb289930cea06b506ea3fd13328a37b01d81b6c5a088412ae7ac068389eb5c53",
+    "requirement_map_prompt": "770e783e33b5f47599b33a3ddb88a15efa66b55f2f332e2362cc15c8d81e68eb",
+    "requirement_response_table_prompt": "795ae416e54407a875de19a8d6a7e5e63b84dd62bc8e768dd0650a2c7b4c8d39",
+    "section_draft_prompt": "09a83ae14c8bd6a681325908fbc492c4a3dd1037fa3d4eca2065c55a261d3194",
+    "section_plan_prompt": "d99383ae1b73a875fce12f76ffa29041c3915113f60b12549867db22692319fb",
+    "section_prompt": "9c10373262de1e74051a0ea8525044bb04443a135037d84400606d9205180710",
+    "section_rewrite_prompt": "3ca04731ec4db962baf009cd4a59132ce55e31d1071aeaf7924d3536fff506a8",
+    "table_form_fill_prompt": "5dbe7058f2757b2cb80de907ca5f32dce70fae5cb3db5962d9cb51fae6f6c637",
+    "template_detect_prompt": "29af95931371fd255e7c32a5638bcaefe3398935e92f7b41200d82428156725c",
+    "volume_plan_prompt": "df375fd4cd98f70deabd91458367641c8cd6d6cb644267a40d2dc2b9f4ba42f1"
+  },
+  "skipped": []
+}
