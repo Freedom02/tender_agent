@@ -41,6 +41,7 @@ from backend.app.agent_runtime.validation import (
     validation_warnings,
 )
 from backend.app.pi_agent.config import PiConfig
+from backend.app.pi_agent import prompts as prompt_module
 from backend.app.pi_agent.prompts import requirement_map_prompt, volume_plan_prompt
 from backend.app.pi_agent.transport import (
     PiError,
@@ -535,5 +536,616 @@ class CommandArgvTests(unittest.TestCase):
         self.assertEqual(call["env_extra"], {"BID_OUTLINE_CONTEXT": "/tmp/ctx.json"})
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 偏差清单：示例 schema ↔ 真实输出的字段级对比
+# ══════════════════════════════════════════════════════════════════════
+
+#: VolumePlanAgent 的示例 schema **没有独立常量**（样例内联在 plan.py 的提示词正文第 135 行），
+#: 这里按原文抄录。若将来补了 `VOLUME_PLAN_SCHEMA` 常量，请改成引用它（用例会提醒）。
+VOLUME_PLAN_INLINE_SCHEMA: dict[str, Any] = {
+    "volumes": [
+        {
+            "volumeId": "volume-01",
+            "title": "文件名称",
+            "order": 1,
+            "kind": "commercial",
+            "sourceLocator": "原文定位",
+        }
+    ],
+    "warnings": [],
+}
+
+#: artifact → 给模型看的示例 schema（出处见 specs.ARTIFACT_SCHEMA_SOURCES）
+EXAMPLE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "documentStructure": prompt_module.DOCUMENT_STRUCTURE_SCHEMA,
+    "projectMeta": prompt_module.PROJECT_META_SCHEMA,
+    "requirements": prompt_module.REQUIREMENT_SCHEMA,
+    "evaluationItems": prompt_module.EVALUATION_SCHEMA,
+    "bidFormatSpec": prompt_module.TEMPLATE_SCHEMA,
+    "parseReviewReport": prompt_module.PARSE_REVIEW_SCHEMA,
+    "volumePlan": VOLUME_PLAN_INLINE_SCHEMA,
+    "outlinePlan": prompt_module.OUTLINE_PLAN_SCHEMA,
+    "requirementCoverage": prompt_module.REQUIREMENT_MAP_SCHEMA,
+    "materialMatches": prompt_module.MATERIAL_MATCH_SCHEMA,
+    "writingPlan": prompt_module.SECTION_PLAN_SCHEMA,
+    "sectionContent": prompt_module.SECTION_DRAFT_SCHEMA,
+    "templateFragmentFields": prompt_module.TABLE_FORM_FILL_SCHEMA,
+    "requirementResponseRows": prompt_module.REQUIREMENT_RESPONSE_TABLE_SCHEMA,
+    "complianceFindings": prompt_module.COMPLIANCE_REVIEW_SCHEMA,
+}
+
+NUMBER = "number"
+ANY_TYPE = "any"
+
+#: 提示词里**明确枚举**过的字段（plan.py 规则 9 / 16）：出现枚举外的值一律算偏差。
+#: 这是方案 §3.1「枚举归一化必须集中实现」的真实依据——真实数据里
+#: 同一个 agent 两次运行分别给出 `chapter_text` 与 `narrative`。
+SCHEMA_ENUMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "outlinePlan": {
+        "source": ("template", "table", "ai", "deviation", "attachment", "copied_template"),
+        "responseType": (
+            "section_group",
+            "chapter_text",
+            "fixed_form",
+            "table",
+            "attachment",
+            "deviation",
+        ),
+        "kind": ("commercial", "technical", "deviation", "attachment"),
+    },
+}
+
+#: 这些键是「外壳」或运行期附加信息，比对时不算偏差
+IGNORED_KEYS = frozenset(
+    {"agentResults", "validation", "runState", "provider", "model", "runId"}
+)
+
+
+def type_name(value: Any) -> str:
+    """给示例值与真实值统一的类型名（bool 必须先判，它是 int 的子类）。"""
+
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return NUMBER
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def expected_type(example: Any) -> str:
+    """示例里的 None 表示「可能是任意值/未知」，不做类型比对。"""
+
+    return ANY_TYPE if example is None else type_name(example)
+
+
+def _item_key_stats(schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """条目级比对：示例里「每个条目都有」的键，在真实条目里缺了多少条。"""
+
+    stats: dict[str, Any] = {
+        "listKey": "",
+        "itemCount": 0,
+        "common": [],
+        "missing": {},
+        "extra": {},
+        "items": [],
+    }
+    for key, example in schema.items():
+        if not isinstance(example, list) or not example:
+            continue
+        actual = payload.get(key)
+        if not isinstance(actual, list) or not actual:
+            continue
+        example_dicts = [item for item in example if isinstance(item, dict)]
+        if not example_dicts:
+            continue
+        actual_dicts = [item for item in actual if isinstance(item, dict)]
+        common = [k for k in example_dicts[0] if all(k in item for item in example_dicts)]
+        union = {k for item in example_dicts for k in item}
+        stats["listKey"] = key
+        stats["itemCount"] = len(actual)
+        stats["nonObjectItems"] = len(actual) - len(actual_dicts)
+        stats["common"] = common
+        stats["missing"] = {
+            k: sum(1 for item in actual_dicts if k not in item) for k in common
+        }
+        extra: dict[str, int] = {}
+        for item in actual_dicts:
+            for k in item:
+                if k not in union:
+                    extra[k] = extra.get(k, 0) + 1
+        stats["extra"] = extra
+        stats["items"] = actual_dicts
+        break
+    return stats
+
+
+def enum_violations(artifact: str, items: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """统计越出提示词枚举的取值（如 responseType=narrative、source=ai_derived）。"""
+
+    enums = SCHEMA_ENUMS.get(artifact) or {}
+    result: dict[str, dict[str, int]] = {}
+    for field, allowed in enums.items():
+        counts: dict[str, int] = {}
+        for item in items:
+            if field not in item:
+                continue
+            value = str(item.get(field) or "")
+            if value not in allowed:
+                counts[value] = counts.get(value, 0) + 1
+        if counts:
+            result[field] = counts
+    return result
+
+
+def compare_with_example(agent_id: str, payload: Any) -> dict[str, Any]:
+    """把一个真实返回与它的示例 schema 逐字段比对。"""
+
+    artifact = artifact_for(agent_id)
+    schema = EXAMPLE_SCHEMAS.get(artifact)
+    result: dict[str, Any] = {
+        "agentId": agent_id,
+        "artifact": artifact,
+        "checked": schema is not None,
+        "empty": False,
+        "topMissing": [],
+        "topTypeMismatch": [],
+        "unknownTop": [],
+        "emptyLists": [],
+        "item": {},
+    }
+    if schema is None:
+        return result
+    if not isinstance(payload, dict) or not payload:
+        result["empty"] = True
+        return result
+
+    for key, example in schema.items():
+        if key not in payload:
+            result["topMissing"].append(key)
+            continue
+        expected = expected_type(example)
+        actual = type_name(payload[key])
+        if expected != ANY_TYPE and expected != actual:
+            result["topTypeMismatch"].append({"key": key, "expected": expected, "actual": actual})
+        elif isinstance(example, list) and example and not payload[key]:
+            # 示例给了条目、实际是空数组：类型对但产物缺失（不算 schema_invalid）
+            result["emptyLists"].append(key)
+    result["unknownTop"] = [
+        key for key in payload if key not in schema and key not in IGNORED_KEYS
+    ]
+    result["item"] = _item_key_stats(schema, payload)
+    result["enumViolations"] = enum_violations(artifact, result["item"].get("items") or [])
+    return result
+
+
+def collect_agent_records(path: Path = WORKSPACES_JSON) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """扫 6 个真实工作区的 `bidDocument.agentResults`（含章节级挂载的记录）。"""
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    facts: dict[str, Any] = {"workspaces": 0, "withDocument": 0, "titles": [], "containers": []}
+    records: list[dict[str, Any]] = []
+    for workspace_id, workspace in data.items():
+        facts["workspaces"] += 1
+        if not isinstance(workspace, dict):
+            continue
+        document = workspace.get("bidDocument") if isinstance(workspace.get("bidDocument"), dict) else None
+        if not document:
+            continue
+        facts["withDocument"] += 1
+        facts["titles"].append(str(workspace.get("title") or workspace_id))
+
+        def take(value: Any, source: str) -> None:
+            if not isinstance(value, list):
+                return
+            facts["containers"].append({"source": source, "count": len(value)})
+            for record in value:
+                if isinstance(record, dict):
+                    records.append({**record, "source": source, "workspaceId": workspace_id})
+
+        take(document.get("agentResults"), f"{workspace_id}.bidDocument.agentResults")
+        for item in document.get("plan") or []:
+            if not isinstance(item, dict):
+                continue
+            take(
+                item.get("agentResults"),
+                f"{workspace_id}.bidDocument.plan[{item.get('sectionId')}].agentResults",
+            )
+    return facts, records
+
+
+def scan_deviations(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """按智能体聚合偏差：顶层缺键、类型不符、条目缺键、未知键、空产物。"""
+
+    per_agent: dict[str, Any] = {}
+    for record in records:
+        agent_id = str(record.get("agentId") or "")
+        comparison = compare_with_example(agent_id, record.get("output"))
+        comparison["status"] = str(record.get("status") or "")
+        comparison["source"] = str(record.get("source") or "")
+        bucket = per_agent.setdefault(
+            agent_id,
+            {
+                "artifact": comparison["artifact"],
+                "records": 0,
+                "empty": 0,
+                "failed": 0,
+                "items": 0,
+                "topMissing": {},
+                "topTypeMismatch": [],
+                "emptyLists": {},
+                "enumViolations": {},
+                "itemMissing": {},
+                "itemExtra": {},
+                "unknownTop": {},
+                "comparisons": [],
+            },
+        )
+        bucket["records"] += 1
+        bucket["empty"] += 1 if comparison["empty"] else 0
+        bucket["failed"] += 1 if comparison["status"] == "failed" else 0
+        bucket["items"] += int(comparison["item"].get("itemCount") or 0)
+        for key in comparison["topMissing"]:
+            bucket["topMissing"][key] = bucket["topMissing"].get(key, 0) + 1
+        for key in comparison["emptyLists"]:
+            bucket["emptyLists"][key] = bucket["emptyLists"].get(key, 0) + 1
+        for field, counts in (comparison.get("enumViolations") or {}).items():
+            field_counts = bucket["enumViolations"].setdefault(field, {})
+            for value, count in counts.items():
+                field_counts[value] = field_counts.get(value, 0) + count
+        bucket["topTypeMismatch"].extend(comparison["topTypeMismatch"])
+        for key, count in (comparison["item"].get("missing") or {}).items():
+            if count:
+                bucket["itemMissing"][key] = bucket["itemMissing"].get(key, 0) + count
+        for key, count in (comparison["item"].get("extra") or {}).items():
+            bucket["itemExtra"][key] = bucket["itemExtra"].get(key, 0) + count
+        for key in comparison["unknownTop"]:
+            bucket["unknownTop"][key] = bucket["unknownTop"].get(key, 0) + 1
+        bucket["comparisons"].append(comparison)
+    return {"perAgent": per_agent, "recordCount": len(records)}
+
+
+def scan_persisted_artifacts(path: Path = WORKSPACES_JSON) -> list[dict[str, Any]]:
+    """参考对照：落盘产物（经 Python 归一化）里与示例 schema 的偏差。
+
+    与 `agentResults` 的区别必须记住：`bidDocument.plan` 已经被 `arrange_volumes` /
+    `reconcile_plan_with_submission_structure` 处理过，缺键可能是归一化造成的，
+    因此只能作为参考证据，不能当成模型输出偏差。
+    """
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    findings: list[dict[str, Any]] = []
+    for workspace_id, workspace in data.items():
+        if not isinstance(workspace, dict):
+            continue
+        document = workspace.get("bidDocument") if isinstance(workspace.get("bidDocument"), dict) else None
+        if not document:
+            continue
+        source = f"{workspace_id}.bidDocument"
+        plan = [item for item in document.get("plan") or [] if isinstance(item, dict)]
+        if plan:
+            findings.append(
+                {
+                    "label": f"{source}.plan（{len(plan)} 项，来源 {document.get('planSource')}）",
+                    "artifact": "outlinePlan",
+                    "comparison": compare_with_example(
+                        "OutlinePlanAgent",
+                        {"plan": plan, "warnings": document.get("planningWarnings") or []},
+                    ),
+                }
+            )
+        fill_sections = [
+            item
+            for item in plan
+            if item.get("templateFillProvider") or item.get("templateFieldValues") is not None
+        ]
+        for item in fill_sections:
+            findings.append(
+                {
+                    "label": (
+                        f"{source}.plan[{item.get('sectionId')}]"
+                        f"（provider={item.get('templateFillProvider')}，"
+                        f"status={item.get('templateFillStatus')}）"
+                    ),
+                    "artifact": "templateFragmentFields",
+                    # 用该章节真实落盘的字段拼出「模板填充产物」，不用构造值充数：
+                    # templateFieldValues/templateCellValues/blanksToFill 都是落盘字段。
+                    "comparison": compare_with_example(
+                        "TableFormFillAgent",
+                        {
+                            "templateId": item.get("templateId") or "",
+                            "sectionId": item.get("sectionId") or "",
+                            "status": item.get("templateFillStatus") or "",
+                            "fieldValues": item.get("templateFieldValues") or [],
+                            "cellValues": item.get("templateCellValues") or [],
+                            "blanksToFill": item.get("blanksToFill") or [],
+                            "warnings": item.get("templateFillWarnings") or [],
+                        },
+                    ),
+                }
+            )
+    return findings
+
+
+def _counter_lines(counter: dict[str, int], total: int, unit: str) -> list[str]:
+    if not counter:
+        return ["    （无）"]
+    return [
+        f"    - {key}: {count}/{total} {unit}"
+        for key, count in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+
+
+def render_report(facts: dict[str, Any], scanned: dict[str, Any], persisted: list[dict[str, Any]]) -> str:
+    """把扫描结果渲染成可贴进交付报告的中文清单。"""
+
+    lines: list[str] = []
+    lines.append("# 示例 schema ↔ 真实输出偏差清单（Wave 1 · A）")
+    lines.append("")
+    lines.append("## 1. 数据面")
+    lines.append("")
+    lines.append(f"- 工作区总数：{facts['workspaces']}，其中带 `bidDocument` 的：{facts['withDocument']}")
+    lines.append(f"- agentResults 容器：{len(facts['containers'])} 个，原始返回记录：{scanned['recordCount']} 条")
+    for container in facts["containers"]:
+        lines.append(f"  - {container['source']}：{container['count']} 条")
+    lines.append("")
+    lines.append("## 2. 按智能体聚合的偏差")
+    lines.append("")
+    for agent_id, bucket in sorted(scanned["perAgent"].items()):
+        lines.append(f"### {agent_id}（artifact={bucket['artifact'] or '未登记'}）")
+        lines.append("")
+        lines.append(
+            f"- 记录 {bucket['records']} 条（失败 {bucket['failed']}，空产物 {bucket['empty']}），"
+            f"列表项合计 {bucket['items']} 个"
+        )
+        lines.append("- 顶层缺键（示例有、实际无）：")
+        lines.extend(_counter_lines(bucket["topMissing"], bucket["records"], "条记录"))
+        if bucket["topTypeMismatch"]:
+            lines.append("- 顶层类型不符：")
+            for issue in bucket["topTypeMismatch"][:8]:
+                lines.append(
+                    f"    - {issue['key']}: 期望 {issue['expected']}，实际 {issue['actual']}"
+                )
+        lines.append("- 示例有条目但实际为空数组的键：")
+        lines.extend(_counter_lines(bucket["emptyLists"], bucket["records"], "条记录"))
+        lines.append("- 条目缺键（示例里每个条目都给的键）：")
+        lines.extend(_counter_lines(bucket["itemMissing"], bucket["items"], "个条目"))
+        lines.append("- 条目多给的键（示例里没有，属容忍范围）：")
+        lines.extend(_counter_lines(bucket["itemExtra"], bucket["items"], "个条目"))
+        lines.append("- 枚举越界（提示词里明确枚举过的字段取了别的值）：")
+        if not bucket["enumViolations"]:
+            lines.append("    （无）")
+        for field, counts in sorted(bucket["enumViolations"].items()):
+            detail = "、".join(f"{value}（{count} 项）" for value, count in sorted(counts.items(), key=lambda p: -p[1]))
+            lines.append(f"    - {field}: {detail}")
+        lines.append("")
+    lines.append("## 3. 落盘产物参考对照（已经过 Python 归一化，仅作参考）")
+    lines.append("")
+    for finding in persisted:
+        comparison = finding["comparison"]
+        missing = comparison["item"].get("missing") or {}
+        lines.append(f"- {finding['label']}")
+        if comparison["empty"]:
+            lines.append("    - 产物为空")
+        if missing:
+            lines.append(
+                "    - 条目缺键：" +
+                "、".join(
+                    f"{key} 缺 {count}/{comparison['item'].get('itemCount')}"
+                    for key, count in sorted(missing.items(), key=lambda pair: -pair[1])
+                    if count
+                )
+            )
+        if comparison["topMissing"]:
+            lines.append(f"    - 顶层缺键：{'、'.join(comparison['topMissing'])}")
+        if comparison["emptyLists"]:
+            lines.append(f"    - 示例有条目但实际为空：{'、'.join(comparison['emptyLists'])}")
+    lines.append("")
+    lines.append("## 4. 这些偏差会被形态表记下来吗")
+    lines.append("")
+    lines.append(
+        "（真实偏差 ≠ schema_invalid：形态表有意只收「关键字段」，其余偏差进的是这份清单）"
+    )
+    lines.append("")
+    for agent_id, bucket in sorted(scanned["perAgent"].items()):
+        artifact = bucket["artifact"]
+        shape = ARTIFACT_SHAPES.get(artifact)
+        if shape is None:
+            lines.append(f"- {agent_id} / {artifact}：**没有形态表**")
+            continue
+        required = list(shape.item_fields) + [
+            "/".join(group) for group in shape.item_any_fields
+        ]
+        blind = [
+            key for key, count in (bucket["itemMissing"] or {}).items() if count and key not in shape.item_fields
+        ]
+        notes = [f"形态表必需字段={required or '（无）'}"]
+        if blind:
+            notes.append(f"真实缺的 {'、'.join(sorted(blind))} 不在必需字段里（不会被记成 schema_invalid）")
+        if bucket["enumViolations"]:
+            notes.append(
+                "枚举越界（" + "、".join(sorted(bucket["enumViolations"])) + "）目前没有任何检查"
+            )
+        if not shape.list_required:
+            notes.append("list_required=False：整体为空/失败返回的 `{}` 也不会被记")
+        lines.append(f"- {agent_id} / {artifact}：" + "；".join(notes))
+    lines.append("")
+    lines.append("## 5. 覆盖缺口")
+    lines.append("")
+    uncovered = [
+        spec.agent_id
+        for spec in AGENT_SPECS
+        if spec.agent_id not in scanned["perAgent"]
+    ]
+    lines.append(f"- 本批真实数据里没有返回记录的智能体（{len(uncovered)}/{len(AGENT_SPECS)}）：")
+    for agent_id in uncovered:
+        spec = resolve_spec(agent_id)
+        lines.append(f"  - {agent_id}（{spec.title}，artifact={spec.artifact}）")
+    return "\n".join(lines)
+
+
+def run_scan() -> int:
+    """`python -m backend.tests.test_agent_contracts --scan`：出偏差清单。"""
+
+    if not WORKSPACES_JSON.is_file():
+        print(f"没有找到真实数据：{WORKSPACES_JSON}（worktree 的 runtime/ 需要灌样本）")
+        return 1
+    facts, records = collect_agent_records()
+    scanned = scan_deviations(records)
+    persisted = scan_persisted_artifacts()
+    print(render_report(facts, scanned, persisted))
+    print("")
+    print("## 6. 典型例子")
+    print("")
+    for agent_id, bucket in sorted(scanned["perAgent"].items()):
+        typical = next(
+            (
+                item
+                for item in bucket["comparisons"]
+                if item["topMissing"] or item["item"].get("missing")
+            ),
+            bucket["comparisons"][0],
+        )
+        missing = {k: v for k, v in (typical["item"].get("missing") or {}).items() if v}
+        print(
+            f"- {agent_id} @ {typical['source']}：顶层缺键={typical['topMissing'] or '无'}，"
+            f"条目 {typical['item'].get('itemCount')} 个，缺键计数={missing or '无'}，"
+            f"枚举越界={typical.get('enumViolations') or '无'}"
+        )
+    return 0
+
+
+class DeviationScanTests(unittest.TestCase):
+    """偏差扫描器的正确性（用合成数据）＋真实数据可用性（缺数据时 skip）。"""
+
+    def test_every_artifact_has_an_example_schema(self) -> None:
+        self.assertEqual(sorted(EXAMPLE_SCHEMAS), sorted(ARTIFACT_SHAPES))
+
+    def test_schema_table_matches_the_prompt_constants(self) -> None:
+        """示例 schema 必须直接引用提示词常量，不许在测试里另抄一份。"""
+
+        for artifact, schema in EXAMPLE_SCHEMAS.items():
+            if artifact == "volumePlan":
+                continue
+            # 出处可能写成「A / B」（两个形态共用一段产物），取第一个常量名
+            source = ARTIFACT_SCHEMA_SOURCES[artifact].split(" / ")[0].split(".")[-1]
+            self.assertIs(schema, getattr(prompt_module, source), artifact)
+
+    def test_volume_plan_schema_is_still_inlined_in_the_prompt(self) -> None:
+        """已记录的契约缺口：VolumePlanAgent 的示例 schema 只有内联样例，没有常量。"""
+
+        self.assertFalse(
+            hasattr(prompt_module, "VOLUME_PLAN_SCHEMA"),
+            "补了常量就该改成本文件引用它，并更新偏差清单里的这一条",
+        )
+        self.assertIn("volumes", VOLUME_PLAN_INLINE_SCHEMA)
+
+    def test_scanner_flags_missing_keys_and_type_mismatch(self) -> None:
+        comparison = compare_with_example(
+            "OutlinePlanAgent",
+            {
+                "plan": [
+                    {"sectionId": "t-01", "title": "技术方案", "level": 2, "order": "1"},
+                ]
+            },
+        )
+        # 顶层：示例里的 warnings 没给（outlinePlan 的示例每个条目都有它）
+        self.assertEqual(comparison["topMissing"], ["warnings"])
+        self.assertEqual(comparison["topTypeMismatch"], [], "顶层类型都对，问题在条目级")
+        missing = {key: count for key, count in comparison["item"]["missing"].items() if count}
+        self.assertEqual(missing.get("parentSectionId"), 1)
+        self.assertEqual(missing.get("responseType"), 1)
+        self.assertNotIn("title", missing, "条目给了的键不该算缺")
+
+    def test_scanner_flags_top_level_type_mismatch(self) -> None:
+        comparison = compare_with_example("OutlinePlanAgent", {"plan": {"不是": "数组"}})
+        self.assertEqual(
+            comparison["topTypeMismatch"],
+            [{"key": "plan", "expected": "array", "actual": "object"}],
+        )
+
+    def test_scanner_ignores_unknown_keys_and_runtime_sections(self) -> None:
+        comparison = compare_with_example(
+            "OutlinePlanAgent",
+            {
+                "plan": [{"title": "技术方案", "未来新增字段": 1}],
+                "warnings": [],
+                "validation": {"ok": True},
+                "runState": {"node": {}},
+            },
+        )
+        self.assertEqual(comparison["topMissing"], [])
+        self.assertEqual(comparison["unknownTop"], [])
+        self.assertEqual(comparison["topTypeMismatch"], [])
+
+    def test_scanner_reports_empty_output(self) -> None:
+        comparison = compare_with_example("RequirementResponseTableAgent", {})
+        self.assertTrue(comparison["empty"])
+
+    def test_scanner_flags_empty_list_where_the_example_has_items(self) -> None:
+        """示例给了条目、实际是空数组：类型正确但产物没出来。"""
+
+        comparison = compare_with_example(
+            "RequirementResponseTableAgent", {"rows": [], "warnings": []}
+        )
+        self.assertEqual(comparison["emptyLists"], ["rows"])
+        self.assertEqual(comparison["topTypeMismatch"], [])
+        self.assertFalse(comparison["empty"])
+
+    def test_scanner_flags_enum_violations(self) -> None:
+        """枚举越界是真实存在的（§3.1 要求集中归一化），必须被扫出来。"""
+
+        comparison = compare_with_example(
+            "OutlinePlanAgent",
+            {
+                "plan": [
+                    {"title": "技术方案", "source": "ai_derived", "responseType": "narrative", "kind": "technical"},
+                    {"title": "合规章节", "source": "ai", "responseType": "chapter_text", "kind": "technical"},
+                ],
+                "warnings": [],
+            },
+        )
+        self.assertEqual(comparison["enumViolations"]["source"], {"ai_derived": 1})
+        self.assertEqual(comparison["enumViolations"]["responseType"], {"narrative": 1})
+        self.assertNotIn("kind", comparison["enumViolations"])
+
+    def test_schema_objects_are_not_shared_mutable_state(self) -> None:
+        """扫描器只读示例 schema，不许就地改写它。"""
+
+        before = json.dumps(prompt_module.OUTLINE_PLAN_SCHEMA, ensure_ascii=False, sort_keys=True)
+        compare_with_example("OutlinePlanAgent", {"plan": [{"title": "技术方案"}]})
+        after = json.dumps(prompt_module.OUTLINE_PLAN_SCHEMA, ensure_ascii=False, sort_keys=True)
+        self.assertEqual(before, after)
+
+    @unittest.skipUnless(WORKSPACES_JSON.is_file(), "本机没有 runtime/workspaces.json，跳过真实数据扫描")
+    def test_real_workspaces_scan_runs_and_covers_the_recorded_agents(self) -> None:
+        facts, records = collect_agent_records()
+        self.assertEqual(facts["workspaces"], 6, "本机样本应有 6 个真实工作区")
+        self.assertTrue(records, "worktree 里应该已经灌过真实工作区样本")
+        scanned = scan_deviations(records)
+        self.assertEqual(sum(item["records"] for item in scanned["perAgent"].values()), len(records))
+        self.assertEqual(
+            [agent for agent, bucket in scanned["perAgent"].items() if not bucket["artifact"]],
+            [],
+            "真实数据里出现了未登记（或未声明 artifact）的智能体",
+        )
+        for bucket in scanned["perAgent"].values():
+            for comparison in bucket["comparisons"]:
+                self.assertTrue(comparison["checked"], comparison["agentId"])
+
+
 if __name__ == "__main__":
+    if "--scan" in sys.argv:
+        sys.exit(run_scan())
     unittest.main()
