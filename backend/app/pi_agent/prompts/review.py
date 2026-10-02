@@ -32,6 +32,40 @@ from ._shared import (  # noqa: F401  （star import 不带下划线前缀的私
 
 
 
+# ── 本阶段示例 schema（给模型看的输出样例，不是 JSON Schema）──────
+COMPLIANCE_REVIEW_SCHEMA = {
+    "status": "needs_review",
+    "summary": "需要人工复核的风险摘要",
+    "coverage": {
+        "requirementTotal": 0,
+        "requirementCovered": 0,
+        "mandatoryTotal": 0,
+        "mandatoryCovered": 0,
+        "evaluationTotal": 0,
+        "evaluationCovered": 0,
+        "uncoveredRequirementIds": [],
+        "uncoveredEvaluationIds": [],
+    },
+    "riskItems": [
+        {
+            "riskId": "risk-001",
+            "level": "高",
+            "category": "漏响应",
+            "title": "风险标题",
+            "detail": "风险说明",
+            "sectionId": "",
+            "requirementId": "",
+            "evaluationId": "",
+            "sourceLocator": "",
+            "suggestion": "处理建议",
+            "sourceRefs": [],
+        }
+    ],
+    "warnings": [],
+}
+
+
+
 def compliance_review_prompt(
     *,
     parse_bundle: dict[str, Any],

@@ -32,6 +32,205 @@ from ._shared import (  # noqa: F401  （star import 不带下划线前缀的私
 
 
 
+# ── 本阶段示例 schema（给模型看的输出样例，不是 JSON Schema）──────
+DOCUMENT_STRUCTURE_SCHEMA = {
+    "sections": [
+        {
+            "sectionId": "doc-sec-001",
+            "title": "第三章 评标办法",
+            "level": 1,
+            "startPage": 1,
+            "endPage": 1,
+            "sourceLocator": "第三章 评标办法",
+            "blockIds": [],
+            "sectionType": "evaluation",
+        }
+    ],
+    "warnings": [],
+}
+
+EVALUATION_SCHEMA = {
+    "evaluationItems": [
+        {
+            "id": "eval-001",
+            "category": "technical",
+            "score": None,
+            "criterion": "",
+            "criteria": "",
+            "writingFocus": "",
+            "sourceLocator": "",
+            "relatedRequirementIds": [],
+        }
+    ],
+    "warnings": [],
+}
+
+PARSE_REVIEW_SCHEMA = {
+    "status": "pass_with_warnings",
+    "confidence": 0.0,
+    "missingFields": [],
+    "warnings": [],
+    "riskItems": [
+        {
+            "level": "medium",
+            "title": "",
+            "detail": "",
+            "sourceLocator": "",
+        }
+    ],
+}
+
+PARSE_SCHEMA = {
+    "projectMeta": {
+        "projectName": "",
+        "projectCode": "",
+        "tendererName": "",
+        "agencyName": "",
+        "budget": "",
+        "deadline": "",
+    },
+    "outline": [
+        {
+            "sectionId": "t-01",
+            "title": "项目理解",
+            "kind": "technical",
+            "source": "ai",
+            "requirementIds": [],
+        }
+    ],
+    "requirements": [
+        {
+            "id": "req-001",
+            "category": "technical",
+            "requirement": "",
+            "mandatory": False,
+            "isRejection": False,
+            "sourceLocator": "",
+            "status": "待核验",
+            "rawText": "",
+            "section": "",
+        }
+    ],
+    "evaluationItems": [
+        {
+            "factor": "",
+            "item": "",
+            "score": None,
+            "criteria": "",
+            "sourceLocator": "",
+        }
+    ],
+    "riskItems": [
+        {
+            "level": "高",
+            "title": "",
+            "detail": "",
+            "sourceLocator": "",
+        }
+    ],
+    "warnings": [],
+}
+
+PROJECT_META_SCHEMA = {
+    "projectMeta": {
+        "projectName": "",
+        "projectCode": "",
+        "tendererName": "",
+        "agencyName": "",
+        "budget": "",
+        "deadline": "",
+        "deliveryPeriod": "",
+        "serviceLocation": "",
+    },
+    "sourceRefs": [],
+    "warnings": [],
+}
+
+REQUIREMENT_SCHEMA = {
+    "requirements": [
+        {
+            "id": "req-001",
+            "category": "technical",
+            "requirement": "",
+            "mandatory": False,
+            "isRejection": False,
+            "importance": "medium",
+            "responseType": "chapter_text",
+            "sourceLocator": "",
+            "sourceSection": "",
+            "sourceText": "",
+            "suggestedEvidence": [],
+        }
+    ],
+    "warnings": [],
+}
+
+TEMPLATE_SCHEMA = {
+    "hasExplicitFormat": False,
+    "formatSourceSection": "",
+    "submissionStructure": {
+        "mode": "unspecified",
+        "confidence": "unknown",
+        "sourceLocator": "",
+        "volumes": [
+            {
+                "volumeId": "volume-01",
+                "title": "技术文件",
+                "order": 1,
+                "required": True,
+                "sourceLocator": "",
+                "formatItemIds": [],
+                "items": [
+                    {
+                        "formatItemId": "volume-01-01",
+                        "title": "",
+                        "order": 1,
+                        "required": True,
+                        "conditional": False,
+                        "conditionText": "",
+                        "itemType": "fixed_form",
+                        "responseType": "fixed_form",
+                        "templateType": "fixed_template",
+                        "templateId": "tpl-volume-01-01",
+                        "sourceLocator": "",
+                    }
+                ],
+            }
+        ],
+        "warnings": [],
+    },
+    "requiredOutline": [
+        {
+            "formatItemId": "fmt-001",
+            "volumeId": "volume-01",
+            "title": "",
+            "type": "free_text",
+            "responseType": "chapter_text",
+            "required": True,
+            "conditional": False,
+            "conditionText": "",
+            "sourceLocator": "",
+            "templateId": "",
+            "templateType": "",
+        }
+    ],
+    "templates": [
+        {
+            "templateId": "tpl-001",
+            "title": "",
+            "templateType": "fixed_template",
+            "sourceLocator": "",
+            "editableFields": [],
+            "lockedBlocks": [],
+            "blocks": [],
+        }
+    ],
+    "requiredTables": [],
+    "warnings": [],
+}
+
+
+
 def document_structure_prompt(
     *,
     document_text: str,

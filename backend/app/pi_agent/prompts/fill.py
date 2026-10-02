@@ -32,6 +32,48 @@ from ._shared import (  # noqa: F401  （star import 不带下划线前缀的私
 
 
 
+# ── 本阶段示例 schema（给模型看的输出样例，不是 JSON Schema）──────
+REQUIREMENT_RESPONSE_TABLE_SCHEMA = {
+    "rows": [
+        {
+            "requirementId": "req-001",
+            "response": "逐条、简洁、可核验的投标响应",
+        }
+    ],
+    "warnings": [],
+}
+
+TABLE_FORM_FILL_SCHEMA = {
+    "templateId": "tpl-001",
+    "sectionId": "c-01",
+    "status": "completed",
+    "fieldValues": [
+        {
+            "fieldId": "field-001",
+            "label": "项目名称",
+            "sourceKey": "projectName",
+            "value": "",
+            "status": "filled",
+            "sourceRefs": [],
+        }
+    ],
+    "cellValues": [
+        {
+            "tableId": "TABLE-001",
+            "rowIndex": 1,
+            "cellIndex": 2,
+            "label": "",
+            "value": "",
+            "status": "filled",
+            "sourceRefs": [],
+        }
+    ],
+    "blanksToFill": [],
+    "warnings": [],
+}
+
+
+
 def table_form_fill_prompt(
     *,
     parse_bundle: dict[str, Any],

@@ -32,6 +32,94 @@ from ._shared import (  # noqa: F401  （star import 不带下划线前缀的私
 
 
 
+# ── 本阶段示例 schema（给模型看的输出样例，不是 JSON Schema）──────
+OUTLINE_PLAN_SCHEMA = {
+    "plan": [
+        {
+            "sectionId": "volume-technical",
+            "volumeId": "volume-technical",
+            "nodeType": "volume",
+            "parentSectionId": "",
+            "level": 1,
+            "order": 1,
+            "title": "技术文件",
+            "source": "template",
+            "kind": "technical",
+            "required": True,
+            "responseType": "section_group",
+            "requirementIds": ["req-001"],
+            "evaluationIds": ["eval-001"],
+            "templateId": "",
+            "sourceSectionId": "",
+            "sourceLocator": "",
+        },
+        {
+            "sectionId": "t-01",
+            "parentSectionId": "volume-technical",
+            "level": 2,
+            "order": 1,
+            "title": "项目理解",
+            "source": "ai",
+            "kind": "technical",
+            "required": True,
+            "responseType": "chapter_text",
+            "requirementIds": ["req-001"],
+            "evaluationIds": [],
+            "templateId": "",
+        },
+        {
+            "sectionId": "t-02",
+            "parentSectionId": "t-01-09",
+            "level": 3,
+            "order": 1,
+            "title": "技术方案",
+            "source": "ai",
+            "kind": "technical",
+            "required": False,
+            "responseType": "chapter_text",
+            "requirementIds": ["technical-0001", "technical-0007"],
+            "evaluationIds": [],
+            "templateId": "",
+            "derived": True,
+            "derivedOrigin": "required_by_tender",
+            "derivedArchetype": "technical_plan",
+            "derivedBasis": "technical-0001~technical-0018 共 18 条技术功能与性能条款，现仅有技术响应表承载",
+        },
+        {
+            "sectionId": "t-01-01",
+            "parentSectionId": "t-01",
+            "level": 3,
+            "order": 1,
+            "title": "项目需求理解",
+            "source": "ai",
+            "kind": "technical",
+            "responseType": "chapter_text",
+            "requirementIds": [],
+            "evaluationIds": [],
+            "templateId": "",
+        },
+    ],
+    "warnings": [],
+}
+
+REQUIREMENT_MAP_SCHEMA = {
+    "coverage": [
+        {
+            "requirementId": "req-001",
+            "sectionId": "t-01",
+            "coverageType": "chapter_text",
+            "status": "planned",
+            "evaluationIds": ["eval-001"],
+            "reason": "",
+        }
+    ],
+    "uncoveredRequirements": [],
+    "duplicatedRequirements": [],
+    "warnings": [],
+}
+
+
+
 def volume_plan_prompt(
     *,
     parse_bundle: dict[str, Any],

@@ -32,6 +32,96 @@ from ._shared import (  # noqa: F401  （star import 不带下划线前缀的私
 
 
 
+# ── 本阶段示例 schema（给模型看的输出样例，不是 JSON Schema）──────
+MATERIAL_MATCH_SCHEMA = {
+    "matches": [
+        {
+            "requirementId": "req-001",
+            "materialIds": ["qualification-001"],
+            "materialRefs": [
+                {
+                    "materialId": "qualification-001",
+                    "factKey": "qualifications",
+                    "name": "",
+                    "evidencePath": "",
+                }
+            ],
+            "matchStatus": "matched",
+            "evidenceSummary": "",
+            "missingReason": "",
+        }
+    ],
+    "unmatchedRequirementIds": [],
+    "warnings": [],
+}
+
+SECTION_DRAFT_SCHEMA = {
+    "sectionId": "t-02",
+    "title": "技术方案",
+    "content": "Markdown 正文",
+    "sourceRefs": [
+        {
+            "factKey": "",
+            "factId": "",
+            "name": "",
+            "evidencePath": "",
+        }
+    ],
+    "status": "generated",
+    "warnings": [],
+}
+
+SECTION_PLAN_SCHEMA = {
+    "sectionId": "t-02",
+    "title": "技术方案",
+    "objective": "",
+    "requirementResponses": [
+        {
+            "requirementId": "req-001",
+            "responseStrategy": "",
+            "mustInclude": [],
+            "materialIds": [],
+            "risk": "",
+        }
+    ],
+    "evaluationResponses": [
+        {
+            "evaluationId": "eval-001",
+            "focus": "",
+            "evidenceIds": [],
+        }
+    ],
+    "outline": [
+        {
+            "heading": "1.1 响应说明",
+            "purpose": "",
+            "requirementIds": [],
+        }
+    ],
+    "templateInstructions": [],
+    "warnings": [],
+}
+
+SECTION_REWRITE_SCHEMA = {
+    "sectionId": "t-02",
+    "operation": "append",
+    "content": "",
+    "replacement": "新增或替换的 Markdown 片段",
+    "sourceRefs": [
+        {
+            "factKey": "",
+            "factId": "",
+            "name": "",
+            "evidencePath": "",
+        }
+    ],
+    "changed": True,
+    "blanksToFill": [],
+    "warnings": [],
+}
+
+
+
 def material_match_prompt(
     *,
     parse_bundle: dict[str, Any],
