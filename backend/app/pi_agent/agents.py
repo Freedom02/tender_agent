@@ -631,8 +631,10 @@ class PiAgentMethods:
         `list_chapters` 取、候选由 `validate_coverage_candidate` 自检。
 
         输出 JSON 的字段名与旧提示词完全一致（`REQUIREMENT_MAP_SCHEMA` 原样内联）。
-        工具扩展缺失或策略关掉时，退回**逐字节相同**的旧提示词（`requirement_map_prompt`），
-        保证任何环境都不会因为这次改造而失去可用路径。
+        工具扩展缺失或工具调用失败时，退回**逐字节相同**的旧提示词
+        （`requirement_map_prompt`），保证任何环境都不会因为这次改造而失去可用路径。
+        但模型/网关的策略拦截不能用更长的 legacy 提示词重试：要带脱敏的
+        ``failure_kind=policy_blocked`` 原样交给上层处理。
         """
 
         import json
@@ -672,14 +674,32 @@ class PiAgentMethods:
                 return any(is_policy_blocked(item) for item in value)
             return "policy_blocked" in str(value or "").lower()
 
-        def add_warning(raw: Any, message: str) -> dict[str, Any]:
-            result = dict(raw) if isinstance(raw, dict) else {}
-            warnings = result.get("warnings")
-            result["warnings"] = [
-                *(warnings if isinstance(warnings, list) else []),
-                message,
-            ]
-            return result
+        def error_is_policy_blocked(error: BaseException) -> bool:
+            """兼容 A 合入后的 PolicyBlockedError / failure_kind 契约。"""
+
+            failure_kind = getattr(error, "failure_kind", "")
+            return (
+                str(failure_kind or "").strip().lower() == "policy_blocked"
+                or error.__class__.__name__ == "PolicyBlockedError"
+                or is_policy_blocked(error)
+            )
+
+        def policy_blocked_error() -> PiError:
+            """构造仅含用户可理解信息的拦截错误，不透传模型原始诊断。"""
+
+            message = "条款映射请求被模型策略拦截，未生成映射结果。请调整输入后重试。"
+            try:
+                # A 分支尚未合并时这里仍是 PiError；合入后无需改本方法即可
+                # 复用 A 提供的 PolicyBlockedError 类型。
+                from . import transport as pi_transport
+
+                error_type = getattr(pi_transport, "PolicyBlockedError", PiError)
+                error = error_type(message)
+            except (AttributeError, TypeError):
+                error = PiError(message)
+            setattr(error, "failure_kind", "policy_blocked")
+            setattr(error, "safe_message", message)
+            return error
 
         if policy["enabled"] and not extension.is_file():
             fallback_warning = "未找到条款映射工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。"
@@ -838,26 +858,27 @@ class PiAgentMethods:
                     call_env=env_extra,
                 )
             except PiError as exc:
+                if error_is_policy_blocked(exc):
+                    logger.warning(
+                        "requirement_map_policy_blocked",
+                        extra={"failure_kind": "policy_blocked"},
+                    )
+                    raise policy_blocked_error() from None
                 if not tools:
                     raise
-                if "policy_blocked" in str(exc).lower():
-                    fallback_warning = "模型拒绝了只读工具策略（policy_blocked），已回退 legacy 路径。"
-                else:
-                    fallback_warning = "只读工具调用不可用，已回退 legacy 路径。"
+                fallback_warning = "只读工具调用不可用，已回退 legacy 路径。"
                 raw = run_and_record(
                     legacy_prompt(),
                     call_tools="",
                     call_extensions=(),
                     call_env={},
                 )
-            if tools and is_policy_blocked(raw):
-                fallback_warning = "模型返回 policy_blocked，已回退 legacy 路径。"
-                raw = run_and_record(
-                    legacy_prompt(),
-                    call_tools="",
-                    call_extensions=(),
-                    call_env={},
+            if is_policy_blocked(raw):
+                logger.warning(
+                    "requirement_map_policy_blocked",
+                    extra={"failure_kind": "policy_blocked"},
                 )
+                raise policy_blocked_error()
         finally:
             if context_path is not None:
                 import shutil
@@ -871,5 +892,9 @@ class PiAgentMethods:
                     except OSError:
                         pass
         if fallback_warning:
-            return add_warning(raw, fallback_warning)
+            warnings = raw.get("warnings") if isinstance(raw, dict) else None
+            raw["warnings"] = [
+                *(warnings if isinstance(warnings, list) else []),
+                fallback_warning,
+            ]
         return raw

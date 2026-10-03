@@ -448,14 +448,97 @@ class MapRequirementsPathTests(unittest.TestCase):
             raw.get("warnings"),
         )
 
-    def test_policy_blocked_response_falls_back_to_legacy(self) -> None:
+    def test_policy_blocked_response_is_propagated_without_legacy_retry(self) -> None:
+        secret = "sk-policy-response-secret-0123456789"
+        agent = _RecordingAgent(
+            results=[
+                {
+                    "failure_kind": "policy_blocked",
+                    "detail": f"{_MARKER} {secret}",
+                }
+            ]
+        )
+        with self.assertLogs("backend.app.pi_agent.agents", level="WARNING") as logs:
+            with self.assertRaises(PiError) as raised:
+                agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        error = raised.exception
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(agent.calls[0]["tools"], MAP_TOOL_ALLOWLIST)
+        self.assertEqual(getattr(error, "failure_kind", ""), "policy_blocked")
+        self.assertEqual(getattr(error, "safe_message", ""), str(error))
+        self.assertNotIn(_MARKER, str(error))
+        self.assertNotIn(secret, str(error))
+        log_output = "\n".join(logs.output)
+        self.assertIn("requirement_map_policy_blocked", log_output)
+        self.assertNotIn(_MARKER, log_output)
+        self.assertNotIn(secret, log_output)
+
+    def test_policy_blocked_error_metadata_is_propagated_without_legacy_retry(self) -> None:
+        secret = "sk-policy-error-secret-0123456789"
+        blocked = PiError(f"gateway detail: {_MARKER} {secret}")
+        setattr(blocked, "failure_kind", "policy_blocked")
+        agent = _RecordingAgent(results=[blocked])
+        with self.assertLogs("backend.app.pi_agent.agents", level="WARNING") as logs:
+            with self.assertRaises(PiError) as raised:
+                agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(getattr(raised.exception, "failure_kind", ""), "policy_blocked")
+        self.assertNotIn(_MARKER, str(raised.exception))
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(_MARKER, "\n".join(logs.output))
+        self.assertNotIn(secret, "\n".join(logs.output))
+
+    def test_future_policy_blocked_error_type_is_reused_when_available(self) -> None:
+        FuturePolicyBlockedError = type("PolicyBlockedError", (PiError,), {})
+        agent = _RecordingAgent(results=[FuturePolicyBlockedError("provider blocked")])
+        with mock.patch(
+            "backend.app.pi_agent.transport.PolicyBlockedError",
+            FuturePolicyBlockedError,
+            create=True,
+        ):
+            with self.assertRaises(FuturePolicyBlockedError) as raised:
+                agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(getattr(raised.exception, "failure_kind", ""), "policy_blocked")
+
+    def test_legacy_policy_blocked_response_is_still_sanitized_without_retry(self) -> None:
+        agent = _RecordingAgent(results=[{"error": "policy_blocked"}])
+        with mock.patch.dict(os.environ, {"BID_REQUIREMENT_MAP_POLICY": "legacy"}):
+            with self.assertRaises(PiError) as raised:
+                agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(agent.calls[0]["prompt"], self._legacy_prompt())
+        self.assertEqual(agent.calls[0]["tools"], "")
+        self.assertEqual(getattr(raised.exception, "failure_kind", ""), "policy_blocked")
+
+    def test_generic_tool_error_falls_back_to_legacy_once(self) -> None:
         expected = {
             "coverage": [],
             "uncoveredRequirements": [],
             "duplicatedRequirements": [],
             "warnings": [],
         }
-        agent = _RecordingAgent(results=[{"error": "policy_blocked"}, expected])
+        agent = _RecordingAgent(results=[PiError("tool extension unavailable"), expected])
         raw = agent.map_requirements(
             parse_bundle=self.bundle,
             outline_plan=self.plan,
@@ -468,25 +551,7 @@ class MapRequirementsPathTests(unittest.TestCase):
         self.assertEqual(agent.calls[1]["tools"], "")
         self.assertEqual(agent.calls[1]["extensions"], ())
         self.assertEqual(agent.calls[1]["env_extra"], {})
-        self.assertTrue(any("policy_blocked" in str(item) for item in raw["warnings"]))
-
-    def test_policy_blocked_error_falls_back_to_legacy(self) -> None:
-        expected = {
-            "coverage": [],
-            "uncoveredRequirements": [],
-            "duplicatedRequirements": [],
-            "warnings": [],
-        }
-        agent = _RecordingAgent(results=[PiError("policy_blocked by provider"), expected])
-        raw = agent.map_requirements(
-            parse_bundle=self.bundle,
-            outline_plan=self.plan,
-            workspace_id="ws-test",
-            project_id="proj-test",
-        )
-        self.assertEqual(len(agent.calls), 2)
-        self.assertEqual(agent.calls[1]["prompt"], self._legacy_prompt())
-        self.assertTrue(any("policy_blocked" in str(item) for item in raw["warnings"]))
+        self.assertTrue(any("只读工具调用不可用" in str(item) for item in raw["warnings"]))
 
     def test_tool_and_legacy_coverage_pairs_match_for_same_fixture(self) -> None:
         result = {
