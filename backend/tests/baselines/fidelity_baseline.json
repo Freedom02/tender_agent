@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "sha256": {
-    "evidence": "18baa21eba467221f85e13759ad4925e1cd230ccc9b041a853bb69d7c9104a2f",
+    "evidence": "9aec8000d7de008640d06084521b1d26286df046452a8a4573d2513dc86582c5",
     "responseTable": "7c974b5447ae2eb34158d09a73611f698204cf19cb53ce4836899d6ebfd320ed",
     "template": "257907c6667cb909a1a0e38526a0eab5da2eba3e920694c3e31997b936515dc8"
   },
@@ -15,16 +15,58 @@
           "word/media/image1.png",
           "word/media/image2.png"
         ],
-        "expectedSha256": [
-          "fc54c6f131a4f66882b48d837ef6d53f9a11898780c41b90e4b314e86ebbc043",
-          "e1b398b04d932183be8fcf1db72cd080f20bf62d477605f114439e8762b0d14e"
+        "expectedImages": [
+          {
+            "format": "PNG",
+            "mode": "RGB",
+            "pixelByteCount": 1200000,
+            "pixelSha256": "69e6b86a156b7c1e6d1791161affadbed55b7427e5c9745afb92cfeaf83908ce",
+            "size": [
+              800,
+              500
+            ]
+          },
+          {
+            "format": "PNG",
+            "mode": "RGB",
+            "pixelByteCount": 1200000,
+            "pixelSha256": "1b7f176b772dd8c1f4a0ce2cfccfe7a452769f381fe1405ce6aa1fad67b7e68b",
+            "size": [
+              800,
+              500
+            ]
+          }
+        ],
+        "images": [
+          {
+            "format": "PNG",
+            "mode": "RGB",
+            "name": "word/media/image1.png",
+            "pixelByteCount": 1200000,
+            "pixelSha256": "69e6b86a156b7c1e6d1791161affadbed55b7427e5c9745afb92cfeaf83908ce",
+            "size": [
+              800,
+              500
+            ]
+          },
+          {
+            "format": "PNG",
+            "mode": "RGB",
+            "name": "word/media/image2.png",
+            "pixelByteCount": 1200000,
+            "pixelSha256": "1b7f176b772dd8c1f4a0ce2cfccfe7a452769f381fe1405ce6aa1fad67b7e68b",
+            "size": [
+              800,
+              500
+            ]
+          }
         ],
         "mediaCount": 2,
-        "missingHasNoPageImages": true,
-        "sha256": [
-          "fc54c6f131a4f66882b48d837ef6d53f9a11898780c41b90e4b314e86ebbc043",
-          "e1b398b04d932183be8fcf1db72cd080f20bf62d477605f114439e8762b0d14e"
-        ]
+        "mediaNames": [
+          "word/media/image1.png",
+          "word/media/image2.png"
+        ],
+        "missingHasNoPageImages": true
       },
       "evidenceMarkers": [
         "证据原件见第 1 条：产品证明",

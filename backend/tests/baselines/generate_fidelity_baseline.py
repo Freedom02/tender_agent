@@ -15,6 +15,7 @@ from xml.etree import ElementTree
 
 from docx import Document
 from docx.oxml.ns import qn
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = Path(__file__).resolve().parent / "fidelity_baseline.json"
@@ -77,8 +78,23 @@ def _docx_snapshot(raw: bytes | str | Path) -> dict[str, Any]:
     return {"paragraphs": paragraphs, "tables": tables}
 
 
-def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
-    """Capture package media and relationship order for the evidence baseline."""
+def _stable_image_snapshot(raw: bytes) -> dict[str, Any]:
+    """Describe decoded pixels so the baseline ignores PNG encoder details."""
+
+    with Image.open(BytesIO(raw)) as image:
+        rgb = image.convert("RGB")
+        pixels = rgb.tobytes()
+        return {
+            "format": str(image.format or ""),
+            "mode": str(image.mode),
+            "size": [int(image.width), int(image.height)],
+            "pixelByteCount": len(pixels),
+            "pixelSha256": hashlib.sha256(pixels).hexdigest(),
+        }
+
+
+def _docx_media_snapshot(path: str | Path) -> dict[str, Any]:
+    """Capture media structure and decoded pixels for the evidence baseline."""
 
     rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
     doc_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -100,14 +116,14 @@ def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
             targets.get(blip.get(f"{{{rel_id}}}embed"), "")
             for blip in document.findall(f".//{{{doc_ns}}}blip")
         ]
-        hashes = [
-            hashlib.sha256(archive.read(name)).hexdigest()
+        images = [
+            {"name": name, **_stable_image_snapshot(archive.read(name))}
             for name in media_names
         ]
     return {
         "mediaNames": media_names,
         "embeddingOrder": embedding_order,
-        "sha256": hashes,
+        "images": images,
     }
 
 
@@ -323,12 +339,18 @@ def _evidence_snapshot() -> dict[str, Any]:
             if "产品证明" in paragraph or "证书证明" in paragraph or "待补证明" in paragraph
         ]
         media = _docx_media_snapshot(output["path"])
-        expected_media_hashes = [
-            hashlib.sha256(
+        expected_images = [
+            _stable_image_snapshot(
                 Path(fixture["assets"][fixture["refs"][key]]["fixture_page"]).read_bytes()
-            ).hexdigest()
+            )
             for key in ("readable", "second")
         ]
+        actual_images = [
+            {key: value for key, value in image.items() if key != "name"}
+            for image in media["images"]
+        ]
+        if actual_images != expected_images:
+            raise AssertionError("证据页图像素内容未完整进入最终 DOCX 媒体")
         return {
             "files": {
                 "readable": bool(fixture["assets"][fixture["refs"]["readable"]]["page_images"]),
@@ -353,9 +375,10 @@ def _evidence_snapshot() -> dict[str, Any]:
             ],
             "docxMedia": {
                 "mediaCount": len(media["mediaNames"]),
+                "mediaNames": media["mediaNames"],
                 "embeddingOrder": media["embeddingOrder"],
-                "sha256": media["sha256"],
-                "expectedSha256": expected_media_hashes,
+                "images": media["images"],
+                "expectedImages": expected_images,
                 "missingHasNoPageImages": not bool(
                     fixture["assets"][fixture["refs"]["unreadable"]]["page_images"]
                 ),

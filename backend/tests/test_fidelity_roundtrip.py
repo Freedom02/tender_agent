@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 from xml.etree import ElementTree
@@ -35,8 +36,23 @@ ROOT = Path(__file__).resolve().parents[2]
 BASELINE_GENERATOR = ROOT / "backend" / "tests" / "baselines" / "generate_fidelity_baseline.py"
 
 
-def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
-    """Return media package names, relationship order, and byte digests."""
+def _stable_image_snapshot(raw: bytes) -> dict[str, object]:
+    """Describe decoded pixels independently of the PNG encoder version."""
+
+    with Image.open(BytesIO(raw)) as image:
+        rgb = image.convert("RGB")
+        pixels = rgb.tobytes()
+        return {
+            "format": str(image.format or ""),
+            "mode": str(image.mode),
+            "size": [int(image.width), int(image.height)],
+            "pixelByteCount": len(pixels),
+            "pixelSha256": hashlib.sha256(pixels).hexdigest(),
+        }
+
+
+def _docx_media_snapshot(path: str | Path) -> dict[str, object]:
+    """Return media structure, raw digests, and stable decoded pixel snapshots."""
 
     rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
     doc_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -58,14 +74,17 @@ def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
             targets.get(blip.get(f"{{{rel_id}}}embed"), "")
             for blip in document.findall(f".//{{{doc_ns}}}blip")
         ]
-        hashes = [
-            hashlib.sha256(archive.read(name)).hexdigest()
-            for name in media_names
+        raw_media = [archive.read(name) for name in media_names]
+        hashes = [hashlib.sha256(raw).hexdigest() for raw in raw_media]
+        images = [
+            {"name": name, **_stable_image_snapshot(raw)}
+            for name, raw in zip(media_names, raw_media)
         ]
     return {
         "mediaNames": media_names,
         "embeddingOrder": embedding_order,
         "sha256": hashes,
+        "images": images,
     }
 
 
@@ -319,36 +338,100 @@ class FidelityRoundTripTests(unittest.TestCase):
             self.assertEqual(len(media["mediaNames"]), 2)
             self.assertEqual(len(media["embeddingOrder"]), 2)
             self.assertEqual(media["embeddingOrder"], media["mediaNames"])
-            expected_hashes = [
-                hashlib.sha256(
-                    Path(fixture["assets"][refs[key]]["fixture_page"]).read_bytes()
-                ).hexdigest()
+            source_pages = [
+                Path(fixture["assets"][refs[key]]["fixture_page"])
                 for key in ("readable", "second")
+            ]
+            expected_hashes = [
+                hashlib.sha256(page.read_bytes()).hexdigest() for page in source_pages
             ]
             self.assertEqual(media["sha256"], expected_hashes)
             self.assertEqual(media["sha256"].count(expected_hashes[0]), 1)
+            expected_images = [_stable_image_snapshot(page.read_bytes()) for page in source_pages]
+            actual_images = [
+                {key: value for key, value in image.items() if key != "name"}
+                for image in media["images"]
+            ]
+            self.assertEqual(actual_images, expected_images)
+            with ZipFile(output["path"]) as archive:
+                self.assertEqual(
+                    [archive.read(name) for name in media["embeddingOrder"]],
+                    [page.read_bytes() for page in source_pages],
+                )
             self.assertFalse(fixture["assets"][refs["unreadable"]]["page_images"])
 
     def test_pdf_asset_roundtrip_is_explicitly_skipped_without_pdfium(self) -> None:
-        """The optional PDF renderer is covered when pypdfium2 is available."""
+        """A rendered PDF page must survive evidence assembly into the final DOCX."""
 
         if importlib.util.find_spec("pypdfium2") is None:
             self.skipTest("pypdfium2 未安装，当前环境不宣称覆盖真实 PDF 转页")
+        from backend.app.bid_writing.evidence_assembler import assemble_evidence
         from backend.app.media_store.local import LocalFolderStore
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            pdf_path = root / "evidence" / "pdf-proof.pdf"
-            pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            pdf_folder = root / "evidence" / "pdf-proof"
+            pdf_path = pdf_folder / "pdf-proof.pdf"
+            pdf_folder.mkdir(parents=True, exist_ok=True)
             Image.new("RGB", (320, 220), (220, 235, 242)).save(pdf_path, format="PDF")
-            asset = LocalFolderStore(root).fetch(
-                {"evidencePath": str(pdf_path), "name": "PDF 证明"}
+            source_ref = {"evidencePath": str(pdf_folder), "name": "PDF 证明"}
+            assets = assemble_evidence(
+                [source_ref], LocalFolderStore(root)
             )
-            self.assertIsNotNone(asset)
-            assert asset is not None
-            self.assertEqual(asset.kind, "image")
-            self.assertEqual(len(asset.page_images), 1)
-            self.assertTrue(Path(asset.page_images[0]).is_file())
+            asset = assets[str(pdf_folder)]
+            asset["available"] = True
+            self.assertEqual(asset["kind"], "image")
+            self.assertEqual(len(asset["page_images"]), 1)
+            page_path = Path(asset["page_images"][0])
+            self.assertTrue(page_path.is_file())
+
+            chapter = build_evidence_chapter_result(
+                {"title": "PDF 证明材料"},
+                [
+                    {
+                        "sequence": 1,
+                        "requirementId": "REQ-PDF-001",
+                        "requirement": "PDF 证明页应进入最终响应文件。",
+                        "status": "ready",
+                        "sourceRefs": [source_ref],
+                        "materials": [],
+                    }
+                ],
+                assets,
+            )
+            output = assemble_docx(
+                {
+                    "title": "PDF 证据测试项目",
+                    "mode": "open",
+                    "plan": [
+                        {
+                            "sectionId": "pdf-evidence-01",
+                            "title": "PDF 证明材料",
+                            "responseType": "attachment",
+                            "content": chapter["content"],
+                            "evidenceGroups": chapter["evidenceGroups"],
+                            "sourceRefs": chapter["sourceRefs"],
+                        }
+                    ],
+                    "deviationTables": {"technical": [], "commercial": []},
+                },
+                root / "output",
+                assets=assets,
+            )
+            paragraphs = "\n".join(
+                paragraph.text for paragraph in Document(output["path"]).paragraphs
+            )
+            self.assertIn("图：PDF 证明", paragraphs)
+            media = _docx_media_snapshot(output["path"])
+            self.assertEqual(len(media["mediaNames"]), 1)
+            self.assertEqual(media["embeddingOrder"], media["mediaNames"])
+            self.assertEqual(
+                media["sha256"], [hashlib.sha256(page_path.read_bytes()).hexdigest()]
+            )
+            with ZipFile(output["path"]) as archive:
+                self.assertEqual(
+                    archive.read(media["mediaNames"][0]), page_path.read_bytes()
+                )
 
     def test_fidelity_baseline_is_reproducible_without_runtime_data(self) -> None:
         result = subprocess.run(

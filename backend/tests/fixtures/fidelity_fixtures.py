@@ -13,7 +13,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Pt
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 def _grid_span(cell: Any) -> str:
@@ -223,17 +223,65 @@ def response_table_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, A
     return section, fine_review, knowledge
 
 
+def _fill_pixels(
+    pixels: Any,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    color: tuple[int, int, int],
+) -> None:
+    """Fill an inclusive rectangle using Pillow's stable pixel API."""
+
+    for y in range(top, bottom + 1):
+        for x in range(left, right + 1):
+            pixels[x, y] = color
+
+
+def _draw_bit_label(
+    pixels: Any,
+    label: str,
+    left: int,
+    top: int,
+    scale: int,
+    color: tuple[int, int, int],
+) -> None:
+    """Encode ASCII labels as fixed bitmap bars without using a system font."""
+
+    cursor = left
+    for value in label.encode("ascii"):
+        for bit in range(8):
+            if value & (1 << bit):
+                _fill_pixels(
+                    pixels,
+                    cursor,
+                    top + bit * scale,
+                    cursor + scale - 1,
+                    top + (bit + 1) * scale - 1,
+                    color,
+                )
+        cursor += scale * 4
+
+
 def _write_scan_page(path: Path, label: str, fill: tuple[int, int, int]) -> Path:
-    """Create a deterministic raster scan page without committing binary fixtures."""
+    """Create a deterministic raster scan page without fonts or binary fixtures."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     image = Image.new("RGB", (800, 500), fill)
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((24, 24, 776, 476), outline=(25, 35, 45), width=4)
-    draw.rectangle((48, 108, 752, 392), outline=(75, 90, 105), width=2)
-    draw.text((64, 52), label, fill=(15, 25, 35))
-    draw.text((72, 150), "PROGRAMMATIC SCAN PAGE", fill=(35, 45, 55))
-    draw.text((72, 190), "FIDELITY-BASELINE / PAGE-01", fill=(35, 45, 55))
+    pixels = image.load()
+    ink = (25, 35, 45)
+    secondary = (75, 90, 105)
+    _fill_pixels(pixels, 24, 24, 775, 27, ink)
+    _fill_pixels(pixels, 24, 472, 775, 475, ink)
+    _fill_pixels(pixels, 24, 24, 27, 475, ink)
+    _fill_pixels(pixels, 772, 24, 775, 475, ink)
+    _fill_pixels(pixels, 48, 108, 751, 109, secondary)
+    _fill_pixels(pixels, 48, 390, 751, 391, secondary)
+    _fill_pixels(pixels, 48, 108, 49, 391, secondary)
+    _fill_pixels(pixels, 750, 108, 751, 391, secondary)
+    _draw_bit_label(pixels, label, 64, 52, 3, ink)
+    _draw_bit_label(pixels, "PROGRAMMATIC-SCAN-PAGE", 72, 150, 2, secondary)
+    _draw_bit_label(pixels, "FIDELITY-BASELINE-PAGE-01", 72, 210, 2, secondary)
     image.save(path, format="PNG", optimize=False)
     return path
 
