@@ -1,0 +1,610 @@
+{
+  "schemaVersion": "1.0",
+  "sha256": {
+    "evidence": "e8e3a082e7ec0528c123df471c81dcf4f685b0de655c97ceee90e35ee418b668",
+    "responseTable": "7c974b5447ae2eb34158d09a73611f698204cf19cb53ce4836899d6ebfd320ed",
+    "template": "257907c6667cb909a1a0e38526a0eab5da2eba3e920694c3e31997b936515dc8"
+  },
+  "snapshots": {
+    "evidence": {
+      "blanksToFill": [
+        "REQ-003：未命中可用企业证明材料"
+      ],
+      "evidenceMarkers": [
+        "证据原件见第 1 条：产品证明",
+        "【附件：产品证明（evidence/01-product.pdf，共 1 页）】",
+        "【附件：证书证明（evidence/02-certificate.pdf，共 1 页）】",
+        "【待补充证据：待补证明（evidence/03-missing.pdf，证据扫描件尚未补齐，请人工补充后再投标）】"
+      ],
+      "files": {
+        "readable": true,
+        "second": true,
+        "unreadable": false
+      },
+      "insertOrder": [
+        "evidence/01-product.pdf",
+        "evidence/02-certificate.pdf",
+        "evidence/03-missing.pdf"
+      ],
+      "reusedOrder": [
+        "evidence/01-product.pdf"
+      ],
+      "summary": {
+        "distinctEvidence": 3,
+        "missing": 1,
+        "ready": 2,
+        "scannedReady": 2,
+        "scannedTotal": 3,
+        "total": 3
+      }
+    },
+    "responseTable": {
+      "blanksToFill": [
+        "REQ-002：未命中可用企业材料"
+      ],
+      "mapped": {
+        "appendRowCount": 1,
+        "columns": {
+          "deviation": 4,
+          "remark": 5,
+          "requirement": 2,
+          "response": 3,
+          "sequence": 1
+        },
+        "mappedRowCount": 1,
+        "tableId": "TABLE-RESPONSE"
+      },
+      "markdownColumnCount": 5,
+      "outputRowCount": 2,
+      "preparedRowCount": 2,
+      "rows": [
+        {
+          "matchStatus": "满足",
+          "needsReview": false,
+          "requirementId": "REQ-001",
+          "response": "支持 SSO 单点登录。",
+          "sourceRefs": [
+            "evidence/product-001.pdf"
+          ]
+        },
+        {
+          "matchStatus": "部分满足",
+          "needsReview": true,
+          "requirementId": "REQ-002",
+          "response": "【需人工补充：未在 M3 中命中可支撑本条要求的材料】",
+          "sourceRefs": []
+        }
+      ],
+      "sourceRefCount": 1
+    },
+    "template": {
+      "export": {
+        "copiedTemplateCount": 1,
+        "document": {
+          "paragraphs": [
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "测试项目"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "投标响应文件"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": ""
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "目录"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "投标函"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "技术规格偏离表"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "商务偏离表"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "（目录需在 Word 中刷新域）"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": ""
+            },
+            {
+              "alignment": 1,
+              "bold": true,
+              "fontSize": 16.0,
+              "text": "投标函格式"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "项目名称：测试项目"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "投标人名称：测试企业"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "后续固定内容"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "技术规格偏离表"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "商务偏离表"
+            }
+          ],
+          "tables": [
+            {
+              "columnCount": 3,
+              "rowCount": 3,
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "2",
+                      "text": "固定表头",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "2",
+                      "text": "固定表头",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "填写项",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "项目名称",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "投标人名称",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "________",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "锁定文字",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "内部编号",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "________",
+                      "vMerge": ""
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "columnCount": 5,
+              "rowCount": 2,
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "序号",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "招标要求",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "偏离情况",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "响应说明",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "证据引用",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "（无偏离项）",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "columnCount": 5,
+              "rowCount": 2,
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "序号",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "招标要求",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "偏离情况",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "响应说明",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "证据引用",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "（无偏离项）",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "",
+                      "vMerge": ""
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "fill": {
+        "blanksToFill": [
+          "下划线空位"
+        ],
+        "content": "投标函格式\n项目名称：测试项目\n投标人名称：测试企业\n后续固定内容\n固定表头 | 固定表头 | 填写项\n项目名称 | 投标人名称 | ________\n锁定文字 | 内部编号 | ________\n\n| 固定表头 | 固定表头 | 填写项 |\n| --- | --- | --- |\n| 项目名称 | 投标人名称 | ________ |\n| 锁定文字 | 内部编号 | ________ |",
+        "fieldValues": [
+          {
+            "fieldId": "field-project",
+            "label": "项目名称",
+            "status": "filled",
+            "value": "测试项目"
+          },
+          {
+            "fieldId": "field-company",
+            "label": "投标人名称",
+            "status": "filled",
+            "value": "测试企业"
+          }
+        ],
+        "unknownValueAbsent": true
+      },
+      "fragment": {
+        "bindingStatus": "ready",
+        "bodyChildEnd": 5,
+        "bodyChildStart": 1,
+        "copyMode": "ooxml_body_range",
+        "editableFields": [
+          {
+            "fieldId": "field-project",
+            "label": "项目名称",
+            "sourceKey": "projectName"
+          },
+          {
+            "fieldId": "field-company",
+            "label": "投标人名称",
+            "sourceKey": "companyName"
+          }
+        ],
+        "fixedText": [
+          "投标函格式",
+          "后续固定内容",
+          "锁定文字"
+        ],
+        "styleAnchor": {
+          "alignment": "",
+          "bold": false,
+          "fontSize": null,
+          "styleId": "Normal"
+        },
+        "tableShape": [
+          {
+            "columnCount": 3,
+            "gridSpans": [
+              "2",
+              "2",
+              "1",
+              "1",
+              "1",
+              "1",
+              "1",
+              "1",
+              "1"
+            ],
+            "rowCount": 3
+          }
+        ]
+      },
+      "preview": {
+        "document": {
+          "paragraphs": [
+            {
+              "alignment": 1,
+              "bold": true,
+              "fontSize": 16.0,
+              "text": "投标函格式"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "项目名称：测试项目"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "投标人名称：测试企业"
+            },
+            {
+              "alignment": null,
+              "bold": false,
+              "fontSize": null,
+              "text": "后续固定内容"
+            }
+          ],
+          "tables": [
+            {
+              "columnCount": 3,
+              "rowCount": 3,
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "2",
+                      "text": "固定表头",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "2",
+                      "text": "固定表头",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "填写项",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "项目名称",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "投标人名称",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "________",
+                      "vMerge": ""
+                    }
+                  ]
+                },
+                {
+                  "cells": [
+                    {
+                      "gridSpan": "1",
+                      "text": "锁定文字",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "内部编号",
+                      "vMerge": ""
+                    },
+                    {
+                      "gridSpan": "1",
+                      "text": "________",
+                      "vMerge": ""
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "metadata": {
+          "paragraphs": [
+            {
+              "bodyChildIndex": 1,
+              "name": "codex_tpl_p_1"
+            },
+            {
+              "bodyChildIndex": 2,
+              "name": "codex_tpl_p_2"
+            },
+            {
+              "bodyChildIndex": 3,
+              "name": "codex_tpl_p_3"
+            },
+            {
+              "bodyChildIndex": 5,
+              "name": "codex_tpl_p_5"
+            }
+          ],
+          "tables": [
+            {
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "cellIndex": 1,
+                      "name": "codex_tpl_t_1_r_1_c_1"
+                    },
+                    {
+                      "cellIndex": 2,
+                      "name": "codex_tpl_t_1_r_1_c_2"
+                    }
+                  ],
+                  "rowIndex": 1
+                },
+                {
+                  "cells": [
+                    {
+                      "cellIndex": 1,
+                      "name": "codex_tpl_t_1_r_2_c_1"
+                    },
+                    {
+                      "cellIndex": 2,
+                      "name": "codex_tpl_t_1_r_2_c_2"
+                    },
+                    {
+                      "cellIndex": 3,
+                      "name": "codex_tpl_t_1_r_2_c_3"
+                    }
+                  ],
+                  "rowIndex": 2
+                },
+                {
+                  "cells": [
+                    {
+                      "cellIndex": 1,
+                      "name": "codex_tpl_t_1_r_3_c_1"
+                    },
+                    {
+                      "cellIndex": 2,
+                      "name": "codex_tpl_t_1_r_3_c_2"
+                    },
+                    {
+                      "cellIndex": 3,
+                      "name": "codex_tpl_t_1_r_3_c_3"
+                    }
+                  ],
+                  "rowIndex": 3
+                }
+              ],
+              "tableId": "TABLE-001",
+              "tableOrdinal": 1
+            }
+          ]
+        }
+      }
+    }
+  }
+}
