@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,6 +33,7 @@ from backend.app.pi_agent.agent_context import (
 )
 from backend.app.pi_agent.agents import PiAgentMethods
 from backend.app.pi_agent.prompts import requirement_map_prompt
+from backend.app.pi_agent.transport import PiError
 
 ROOT = Path(__file__).resolve().parents[2]
 _MARKER = "性能参数与实施要求持续稳定运行"
@@ -111,10 +113,11 @@ def _plan(count: int = 40) -> list[dict]:
 class _RecordingAgent(PiAgentMethods):
     """不启动 Pi：记录真实发送的提示词与启动参数。"""
 
-    def __init__(self, result: dict | None = None) -> None:
+    def __init__(self, result: dict | None = None, results: list[object] | None = None) -> None:
         self.calls: list[dict] = []
         self.context_snapshot: dict | None = None
         self.context_path: str = ""
+        self.results = list(results or [])
         self.result = result if isinstance(result, dict) else {
             "coverage": [],
             "uncoveredRequirements": [],
@@ -128,6 +131,11 @@ class _RecordingAgent(PiAgentMethods):
         if context_path:
             self.context_path = context_path
             self.context_snapshot = json.loads(Path(context_path).read_text(encoding="utf-8"))
+        if self.results:
+            result = self.results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return dict(result)  # type: ignore[arg-type]
         return dict(self.result)
 
 
@@ -413,6 +421,131 @@ class MapRequirementsPathTests(unittest.TestCase):
             any("未找到条款映射工具扩展" in str(item) for item in raw.get("warnings") or []),
             raw.get("warnings"),
         )
+
+    def test_unreadable_context_falls_back_and_reports_a_warning(self) -> None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="bid-map-unreadable-test-"))
+        missing = temp_dir / "no-such-bid-map-context.json"
+        try:
+            with mock.patch(
+                "backend.app.pi_agent.agent_context.write_context", return_value=missing
+            ):
+                agent = _RecordingAgent()
+                raw = agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        call = agent.calls[0]
+        self.assertEqual(call["prompt"], self._legacy_prompt())
+        self.assertEqual(call["tools"], "")
+        self.assertEqual(call["extensions"], ())
+        self.assertEqual(call["env_extra"], {})
+        self.assertTrue(
+            any("上下文不可读" in str(item) for item in raw.get("warnings") or []),
+            raw.get("warnings"),
+        )
+
+    def test_policy_blocked_response_falls_back_to_legacy(self) -> None:
+        expected = {
+            "coverage": [],
+            "uncoveredRequirements": [],
+            "duplicatedRequirements": [],
+            "warnings": [],
+        }
+        agent = _RecordingAgent(results=[{"error": "policy_blocked"}, expected])
+        raw = agent.map_requirements(
+            parse_bundle=self.bundle,
+            outline_plan=self.plan,
+            workspace_id="ws-test",
+            project_id="proj-test",
+        )
+        self.assertEqual(len(agent.calls), 2)
+        self.assertEqual(agent.calls[0]["tools"], MAP_TOOL_ALLOWLIST)
+        self.assertEqual(agent.calls[1]["prompt"], self._legacy_prompt())
+        self.assertEqual(agent.calls[1]["tools"], "")
+        self.assertEqual(agent.calls[1]["extensions"], ())
+        self.assertEqual(agent.calls[1]["env_extra"], {})
+        self.assertTrue(any("policy_blocked" in str(item) for item in raw["warnings"]))
+
+    def test_policy_blocked_error_falls_back_to_legacy(self) -> None:
+        expected = {
+            "coverage": [],
+            "uncoveredRequirements": [],
+            "duplicatedRequirements": [],
+            "warnings": [],
+        }
+        agent = _RecordingAgent(results=[PiError("policy_blocked by provider"), expected])
+        raw = agent.map_requirements(
+            parse_bundle=self.bundle,
+            outline_plan=self.plan,
+            workspace_id="ws-test",
+            project_id="proj-test",
+        )
+        self.assertEqual(len(agent.calls), 2)
+        self.assertEqual(agent.calls[1]["prompt"], self._legacy_prompt())
+        self.assertTrue(any("policy_blocked" in str(item) for item in raw["warnings"]))
+
+    def test_tool_and_legacy_coverage_pairs_match_for_same_fixture(self) -> None:
+        result = {
+            "coverage": [
+                {"requirementId": "technical-0001", "sectionId": "sec-02"},
+                {"requirementId": "technical-0002", "sectionId": "sec-03"},
+            ],
+            "uncoveredRequirements": [],
+            "duplicatedRequirements": [],
+            "warnings": [],
+        }
+        tool_result = _RecordingAgent(result=result).map_requirements(
+            parse_bundle=self.bundle,
+            outline_plan=self.plan,
+            workspace_id="ws-test",
+            project_id="proj-test",
+        )
+        with mock.patch.dict(os.environ, {"BID_REQUIREMENT_MAP_POLICY": "legacy"}):
+            legacy_result = _RecordingAgent(result=result).map_requirements(
+                parse_bundle=self.bundle,
+                outline_plan=self.plan,
+                workspace_id="ws-test",
+                project_id="proj-test",
+            )
+        def pairs(payload: dict) -> set[tuple[str, str]]:
+            return {
+                (str(row["sectionId"]), str(row["requirementId"]))
+                for row in payload.get("coverage") or []
+            }
+
+        self.assertEqual(pairs(tool_result), pairs(legacy_result))
+
+    def test_call_metrics_record_prompt_context_arguments_and_elapsed(self) -> None:
+        records: list[logging.LogRecord] = []
+        logger = logging.getLogger("backend.app.pi_agent.agents")
+        handler = logging.Handler()
+        handler.emit = records.append  # type: ignore[method-assign]
+        logger.addHandler(handler)
+        previous_level = logger.level
+        logger.setLevel(logging.INFO)
+        try:
+            agent = _RecordingAgent()
+            agent.map_requirements(
+                parse_bundle=self.bundle,
+                outline_plan=self.plan,
+                workspace_id="ws-test",
+                project_id="proj-test",
+            )
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertGreater(record.prompt_bytes, 0)
+        self.assertEqual(record.tools, MAP_TOOL_ALLOWLIST)
+        self.assertEqual(record.extensions, (str(extension_path()),))
+        self.assertEqual(record.env_keys, ["BID_MAP_CONTEXT"])
+        self.assertGreater(record.context_bytes, 0)
+        self.assertGreaterEqual(record.elapsed_ms, 0)
 
     def test_api_key_never_reaches_the_prompt_or_the_snapshot(self) -> None:
         secret = "sk-test-should-never-leak-0123456789"

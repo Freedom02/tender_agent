@@ -636,6 +636,8 @@ class PiAgentMethods:
         """
 
         import json
+        import logging
+        import time
 
         from .agent_context import (
             MAP_TOOL_ALLOWLIST,
@@ -646,25 +648,69 @@ class PiAgentMethods:
         )
         from .prompts import REQUIREMENT_MAP_SCHEMA
 
+        logger = logging.getLogger(__name__)
         policy = resolve_policy()
         extension = extension_path()
         context_path: Path | None = None
         tools = ""
         extensions: tuple[str, ...] = ()
         env_extra: dict[str, str] = {}
-        if policy["enabled"] and extension.is_file():
-            context_path = write_context(
-                build_context(
-                    parse_bundle,
-                    outline_plan,
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    policy=policy,
-                )
+        fallback_warning = ""
+
+        def legacy_prompt() -> str:
+            return requirement_map_prompt(
+                parse_bundle=parse_bundle,
+                outline_plan=outline_plan,
+                workspace_id=workspace_id,
+                project_id=project_id,
             )
-            tools = MAP_TOOL_ALLOWLIST
-            extensions = (str(extension),)
-            env_extra = {"BID_MAP_CONTEXT": str(context_path)}
+
+        def is_policy_blocked(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(is_policy_blocked(item) for item in value.values())
+            if isinstance(value, (list, tuple, set)):
+                return any(is_policy_blocked(item) for item in value)
+            return "policy_blocked" in str(value or "").lower()
+
+        def add_warning(raw: Any, message: str) -> dict[str, Any]:
+            result = dict(raw) if isinstance(raw, dict) else {}
+            warnings = result.get("warnings")
+            result["warnings"] = [
+                *(warnings if isinstance(warnings, list) else []),
+                message,
+            ]
+            return result
+
+        if policy["enabled"] and not extension.is_file():
+            fallback_warning = "未找到条款映射工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。"
+        elif policy["enabled"]:
+            try:
+                context_path = write_context(
+                    build_context(
+                        parse_bundle,
+                        outline_plan,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        policy=policy,
+                    )
+                )
+                # The extension runs in a child process. Verify the injected file
+                # is present and readable before advertising the tool path.
+                if not context_path.is_file():
+                    raise OSError(f"上下文文件不存在：{context_path}")
+                with context_path.open("rb") as context_file:
+                    context_file.read(1)
+            except OSError as exc:
+                fallback_warning = f"条款映射工具上下文不可读，已回退 legacy 路径：{exc}"
+                tools = ""
+                extensions = ()
+                env_extra = {}
+            else:
+                tools = MAP_TOOL_ALLOWLIST
+                extensions = (str(extension),)
+                env_extra = {"BID_MAP_CONTEXT": str(context_path)}
+
+        if tools:
 
             requirement_lines: list[str] = []
             for item in parse_bundle.get("requirements") or []:
@@ -752,27 +798,78 @@ class PiAgentMethods:
    保证整批输出能在一次回复里写完，不被截断。
 """.strip()
         else:
-            prompt = requirement_map_prompt(
-                parse_bundle=parse_bundle,
-                outline_plan=outline_plan,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            )
+            prompt = legacy_prompt()
+
+        context_bytes = 0
+        if context_path is not None and tools:
+            try:
+                context_bytes = context_path.stat().st_size
+            except OSError:
+                context_bytes = 0
+
+        def run_and_record(call_prompt: str, *, call_tools: str, call_extensions: tuple[str, ...], call_env: dict[str, str]) -> dict[str, Any]:
+            started = time.perf_counter()
+            try:
+                return self.run_json(
+                    call_prompt,
+                    tools=call_tools,
+                    extensions=call_extensions,
+                    env_extra=call_env,
+                )
+            finally:
+                logger.info(
+                    "requirement_map_call",
+                    extra={
+                        "prompt_bytes": len(call_prompt.encode("utf-8")),
+                        "tools": call_tools,
+                        "extensions": call_extensions,
+                        "env_keys": sorted(call_env),
+                        "context_bytes": context_bytes if call_tools else 0,
+                        "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+                    },
+                )
+
         try:
-            raw = self.run_json(
-                prompt,
-                tools=tools,
-                extensions=extensions,
-                env_extra=env_extra,
-            )
+            try:
+                raw = run_and_record(
+                    prompt,
+                    call_tools=tools,
+                    call_extensions=extensions,
+                    call_env=env_extra,
+                )
+            except PiError as exc:
+                if not tools:
+                    raise
+                if "policy_blocked" in str(exc).lower():
+                    fallback_warning = "模型拒绝了只读工具策略（policy_blocked），已回退 legacy 路径。"
+                else:
+                    fallback_warning = "只读工具调用不可用，已回退 legacy 路径。"
+                raw = run_and_record(
+                    legacy_prompt(),
+                    call_tools="",
+                    call_extensions=(),
+                    call_env={},
+                )
+            if tools and is_policy_blocked(raw):
+                fallback_warning = "模型返回 policy_blocked，已回退 legacy 路径。"
+                raw = run_and_record(
+                    legacy_prompt(),
+                    call_tools="",
+                    call_extensions=(),
+                    call_env={},
+                )
         finally:
             if context_path is not None:
                 import shutil
 
-                shutil.rmtree(Path(context_path).parent, ignore_errors=True)
-        if not tools and policy["enabled"] and isinstance(raw, dict):
-            raw["warnings"] = [
-                *(raw.get("warnings") if isinstance(raw.get("warnings"), list) else []),
-                "未找到条款映射工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。",
-            ]
+                context_dir = Path(context_path).parent
+                if context_dir.name.startswith("bid-map-context-"):
+                    shutil.rmtree(context_dir, ignore_errors=True)
+                else:
+                    try:
+                        context_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        if fallback_warning:
+            return add_warning(raw, fallback_warning)
         return raw
