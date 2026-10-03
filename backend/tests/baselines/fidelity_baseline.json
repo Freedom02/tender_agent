@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "sha256": {
-    "evidence": "e8e3a082e7ec0528c123df471c81dcf4f685b0de655c97ceee90e35ee418b668",
+    "evidence": "18baa21eba467221f85e13759ad4925e1cd230ccc9b041a853bb69d7c9104a2f",
     "responseTable": "7c974b5447ae2eb34158d09a73611f698204cf19cb53ce4836899d6ebfd320ed",
     "template": "257907c6667cb909a1a0e38526a0eab5da2eba3e920694c3e31997b936515dc8"
   },
@@ -10,11 +10,27 @@
       "blanksToFill": [
         "REQ-003：未命中可用企业证明材料"
       ],
+      "docxMedia": {
+        "embeddingOrder": [
+          "word/media/image1.png",
+          "word/media/image2.png"
+        ],
+        "expectedSha256": [
+          "fc54c6f131a4f66882b48d837ef6d53f9a11898780c41b90e4b314e86ebbc043",
+          "e1b398b04d932183be8fcf1db72cd080f20bf62d477605f114439e8762b0d14e"
+        ],
+        "mediaCount": 2,
+        "missingHasNoPageImages": true,
+        "sha256": [
+          "fc54c6f131a4f66882b48d837ef6d53f9a11898780c41b90e4b314e86ebbc043",
+          "e1b398b04d932183be8fcf1db72cd080f20bf62d477605f114439e8762b0d14e"
+        ]
+      },
       "evidenceMarkers": [
         "证据原件见第 1 条：产品证明",
-        "【附件：产品证明（evidence/01-product.pdf，共 1 页）】",
-        "【附件：证书证明（evidence/02-certificate.pdf，共 1 页）】",
-        "【待补充证据：待补证明（evidence/03-missing.pdf，证据扫描件尚未补齐，请人工补充后再投标）】"
+        "图：产品证明",
+        "图：证书证明",
+        "【待补充证据：待补证明（evidence/03-missing，证据扫描件尚未补齐，请人工补充后再投标）】"
       ],
       "files": {
         "readable": true,
@@ -22,12 +38,12 @@
         "unreadable": false
       },
       "insertOrder": [
-        "evidence/01-product.pdf",
-        "evidence/02-certificate.pdf",
-        "evidence/03-missing.pdf"
+        "evidence/01-product",
+        "evidence/02-certificate",
+        "evidence/03-missing"
       ],
       "reusedOrder": [
-        "evidence/01-product.pdf"
+        "evidence/01-product"
       ],
       "summary": {
         "distinctEvidence": 3,

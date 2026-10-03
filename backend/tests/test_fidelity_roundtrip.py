@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import importlib.util
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from zipfile import ZipFile
+from xml.etree import ElementTree
 
 from docx import Document
+from PIL import Image
 
 from backend.app.bid_writing.assemble import assemble_docx, render_template_preview_docx
 from backend.app.bid_writing.evidence_chapter import build_evidence_chapter_result
@@ -28,6 +33,40 @@ from backend.tests.fixtures.fidelity_fixtures import (
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_GENERATOR = ROOT / "backend" / "tests" / "baselines" / "generate_fidelity_baseline.py"
+
+
+def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
+    """Return media package names, relationship order, and byte digests."""
+
+    rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    doc_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    rel_id = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with ZipFile(path) as archive:
+        media_names = sorted(
+            name for name in archive.namelist() if name.startswith("word/media/")
+        )
+        relationships = ElementTree.fromstring(
+            archive.read("word/_rels/document.xml.rels")
+        )
+        targets = {
+            item.get("Id"): "word/" + str(item.get("Target") or "").lstrip("/")
+            for item in relationships.findall(f"{{{rel_ns}}}Relationship")
+            if str(item.get("Type") or "").endswith("/image")
+        }
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        embedding_order = [
+            targets.get(blip.get(f"{{{rel_id}}}embed"), "")
+            for blip in document.findall(f".//{{{doc_ns}}}blip")
+        ]
+        hashes = [
+            hashlib.sha256(archive.read(name)).hexdigest()
+            for name in media_names
+        ]
+    return {
+        "mediaNames": media_names,
+        "embeddingOrder": embedding_order,
+        "sha256": hashes,
+    }
 
 
 class FidelityRoundTripTests(unittest.TestCase):
@@ -210,9 +249,21 @@ class FidelityRoundTripTests(unittest.TestCase):
             root = Path(directory)
             fixture = evidence_fixture(root)
             refs = fixture["refs"]
-            self.assertTrue(Path(refs["readable"]).is_file())
-            self.assertTrue(Path(refs["second"]).is_file())
-            self.assertFalse(Path(refs["unreadable"]).is_file())
+            self.assertTrue(Path(refs["readable"]).is_dir())
+            self.assertTrue(Path(refs["second"]).is_dir())
+            self.assertTrue((Path(refs["readable"]) / "page-01.png").is_file())
+            self.assertTrue((Path(refs["second"]) / "page-01.png").is_file())
+            self.assertTrue((Path(refs["unreadable"]) / ".keep").is_file())
+            self.assertEqual(fixture["assets"][refs["readable"]]["kind"], "image")
+            self.assertEqual(fixture["assets"][refs["second"]]["kind"], "image")
+            self.assertEqual(
+                fixture["assets"][refs["readable"]]["page_images"],
+                [fixture["assets"][refs["readable"]]["fixture_page"]],
+            )
+            self.assertEqual(
+                fixture["assets"][refs["second"]]["page_images"],
+                [fixture["assets"][refs["second"]]["fixture_page"]],
+            )
 
             chapter = build_evidence_chapter_result(
                 {"title": "技术参数证明材料"}, fixture["entries"], fixture["assets"]
@@ -222,11 +273,11 @@ class FidelityRoundTripTests(unittest.TestCase):
             self.assertEqual(chapter["summary"]["missing"], 1)
             self.assertEqual(
                 [Path(ref["evidencePath"]).name for group in chapter["evidenceGroups"] for ref in group["insertRefs"]],
-                ["01-product.pdf", "02-certificate.pdf", "03-missing.pdf"],
+                ["01-product", "02-certificate", "03-missing"],
             )
             self.assertEqual(
                 [Path(ref["evidencePath"]).name for group in chapter["evidenceGroups"] for ref in group["reusedRefs"]],
-                ["01-product.pdf"],
+                ["01-product"],
             )
             self.assertIn("REQ-003", "\n".join(chapter["blanksToFill"]))
             self.assertFalse(fixture["assets"][refs["unreadable"]]["available"])
@@ -253,9 +304,51 @@ class FidelityRoundTripTests(unittest.TestCase):
                 assets=fixture["assets"],
             )
             paragraphs = "\n".join(paragraph.text for paragraph in Document(output["path"]).paragraphs)
-            self.assertLess(paragraphs.index("产品证明"), paragraphs.index("证书证明"))
-            self.assertLess(paragraphs.index("证书证明"), paragraphs.index("待补证明"))
+            self.assertLess(paragraphs.index("图：产品证明"), paragraphs.index("图：证书证明"))
+            self.assertLess(
+                paragraphs.index("图：证书证明"),
+                paragraphs.index("【待补充证据：待补证明"),
+            )
+            self.assertLess(
+                paragraphs.index("【待补充证据：待补证明"),
+                paragraphs.index("【证据原件见前文："),
+            )
             self.assertIn("待补扫描件", paragraphs)
+
+            media = _docx_media_snapshot(output["path"])
+            self.assertEqual(len(media["mediaNames"]), 2)
+            self.assertEqual(len(media["embeddingOrder"]), 2)
+            self.assertEqual(media["embeddingOrder"], media["mediaNames"])
+            expected_hashes = [
+                hashlib.sha256(
+                    Path(fixture["assets"][refs[key]]["fixture_page"]).read_bytes()
+                ).hexdigest()
+                for key in ("readable", "second")
+            ]
+            self.assertEqual(media["sha256"], expected_hashes)
+            self.assertEqual(media["sha256"].count(expected_hashes[0]), 1)
+            self.assertFalse(fixture["assets"][refs["unreadable"]]["page_images"])
+
+    def test_pdf_asset_roundtrip_is_explicitly_skipped_without_pdfium(self) -> None:
+        """The optional PDF renderer is covered when pypdfium2 is available."""
+
+        if importlib.util.find_spec("pypdfium2") is None:
+            self.skipTest("pypdfium2 未安装，当前环境不宣称覆盖真实 PDF 转页")
+        from backend.app.media_store.local import LocalFolderStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf_path = root / "evidence" / "pdf-proof.pdf"
+            pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (320, 220), (220, 235, 242)).save(pdf_path, format="PDF")
+            asset = LocalFolderStore(root).fetch(
+                {"evidencePath": str(pdf_path), "name": "PDF 证明"}
+            )
+            self.assertIsNotNone(asset)
+            assert asset is not None
+            self.assertEqual(asset.kind, "image")
+            self.assertEqual(len(asset.page_images), 1)
+            self.assertTrue(Path(asset.page_images[0]).is_file())
 
     def test_fidelity_baseline_is_reproducible_without_runtime_data(self) -> None:
         result = subprocess.run(

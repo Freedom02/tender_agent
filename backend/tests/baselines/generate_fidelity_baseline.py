@@ -10,6 +10,8 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from zipfile import ZipFile
+from xml.etree import ElementTree
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -73,6 +75,40 @@ def _docx_snapshot(raw: bytes | str | Path) -> dict[str, Any]:
         for table in document.tables
     ]
     return {"paragraphs": paragraphs, "tables": tables}
+
+
+def _docx_media_snapshot(path: str | Path) -> dict[str, list[str]]:
+    """Capture package media and relationship order for the evidence baseline."""
+
+    rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    doc_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    rel_id = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with ZipFile(path) as archive:
+        media_names = sorted(
+            name for name in archive.namelist() if name.startswith("word/media/")
+        )
+        relationships = ElementTree.fromstring(
+            archive.read("word/_rels/document.xml.rels")
+        )
+        targets = {
+            item.get("Id"): "word/" + str(item.get("Target") or "").lstrip("/")
+            for item in relationships.findall(f"{{{rel_ns}}}Relationship")
+            if str(item.get("Type") or "").endswith("/image")
+        }
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        embedding_order = [
+            targets.get(blip.get(f"{{{rel_id}}}embed"), "")
+            for blip in document.findall(f".//{{{doc_ns}}}blip")
+        ]
+        hashes = [
+            hashlib.sha256(archive.read(name)).hexdigest()
+            for name in media_names
+        ]
+    return {
+        "mediaNames": media_names,
+        "embeddingOrder": embedding_order,
+        "sha256": hashes,
+    }
 
 
 def _template_snapshot() -> dict[str, Any]:
@@ -286,10 +322,17 @@ def _evidence_snapshot() -> dict[str, Any]:
             for paragraph in paragraphs
             if "产品证明" in paragraph or "证书证明" in paragraph or "待补证明" in paragraph
         ]
+        media = _docx_media_snapshot(output["path"])
+        expected_media_hashes = [
+            hashlib.sha256(
+                Path(fixture["assets"][fixture["refs"][key]]["fixture_page"]).read_bytes()
+            ).hexdigest()
+            for key in ("readable", "second")
+        ]
         return {
             "files": {
-                "readable": Path(fixture["refs"]["readable"]).is_file(),
-                "second": Path(fixture["refs"]["second"]).is_file(),
+                "readable": bool(fixture["assets"][fixture["refs"]["readable"]]["page_images"]),
+                "second": bool(fixture["assets"][fixture["refs"]["second"]]["page_images"]),
                 "unreadable": Path(fixture["refs"]["unreadable"]).is_file(),
             },
             "summary": chapter["summary"],
@@ -308,6 +351,15 @@ def _evidence_snapshot() -> dict[str, Any]:
                 _stable_evidence_marker(marker, fixture["refs"])
                 for marker in evidence_markers
             ],
+            "docxMedia": {
+                "mediaCount": len(media["mediaNames"]),
+                "embeddingOrder": media["embeddingOrder"],
+                "sha256": media["sha256"],
+                "expectedSha256": expected_media_hashes,
+                "missingHasNoPageImages": not bool(
+                    fixture["assets"][fixture["refs"]["unreadable"]]["page_images"]
+                ),
+            },
         }
 
 

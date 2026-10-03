@@ -13,6 +13,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Pt
+from PIL import Image, ImageDraw
 
 
 def _grid_span(cell: Any) -> str:
@@ -222,15 +223,42 @@ def response_table_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, A
     return section, fine_review, knowledge
 
 
+def _write_scan_page(path: Path, label: str, fill: tuple[int, int, int]) -> Path:
+    """Create a deterministic raster scan page without committing binary fixtures."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (800, 500), fill)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((24, 24, 776, 476), outline=(25, 35, 45), width=4)
+    draw.rectangle((48, 108, 752, 392), outline=(75, 90, 105), width=2)
+    draw.text((64, 52), label, fill=(15, 25, 35))
+    draw.text((72, 150), "PROGRAMMATIC SCAN PAGE", fill=(35, 45, 55))
+    draw.text((72, 190), "FIDELITY-BASELINE / PAGE-01", fill=(35, 45, 55))
+    image.save(path, format="PNG", optimize=False)
+    return path
+
+
 def evidence_fixture(root: Path) -> dict[str, Any]:
+    """Create image-backed evidence and resolve it through the local media adapter."""
+
     evidence_dir = root / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    readable = evidence_dir / "01-product.pdf"
-    readable.write_bytes(b"fixture-product-proof")
-    second = evidence_dir / "02-certificate.pdf"
-    second.write_bytes(b"fixture-certificate-proof")
-    unreadable = evidence_dir / "03-missing.pdf"
-    refs = {"readable": readable.as_posix(), "second": second.as_posix(), "unreadable": unreadable.as_posix()}
+    readable = evidence_dir / "01-product"
+    second = evidence_dir / "02-certificate"
+    unreadable = evidence_dir / "03-missing"
+    product_page = _write_scan_page(
+        readable / "page-01.png", "PRODUCT-PROOF-SCAN", (226, 239, 244)
+    )
+    certificate_page = _write_scan_page(
+        second / "page-01.png", "CERTIFICATE-PROOF-SCAN", (242, 235, 218)
+    )
+    unreadable.mkdir(parents=True, exist_ok=True)
+    (unreadable / ".keep").write_text("placeholder", encoding="utf-8")
+    refs = {
+        "readable": readable.as_posix(),
+        "second": second.as_posix(),
+        "unreadable": unreadable.as_posix(),
+    }
     entries = [
         {
             "sequence": 1,
@@ -263,10 +291,19 @@ def evidence_fixture(root: Path) -> dict[str, Any]:
             "materials": [],
         },
     ]
-    assets = {
-        refs["readable"]: {"kind": "attachment", "caption": "产品证明", "page_count": 1, "available": True},
-        refs["second"]: {"kind": "attachment", "caption": "证书证明", "page_count": 1, "available": True},
-        refs["unreadable"]: {"kind": "attachment", "caption": "待补证明", "page_count": 1, "available": False, "placeholder": True},
-    }
-    return {"entries": entries, "assets": assets, "refs": refs}
+    from backend.app.bid_writing.evidence_assembler import assemble_evidence
+    from backend.app.media_store.local import LocalFolderStore
 
+    media_store = LocalFolderStore(root)
+    source_refs = [
+        ref
+        for entry in entries
+        for ref in entry["sourceRefs"]
+    ]
+    assets = assemble_evidence(source_refs, media_store)
+    for asset in assets.values():
+        asset["available"] = not bool(asset.get("placeholder"))
+    # Keep the generated page paths available to byte-level DOCX assertions.
+    assets[refs["readable"]]["fixture_page"] = str(product_page)
+    assets[refs["second"]]["fixture_page"] = str(certificate_page)
+    return {"entries": entries, "assets": assets, "refs": refs}
