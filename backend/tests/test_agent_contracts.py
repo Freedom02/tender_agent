@@ -45,9 +45,11 @@ from backend.app.pi_agent import prompts as prompt_module
 from backend.app.pi_agent.prompts import requirement_map_prompt, volume_plan_prompt
 from backend.app.pi_agent.transport import (
     PiError,
+    PolicyBlockedError,
     PiTransport,
     agent_id_from_prompt,
     classify_failure,
+    parse_json_text,
     validation_enabled,
 )
 
@@ -441,6 +443,103 @@ class RunStateWiringTests(unittest.TestCase):
         self.assertIs(classify_failure(PiError("Pi 没有返回文本")), FailureKind.PROVIDER_ERROR)
         self.assertIs(classify_failure(PiError("无法向 Pi 发送请求：子进程已退出")), FailureKind.PROVIDER_ERROR)
         self.assertIs(classify_failure(PiError("未知情况")), FailureKind.UNKNOWN)
+
+    def test_policy_blocked_is_distinct_non_retryable_and_redacted(self) -> None:
+        raw = "content_policy: api_key=sk-super-secret 招标原文不得外泄"
+        error = PolicyBlockedError(raw)
+        self.assertIs(classify_failure(error), FailureKind.POLICY_BLOCKED)
+        self.assertFalse(error.retryable)
+        self.assertNotEqual(error.__class__.__name__, "PiError", "旧编排器只重试精确的 PiError")
+        self.assertNotIn("sk-super-secret", str(error))
+        self.assertNotIn("招标原文不得外泄", str(error))
+        transport = StubTransport(error=error)
+        with self.assertRaises(PolicyBlockedError):
+            transport.run_json(OUTLINE_PROMPT)
+        node = transport.current_run_state.node("OutlinePlanAgent")
+        self.assertEqual(node.failureKind, FailureKind.POLICY_BLOCKED.value)
+        self.assertFalse(node.retryable)
+        self.assertNotIn("sk-super-secret", node.failureMessage)
+
+    def test_policy_timeout_and_invalid_json_remain_distinct(self) -> None:
+        self.assertIs(
+            classify_failure(PiError("Pi 智能体执行超时（provider=x）")),
+            FailureKind.TIMEOUT,
+        )
+        self.assertIs(
+            classify_failure(PiError("Pi 返回内容不是合法 JSON：已省略")),
+            FailureKind.SCHEMA_INVALID,
+        )
+        self.assertIs(
+            classify_failure(PiError("Pi 执行失败（provider=x）：通道错误")),
+            FailureKind.PROVIDER_ERROR,
+        )
+        with self.assertRaises(PolicyBlockedError):
+            parse_json_text("content_policy: input rejected")
+
+    def test_invalid_json_diagnostic_does_not_echo_model_input(self) -> None:
+        secret_text = "投标文件原文-不可记录-" + ("敏感" * 80)
+        with self.assertRaises(PiError) as caught:
+            parse_json_text(secret_text)
+        self.assertIs(classify_failure(caught.exception), FailureKind.SCHEMA_INVALID)
+        self.assertNotIn(secret_text, str(caught.exception))
+        self.assertIn("不是合法 JSON", str(caught.exception))
+
+    def test_provider_policy_event_is_non_retryable_and_redacted(self) -> None:
+        fixture = (
+            "import json,sys; sys.stdin.readline(); "
+            "print(json.dumps({'type':'response','command':'prompt','success':False, "
+            "'error':{'code':'content_policy','message':'api_key=sk-secret 投标原文'}}), flush=True)"
+        )
+
+        class FixtureTransport(PiTransport):
+            def _command(self, *, tools: str = "", extensions: tuple[str, ...] = ()) -> list[str]:
+                return [sys.executable, "-c", fixture]
+
+        transport = FixtureTransport(pi_config(provider="fixture"))
+        with self.assertRaises(PolicyBlockedError) as caught:
+            transport.run_json(OUTLINE_PROMPT)
+        self.assertIs(classify_failure(caught.exception), FailureKind.POLICY_BLOCKED)
+        self.assertFalse(caught.exception.retryable)
+        self.assertNotIn("sk-secret", str(caught.exception))
+        node = transport.current_run_state.node("OutlinePlanAgent")
+        self.assertEqual(node.failureKind, FailureKind.POLICY_BLOCKED.value)
+        self.assertFalse(node.retryable)
+
+    def test_provider_policy_stderr_is_classified_and_redacted(self) -> None:
+        fixture = (
+            "import sys; sys.stdin.readline(); "
+            "print('content_policy api_key=sk-stderr-secret 投标原文', file=sys.stderr, flush=True)"
+        )
+
+        class FixtureTransport(PiTransport):
+            def _command(self, *, tools: str = "", extensions: tuple[str, ...] = ()) -> list[str]:
+                return [sys.executable, "-c", fixture]
+
+        transport = FixtureTransport(pi_config(provider="fixture"))
+        with self.assertRaises(PolicyBlockedError) as caught:
+            transport.run_json(OUTLINE_PROMPT)
+        self.assertIs(classify_failure(caught.exception), FailureKind.POLICY_BLOCKED)
+        self.assertNotIn("sk-stderr-secret", str(caught.exception))
+        self.assertNotIn("投标原文", str(caught.exception))
+        node = transport.current_run_state.node("OutlinePlanAgent")
+        self.assertEqual(node.failureKind, FailureKind.POLICY_BLOCKED.value)
+
+    def test_provider_policy_before_request_is_not_retried(self) -> None:
+        fixture = (
+            "import sys; print('safety_violation api_key=sk-early-secret', file=sys.stderr, flush=True)"
+        )
+
+        class FixtureTransport(PiTransport):
+            def _command(self, *, tools: str = "", extensions: tuple[str, ...] = ()) -> list[str]:
+                return [sys.executable, "-c", fixture]
+
+        transport = FixtureTransport(pi_config(provider="fixture"))
+        with self.assertRaises(PolicyBlockedError) as caught:
+            transport.run_json(OUTLINE_PROMPT)
+        self.assertFalse(caught.exception.retryable)
+        self.assertNotIn("sk-early-secret", str(caught.exception))
+        node = transport.current_run_state.node("OutlinePlanAgent")
+        self.assertEqual(node.failureKind, FailureKind.POLICY_BLOCKED.value)
 
     def test_untracked_agent_is_not_recorded(self) -> None:
         transport = StubTransport(payload={"rows": [{"requirementId": "technical-0001", "response": "满足"}]})

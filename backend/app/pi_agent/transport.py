@@ -19,6 +19,7 @@ Wave 1 · A 在 `run_json` 这一层接上了两件「只记录、不阻断」�
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
 import re
@@ -48,7 +49,113 @@ from .config import PiConfig
 
 
 class PiError(RuntimeError):
-    """A safe, user-facing error from the local Pi adapter."""
+    """A safe, user-facing error from the local Pi adapter.
+
+    ``failure_kind``/``retryable`` are optional metadata for callers that can
+    make a fallback decision.  The legacy string exception contract remains
+    unchanged for ordinary transport errors.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: FailureKind | str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(str(message))
+        self.failure_kind = failure_kind
+        self.retryable = retryable
+
+
+_POLICY_MARKERS = re.compile(
+    r"(?:content[\s_-]*(?:safety|policy|moderation)|safety[\s_-]*policy|"
+    r"(?:content|safety)[\s_-]*(?:filter|blocked?|rejected?|refus(?:ed|al)?|violation)|"
+    r"policy[\s_-]*(?:blocked?|rejected?|refus(?:ed|al)?|violation|disallow|denied?|error)|"
+    r"prompt[\s_-]*(?:blocked?|rejected?|refus(?:ed|al)?)|"
+    r"input[\s_-]*(?:blocked?|rejected?|refus(?:ed|al)?|policy|safety|not[\s_-]*allowed)|"
+    r"content[\s_-]*(?:blocked?|rejected?|refus(?:ed|al)?)|"
+    r"guardrail|moderation|"
+    r"内容(?:安全|审核|策略|违规|拦截|拒绝)|"
+    r"输入(?:安全|策略|违规|拦截|拒绝)|"
+    r"请求(?:被)?(?:安全|策略|内容).*?(?:拦截|拒绝|阻止)|"
+    r"(?:内容安全|输入策略|安全策略|内容审核).*?(?:拦截|拒绝|阻止)|"
+    r"policy[\s_-]*blocked?)",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b)"
+    r"\s*[:=]\s*[^\s,;]+"
+)
+_JSON_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)[\"']?"
+    r"\s*[:=]\s*)[\"']?[^\s,;}\"']+[\"']?"
+)
+_BEARER_SECRET = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_KEY_LIKE = re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{8,}\b")
+_SENSITIVE_WORDS = re.compile(
+    r"(?i)(?:prompt|input|document|tender|content|text|message|招标|投标|原文|条款|要求)"
+)
+
+
+def _diagnostic_text(value: Any) -> str:
+    """Extract a small diagnostic surface without serializing provider payloads."""
+
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in ("code", "type", "status", "reason", "error", "message"):
+            item = value.get(key)
+            if item not in (None, ""):
+                item_text = _diagnostic_text(item) if isinstance(item, (dict, list, tuple)) else str(item)
+                if item_text:
+                    parts.append(f"{key}={item_text}")
+        return "; ".join(parts)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_diagnostic_text(item) for item in value[:3])
+    return str(value or "")
+
+
+def _redact_diagnostic(value: Any, *, policy: bool = False) -> str:
+    """Return a bounded diagnostic; never retain prompt/key material in errors."""
+
+    raw = _diagnostic_text(value).strip()
+    if not raw:
+        return ""
+    if policy or _POLICY_MARKERS.search(raw):
+        code_match = re.search(r"(?i)\b(?:code|type|reason)=([A-Za-z0-9_.-]{2,80})", raw)
+        suffix = f"（code={code_match.group(1)}）" if code_match else ""
+        return f"provider policy blocked request{suffix}"
+    redacted = _JSON_SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", raw)
+    redacted = _SECRET_ASSIGNMENT.sub(r"\1=[REDACTED]", redacted)
+    redacted = _BEARER_SECRET.sub("Bearer [REDACTED]", redacted)
+    redacted = _KEY_LIKE.sub("[REDACTED_KEY]", redacted)
+    redacted = re.sub(r"\s+", " ", redacted).strip()
+    if not redacted:
+        return ""
+    if len(redacted) > 160 or _SENSITIVE_WORDS.search(redacted) or "\n" in raw:
+        digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:10]
+        return f"provider diagnostic redacted (sha256:{digest})"
+    return redacted[:160]
+
+
+class PolicyBlockedError(PiError):
+    """Non-retryable provider/input policy rejection.
+
+    The distinct class name is intentional: legacy orchestrators retry only
+    exceptions whose exact class name is ``PiError``.  Policy rejection must
+    reach their fallback path without a pointless second request.
+    """
+
+    def __init__(self, detail: Any = "") -> None:
+        safe_detail = _redact_diagnostic(detail, policy=True)
+        message = "Pi 请求被输入策略拦截（policy_blocked）"
+        if safe_detail:
+            message = f"{message}：{safe_detail}"
+        super().__init__(
+            message,
+            failure_kind=FailureKind.POLICY_BLOCKED,
+            retryable=False,
+        )
 
 
 def _clip(value: Any, limit: int = 120000) -> str:
@@ -82,8 +189,11 @@ def parse_json_text(value: str) -> dict[str, Any]:
             if isinstance(candidate, dict):
                 parsed = candidate
         if parsed is None:
-            preview = re.sub(r"\s+", " ", text)[:240]
-            raise PiError(f"Pi 返回内容不是合法 JSON：{preview}") from None
+            if _POLICY_MARKERS.search(text):
+                raise PolicyBlockedError(text)
+            preview = _redact_diagnostic(text)
+            suffix = f"：{preview}" if preview else ""
+            raise PiError(f"Pi 返回内容不是合法 JSON{suffix}") from None
     if not isinstance(parsed, dict):
         raise PiError("Pi 返回的 JSON 根节点不是对象")
     return parsed
@@ -154,7 +264,15 @@ def agent_id_from_prompt(prompt: str) -> str:
 def classify_failure(exc: BaseException) -> FailureKind:
     """把传输层异常归类成 `FailureKind`（只用于记账，异常本身原样抛出）。"""
 
+    declared = getattr(exc, "failure_kind", None)
+    if declared:
+        try:
+            return declared if isinstance(declared, FailureKind) else FailureKind(str(declared))
+        except ValueError:
+            pass
     text = str(exc or "")
+    if _POLICY_MARKERS.search(text):
+        return FailureKind.POLICY_BLOCKED
     if isinstance(exc, subprocess.TimeoutExpired) or "超时" in text:
         return FailureKind.TIMEOUT
     if "不是合法 JSON" in text or "根节点不是对象" in text:
@@ -378,7 +496,7 @@ class PiTransport:
             return
         node.mark_failed(
             classify_failure(exc),
-            str(exc),
+            _redact_diagnostic(str(exc)),
             artifact_status=ArtifactStatus.MISSING,
         )
 
@@ -491,7 +609,7 @@ class PiTransport:
                 except queue.Empty:
                     break
                 if kind == "stderr" and line.strip():
-                    diagnostics.append(line.strip())
+                    diagnostics.append(_redact_diagnostic(line.strip()))
             return process.returncode, diagnostics
 
         try:
@@ -500,6 +618,8 @@ class PiTransport:
                 return_code, diagnostics = finish_after_failure()
                 detail = "；".join(dict.fromkeys(diagnostics[-5:]))
                 detail = detail or "子进程在发送请求前已经退出"
+                if _POLICY_MARKERS.search(detail):
+                    raise PolicyBlockedError(detail)
                 raise PiError(
                     f"无法向 Pi 发送请求：Pi 子进程已退出(code={return_code})：{detail}"
                 )
@@ -517,12 +637,15 @@ class PiTransport:
             suffix = f"；Pi 子进程退出码={return_code}"
             if detail:
                 suffix += f"：{detail}"
+            if _POLICY_MARKERS.search(detail):
+                raise PolicyBlockedError(detail) from exc
             raise PiError(f"无法向 Pi 发送请求：{exc}{suffix}") from exc
 
         text_parts: list[str] = []
         message_text_parts: list[str] = []
         errors: list[str] = []
         assistant_errors: list[str] = []
+        policy_blocked = False
         settled = False
         effective_timeout = self.config.timeout_seconds
         if timeout_seconds is not None:
@@ -539,7 +662,10 @@ class PiTransport:
                     break
                 continue
             if kind == "stderr" and line.strip():
-                errors.append(line.strip())
+                safe_line = _redact_diagnostic(line.strip())
+                policy_blocked = policy_blocked or bool(_POLICY_MARKERS.search(line))
+                if safe_line:
+                    errors.append(safe_line)
                 continue
             if kind != "stdout" or not line.strip():
                 continue
@@ -549,7 +675,9 @@ class PiTransport:
                 continue
             event_type = event.get("type")
             if event_type == "response" and event.get("command") == "prompt" and not event.get("success"):
-                errors.append(str(event.get("error") or "Pi 拒绝了提示词"))
+                raw_error = event.get("error") or "Pi 拒绝了提示词"
+                policy_blocked = policy_blocked or bool(_POLICY_MARKERS.search(_diagnostic_text(raw_error)))
+                errors.append(_redact_diagnostic(raw_error))
                 settled = True
                 break
             if event_type == "message_update":
@@ -564,20 +692,23 @@ class PiTransport:
                 if isinstance(message, dict):
                     error_message = str(message.get("errorMessage") or "").strip()
                     if error_message and str(message.get("role") or "").lower() == "assistant":
-                        assistant_errors.append(error_message)
+                        policy_blocked = policy_blocked or bool(_POLICY_MARKERS.search(error_message))
+                        assistant_errors.append(_redact_diagnostic(error_message))
             elif event_type == "turn_end":
                 message = event.get("message")
                 if isinstance(message, dict):
                     error_message = str(message.get("errorMessage") or "").strip()
                     if error_message and str(message.get("role") or "").lower() == "assistant":
-                        assistant_errors.append(error_message)
+                        policy_blocked = policy_blocked or bool(_POLICY_MARKERS.search(error_message))
+                        assistant_errors.append(_redact_diagnostic(error_message))
             elif event_type == "agent_end":
                 for message in event.get("messages") or []:
                     if not isinstance(message, dict):
                         continue
                     error_message = str(message.get("errorMessage") or "").strip()
                     if error_message and str(message.get("role") or "").lower() == "assistant":
-                        assistant_errors.append(error_message)
+                        policy_blocked = policy_blocked or bool(_POLICY_MARKERS.search(error_message))
+                        assistant_errors.append(_redact_diagnostic(error_message))
                 if event.get("willRetry") is False:
                     settled = True
                     break
@@ -604,6 +735,8 @@ class PiTransport:
         if not text:
             detail = "；".join(dict.fromkeys(errors[-3:] + assistant_errors[-3:]))
             detail = detail or "没有返回 assistant 文本"
+            if policy_blocked:
+                raise PolicyBlockedError(detail)
             raise PiError(
                 f"Pi 执行失败（provider={self.config.provider or 'default'}，"
                 f"model={self.config.model or 'default'}）：{detail}"
