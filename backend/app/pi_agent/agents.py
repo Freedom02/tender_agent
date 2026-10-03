@@ -678,8 +678,9 @@ class PiAgentMethods:
             """兼容 A 合入后的 PolicyBlockedError / failure_kind 契约。"""
 
             failure_kind = getattr(error, "failure_kind", "")
+            failure_kind_value = getattr(failure_kind, "value", failure_kind)
             return (
-                str(failure_kind or "").strip().lower() == "policy_blocked"
+                str(failure_kind_value or "").strip().lower() == "policy_blocked"
                 or error.__class__.__name__ == "PolicyBlockedError"
                 or is_policy_blocked(error)
             )

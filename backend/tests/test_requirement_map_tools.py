@@ -20,6 +20,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from enum import Enum
 from pathlib import Path
 from unittest import mock
 
@@ -495,6 +496,32 @@ class MapRequirementsPathTests(unittest.TestCase):
         self.assertEqual(getattr(raised.exception, "failure_kind", ""), "policy_blocked")
         self.assertNotIn(_MARKER, str(raised.exception))
         self.assertNotIn(secret, str(raised.exception))
+        self.assertNotIn(_MARKER, "\n".join(logs.output))
+        self.assertNotIn(secret, "\n".join(logs.output))
+
+    def test_enum_policy_blocked_metadata_does_not_retry_or_leak(self) -> None:
+        class FailureKind(str, Enum):
+            POLICY_BLOCKED = "policy_blocked"
+
+        secret = "sk-enum-policy-secret-0123456789"
+        blocked = PiError(f"gateway rejected: {_MARKER} {secret}")
+        setattr(blocked, "failure_kind", FailureKind.POLICY_BLOCKED)
+        agent = _RecordingAgent(results=[blocked])
+        with self.assertLogs("backend.app.pi_agent.agents", level="WARNING") as logs:
+            with self.assertRaises(PiError) as raised:
+                agent.map_requirements(
+                    parse_bundle=self.bundle,
+                    outline_plan=self.plan,
+                    workspace_id="ws-test",
+                    project_id="proj-test",
+                )
+        self.assertEqual(len(agent.calls), 1)
+        self.assertEqual(agent.calls[0]["tools"], MAP_TOOL_ALLOWLIST)
+        self.assertEqual(getattr(raised.exception, "failure_kind", ""), "policy_blocked")
+        self.assertEqual(getattr(raised.exception, "safe_message", ""), str(raised.exception))
+        self.assertNotIn(_MARKER, str(raised.exception))
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertIn("requirement_map_policy_blocked", "\n".join(logs.output))
         self.assertNotIn(_MARKER, "\n".join(logs.output))
         self.assertNotIn(secret, "\n".join(logs.output))
 
