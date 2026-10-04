@@ -8,7 +8,7 @@
     独立端口 + 独立运行时数据。原因见 docs/多会话并行开工指令.md。
 
     本脚本只做准备工作，不启动任何服务、不改主仓库数据：
-      1. git worktree add ..\ta-ws-<流> -b feat/<分支> feat/wave0-contracts
+      1. git worktree add ..\ta-ws-<流> -b feat/<分支> main
       2. 复制被 gitignore 的必需文件：agent-config.json、.env、
          runtime/{workspaces,catalog,libraries}.json 与 runtime/projects（约 120 MB）
       3. frontend/node_modules 用 junction 共享（避免每个 worktree 装一遍）
@@ -49,7 +49,7 @@ $Ports = @{ a = 8801; b = 8802; c = 8803; d = 8804; e = 8805 }
 $WebPorts = @{ a = 5181; b = 5182; c = 5183; d = 5184; e = 5185 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$baseBranch = "feat/wave0-contracts"
+$baseBranch = "main"
 $branch = $Branches[$Stream]
 $worktree = (Join-Path (Split-Path $repoRoot -Parent) "ta-ws-$Stream")
 $port = $Ports[$Stream]
