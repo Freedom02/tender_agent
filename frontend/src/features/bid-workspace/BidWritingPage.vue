@@ -32,6 +32,9 @@ import {
   Wand2,
 } from "lucide-vue-next";
 import { api } from "../../services/api";
+import SectionJobPanel from "./components/SectionJobPanel.vue";
+import SectionStatusBadge from "./components/SectionStatusBadge.vue";
+import { sectionAncestorIds } from "./sectionJobs";
 import type {
   BidDocument,
   BidMode,
@@ -238,24 +241,6 @@ watch(activeStep, (step) => {
 });
 
 // ---- 工具函数 ----
-const STATUS_NAMES: Record<string, string> = {
-  generated: "已生成",
-  pending: "待生成",
-  generating: "生成中",
-  missing: "缺失",
-  planned: "正文待撰写"
-};
-function statusName(status?: string): string {
-  return STATUS_NAMES[status || ""] || status || "待生成";
-}
-function statusTagType(status?: string): "success" | "warning" | "danger" | "info" {
-  const s = (status || "").toLowerCase();
-  if (["generated", "done", "complete", "success", "完成", "已生成"].includes(s)) return "success";
-  if (["pending", "generating", "待生成", "生成中"].includes(s)) return "warning";
-  if (["missing", "缺失", "failed", "error", "失败"].includes(s)) return "danger";
-  return "info";
-}
-
 function draftProviderLabel(provider?: string): string {
   if (provider === "pi") return "Pi 智能体";
   if (provider === "dify") return "云端智能体";
@@ -586,9 +571,6 @@ const blanksToFill = computed(() => {
   plan.value.forEach((s) => (s.blanksToFill || []).forEach((b) => set.add(b)));
   return [...set];
 });
-const pendingSections = computed(() =>
-  plan.value.filter((s) => s.responseType !== "section_group" && !sectionHasContent(s))
-);
 const templateFragmentCount = computed(() => bidDocument.value?.templateFragments?.length || 0);
 
 const sectionNumberMap = computed(() => {
@@ -1177,7 +1159,16 @@ async function savePlan() {
 }
 
 // ---- 第三步：正文编辑 ----
+function openJobSection(id: string) {
+  goStep(3);
+  void nextTick(() => scrollToSection(id));
+}
+
 function scrollToSection(id: string) {
+  if (!plan.value.some((section) => section.sectionId === id)) return;
+  const expanded = new Set(collapsedNavSectionIds.value);
+  sectionAncestorIds(plan.value, id).forEach((parentId) => expanded.delete(parentId));
+  collapsedNavSectionIds.value = expanded;
   currentSectionId.value = id;
   syncEditorFromSection(id);
   requestAnimationFrame(() => {
@@ -2557,7 +2548,7 @@ async function previewExport() {
                 >
                   模板待定位
                 </el-tag>
-                <el-tag v-else size="small" :type="statusTagType(data.section.status)" effect="plain">{{ statusName(data.section.status) }}</el-tag>
+                <SectionStatusBadge :section="data.section" />
                 <div class="toc-row-actions">
                   <el-dropdown
                     trigger="click"
@@ -2685,6 +2676,7 @@ async function previewExport() {
 
     <!-- ============ 第三步：正文编辑 ============ -->
     <div v-else class="step-panel">
+      <SectionJobPanel :sections="plan" @select-section="openJobSection" />
       <el-row ref="editorLayoutRef" class="editor-layout" :gutter="16">
         <el-col
           class="editor-layout-col editor-navigation-col"
@@ -2719,7 +2711,7 @@ async function previewExport() {
                   <span class="nav-number">{{ sectionNumber(sec) }}</span>
                   {{ sec.title }}
                 </span>
-                <el-tag size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
+                <SectionStatusBadge :section="sec" />
               </div>
               <el-empty v-if="!plan.length" description="暂无目录，请先回到第二步" :image-size="60" />
             </el-card>
@@ -2794,7 +2786,7 @@ async function previewExport() {
                   >
                     Pi 局部修改
                   </el-tag>
-                  <el-tag v-if="currentSectionId === sec.sectionId" size="small" :type="statusTagType(sec.status)" effect="plain">{{ statusName(sec.status) }}</el-tag>
+                  <SectionStatusBadge :section="sec" />
                 </div>
 
                 <el-alert
@@ -2946,12 +2938,11 @@ async function previewExport() {
           </el-card>
 
           <el-card class="panel" shadow="never">
-            <template #header><span class="panel-title">待办提醒</span></template>
+            <template #header><span class="panel-title">待补字段</span></template>
             <div v-if="blanksToFill.length" class="todo-list">
               <div v-for="b in blanksToFill" :key="b" class="todo-item">⚠ {{ b }}</div>
             </div>
-            <div v-if="pendingSections.length" class="todo-item">⚠ {{ pendingSections.length }} 个章节尚无内容</div>
-            <span v-if="!blanksToFill.length && !pendingSections.length" class="form-hint">暂无待办</span>
+            <span v-if="!blanksToFill.length" class="form-hint">暂无待补字段</span>
           </el-card>
 
           <el-card
@@ -3835,6 +3826,7 @@ async function previewExport() {
 .doc-heading {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin: 30px 0 12px;
   padding: 4px 8px;
