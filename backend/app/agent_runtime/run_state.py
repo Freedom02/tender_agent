@@ -75,6 +75,7 @@ class EvidenceAssetStatus(str, Enum):
 class FailureKind(str, Enum):
     """失败归类：决定重试策略与是否需要人工介入。"""
 
+    POLICY_BLOCKED = "policy_blocked"  # provider/输入策略拦截（不可重试，应走回退）
     SCHEMA_INVALID = "schema_invalid"  # 模型返回结构不合法（可重试，通常加严提示词）
     TIMEOUT = "timeout"  # 超时（可重试）
     PROVIDER_ERROR = "provider_error"  # 通道/网关错误（可重试，退避）

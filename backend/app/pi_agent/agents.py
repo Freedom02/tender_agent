@@ -622,11 +622,281 @@ class PiAgentMethods:
         workspace_id: str,
         project_id: str,
     ) -> dict[str, Any]:
-        return self.run_json(
-            requirement_map_prompt(
+        """条款-章节映射：短任务说明 + 只读工具按需取数。
+
+        改造前这里把「条款映射用 ParseBundle 精简视图」整块内联进提示词（本机实测
+        单批约 66 KB），而映射真正需要的是**本批条款原文**与**可挂载的目录章节**。
+        现在只给：任务说明 + 本批条款 ID 清单 + 章节 ID 清单 + 工具使用约定 + 输出
+        schema + 映射规则；条款原文由 `search_requirements` 取、章节细节由
+        `list_chapters` 取、候选由 `validate_coverage_candidate` 自检。
+
+        输出 JSON 的字段名与旧提示词完全一致（`REQUIREMENT_MAP_SCHEMA` 原样内联）。
+        工具扩展缺失或工具调用失败时，退回**逐字节相同**的旧提示词
+        （`requirement_map_prompt`），保证任何环境都不会因为这次改造而失去可用路径。
+        但模型/网关的策略拦截不能用更长的 legacy 提示词重试：要带脱敏的
+        ``failure_kind=policy_blocked`` 原样交给上层处理。
+        """
+
+        import json
+        import logging
+        import time
+
+        from .agent_context import (
+            MAP_TOOL_ALLOWLIST,
+            build_context,
+            extension_path,
+            resolve_policy,
+            write_context,
+        )
+        from .prompts import REQUIREMENT_MAP_SCHEMA
+
+        logger = logging.getLogger(__name__)
+        policy = resolve_policy()
+        extension = extension_path()
+        context_path: Path | None = None
+        tools = ""
+        extensions: tuple[str, ...] = ()
+        env_extra: dict[str, str] = {}
+        fallback_warning = ""
+
+        def legacy_prompt() -> str:
+            return requirement_map_prompt(
                 parse_bundle=parse_bundle,
                 outline_plan=outline_plan,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
-        )
+
+        def is_policy_blocked(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(is_policy_blocked(item) for item in value.values())
+            if isinstance(value, (list, tuple, set)):
+                return any(is_policy_blocked(item) for item in value)
+            return "policy_blocked" in str(value or "").lower()
+
+        def error_is_policy_blocked(error: BaseException) -> bool:
+            """兼容 A 合入后的 PolicyBlockedError / failure_kind 契约。"""
+
+            failure_kind = getattr(error, "failure_kind", "")
+            failure_kind_value = getattr(failure_kind, "value", failure_kind)
+            return (
+                str(failure_kind_value or "").strip().lower() == "policy_blocked"
+                or error.__class__.__name__ == "PolicyBlockedError"
+                or is_policy_blocked(error)
+            )
+
+        def policy_blocked_error() -> PiError:
+            """构造仅含用户可理解信息的拦截错误，不透传模型原始诊断。"""
+
+            message = "条款映射请求被模型策略拦截，未生成映射结果。请调整输入后重试。"
+            try:
+                # A 分支尚未合并时这里仍是 PiError；合入后无需改本方法即可
+                # 复用 A 提供的 PolicyBlockedError 类型。
+                from . import transport as pi_transport
+
+                error_type = getattr(pi_transport, "PolicyBlockedError", PiError)
+                error = error_type(message)
+            except (AttributeError, TypeError):
+                error = PiError(message)
+            setattr(error, "failure_kind", "policy_blocked")
+            setattr(error, "retryable", False)
+            setattr(error, "safe_message", str(error))
+            return error
+
+        if policy["enabled"] and not extension.is_file():
+            fallback_warning = "未找到条款映射工具扩展，本次智能体不启用工具取证（按提示词中的解析视图作答）。"
+        elif policy["enabled"]:
+            try:
+                context_path = write_context(
+                    build_context(
+                        parse_bundle,
+                        outline_plan,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        policy=policy,
+                    )
+                )
+                # The extension runs in a child process. Verify the injected file
+                # is present and readable before advertising the tool path.
+                if not context_path.is_file():
+                    raise OSError(f"上下文文件不存在：{context_path}")
+                with context_path.open("rb") as context_file:
+                    context_file.read(1)
+            except OSError as exc:
+                fallback_warning = f"条款映射工具上下文不可读，已回退 legacy 路径：{exc}"
+                tools = ""
+                extensions = ()
+                env_extra = {}
+            else:
+                tools = MAP_TOOL_ALLOWLIST
+                extensions = (str(extension),)
+                env_extra = {"BID_MAP_CONTEXT": str(context_path)}
+
+        if tools:
+
+            requirement_lines: list[str] = []
+            for item in parse_bundle.get("requirements") or []:
+                if not isinstance(item, dict):
+                    continue
+                requirement_id = str(item.get("id") or item.get("requirementId") or "").strip()
+                if not requirement_id:
+                    continue
+                flags = "".join(
+                    flag
+                    for flag, active in (
+                        ("m", bool(item.get("mandatory"))),
+                        ("r", bool(item.get("isRejection"))),
+                    )
+                    if active
+                )
+                requirement_lines.append(
+                    f"{requirement_id}{' [' + flags + ']' if flags else ''}"
+                )
+            chapter_lines: list[str] = []
+            for row in outline_plan or []:
+                if not isinstance(row, dict):
+                    continue
+                section_id = str(row.get("sectionId") or "").strip()
+                if not section_id:
+                    continue
+                chapter_lines.append(
+                    " | ".join(
+                        part
+                        for part in (
+                            section_id,
+                            " ".join(str(row.get("title") or "").split())[:60],
+                            f"L{row.get('level') or 1}",
+                            str(row.get("responseType") or ""),
+                        )
+                        if part
+                    )
+                )
+            evaluation_lines = [
+                str(item.get("id") or "").strip()
+                for item in parse_bundle.get("evaluationItems") or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
+            prompt = f"""
+你是 RequirementMapAgent，负责建立招标要求、评分项与投标目录之间的覆盖关系。
+
+你只负责映射和覆盖检查，不撰写正文，不修改招标原文，不编造企业能力。
+必须只输出一个合法 JSON 对象，不要输出 Markdown、代码块、解释或额外文字。
+所有 ID 必须来自本批条款清单、目录章节清单或工具返回结果；不得自行编造 ID。
+
+工作区：{workspace_id}
+项目：{project_id}
+
+【本批条款待办清单】（共 {len(requirement_lines)} 条；格式：条款ID [m=强制, r=废标]）
+{chr(10).join(requirement_lines)}
+
+【可引用的目录章节】（格式：sectionId | 标题 | 层级 | responseType）
+{chr(10).join(chapter_lines)}
+
+【可引用的评分项 ID】{", ".join(evaluation_lines) or "（无）"}
+
+【可用工具（只读，按需调用）】
+1. get_requirement_batch 一次取全本批（limit 直接写 80），不要分页反复调用。
+2. 只有当摘要不足以判断该条款由哪个章节响应时，才用 search_requirements 读原文；
+   一次查询问一个主题（例如“质保 售后 培训”），一次覆盖一批条款，不要逐条查询，最多 3 次。
+3. 用 list_chapters 取章节细节（层级、responseType、已有 requirementIds/evaluationIds），最多 1 次；
+   sectionId 只能取自它返回的节点（或上面章节清单）。
+4. 定稿前必须调用 validate_coverage_candidate 自检，直到它返回 ok=true 再输出；
+   它会指出不存在的 sectionId/requirementId、非法取值与漏掉的条款。
+条款原文不在提示词里；但请把工具往返控制在 6 次以内，凑齐判断依据后立即输出结果。
+
+【输出结构】
+{json.dumps(REQUIREMENT_MAP_SCHEMA, ensure_ascii=False)}
+
+映射规则：
+0. 即使要求或评分项数量为 0，也必须返回合法的空数组；本批条款清单中的每一条都必须出现，要么在 coverage 里，要么在 uncoveredRequirements 里。
+1. 每一条 requirement 都要判断是否被目录覆盖；mandatory 或 isRejection 条款不能无理由遗漏。
+2. coverageType 使用 chapter_text、table、attachment、commitment、fixed_form 或 other。
+3. status 使用 planned、covered、uncovered 或 needs_review。
+4. evaluationIds 只能引用上面评分项 ID 清单中存在的 id。
+5. sectionId 只能引用目录章节清单（或 list_chapters 返回）中存在的 sectionId。
+6. 同一条款确实需要多个章节响应时才放入 duplicatedRequirements，否则只保留一个主响应章节。
+7. uncoveredRequirements 和 duplicatedRequirements 使用对象数组，至少包含 requirementId、reason。
+8. reason 必须说明映射依据或风险，不得用空泛表述掩盖没有来源的判断；每条控制在一句话内（不超过 60 字），
+   保证整批输出能在一次回复里写完，不被截断。
+""".strip()
+        else:
+            prompt = legacy_prompt()
+
+        context_bytes = 0
+        if context_path is not None and tools:
+            try:
+                context_bytes = context_path.stat().st_size
+            except OSError:
+                context_bytes = 0
+
+        def run_and_record(call_prompt: str, *, call_tools: str, call_extensions: tuple[str, ...], call_env: dict[str, str]) -> dict[str, Any]:
+            started = time.perf_counter()
+            try:
+                return self.run_json(
+                    call_prompt,
+                    tools=call_tools,
+                    extensions=call_extensions,
+                    env_extra=call_env,
+                )
+            finally:
+                logger.info(
+                    "requirement_map_call",
+                    extra={
+                        "prompt_bytes": len(call_prompt.encode("utf-8")),
+                        "tools": call_tools,
+                        "extensions": call_extensions,
+                        "env_keys": sorted(call_env),
+                        "context_bytes": context_bytes if call_tools else 0,
+                        "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+                    },
+                )
+
+        try:
+            try:
+                raw = run_and_record(
+                    prompt,
+                    call_tools=tools,
+                    call_extensions=extensions,
+                    call_env=env_extra,
+                )
+            except PiError as exc:
+                if error_is_policy_blocked(exc):
+                    logger.warning(
+                        "requirement_map_policy_blocked",
+                        extra={"failure_kind": "policy_blocked"},
+                    )
+                    raise policy_blocked_error() from None
+                if not tools:
+                    raise
+                fallback_warning = "只读工具调用不可用，已回退 legacy 路径。"
+                raw = run_and_record(
+                    legacy_prompt(),
+                    call_tools="",
+                    call_extensions=(),
+                    call_env={},
+                )
+            if is_policy_blocked(raw):
+                logger.warning(
+                    "requirement_map_policy_blocked",
+                    extra={"failure_kind": "policy_blocked"},
+                )
+                raise policy_blocked_error()
+        finally:
+            if context_path is not None:
+                import shutil
+
+                context_dir = Path(context_path).parent
+                if context_dir.name.startswith("bid-map-context-"):
+                    shutil.rmtree(context_dir, ignore_errors=True)
+                else:
+                    try:
+                        context_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        if fallback_warning:
+            warnings = raw.get("warnings") if isinstance(raw, dict) else None
+            raw["warnings"] = [
+                *(warnings if isinstance(warnings, list) else []),
+                fallback_warning,
+            ]
+        return raw
