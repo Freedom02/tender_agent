@@ -10,6 +10,7 @@ from ..agent_runtime.submission_structure import (
     parse_submission_format_tree,
 )
 from ..tender_matching.document_fine_matching import extract_tender_requirements_by_rule
+from .prompts.parse import requirement_evaluation_prompt, structure_meta_prompt
 
 
 class PiParseOrchestrationError(RuntimeError):
@@ -522,6 +523,20 @@ def _requirement_agent_sample(
     return "\n".join(lines)
 
 
+def _evaluation_agent_sample(text: str, *, limit: int = 8000) -> str:
+    """保留评分办法附近的原文，供条款+评分合并节点一次读取。"""
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    markers = ("评标办法", "评分标准", "评分表", "评分项", "评审因素")
+    positions = [value.find(marker) for marker in markers if value.find(marker) >= 0]
+    if not positions:
+        return _clip_text(value, limit)
+    anchor = min(positions)
+    start = max(anchor - 1200, 0)
+    return value[start : start + limit]
+
+
 def _merge_requirement_outputs(
     model_requirements: list[dict[str, Any]],
     rule_requirements: list[dict[str, Any]],
@@ -867,7 +882,7 @@ def _derive_outline(bid_format_spec: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class PiParseOrchestrator:
-    """使用 Pi 逐节点执行解析阶段的 6 个子智能体。"""
+    """使用 Pi 逐节点执行解析阶段的 4 个子智能体。"""
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -897,6 +912,8 @@ class PiParseOrchestrator:
             if local_structure.get("sections")
             else _structure_text_evidence(document_text)
         )
+        legacy_mode = not callable(getattr(self.client, "run_json", None))
+        total_agents = 6 if legacy_mode else 4
         agent_results: list[dict[str, Any]] = []
         all_warnings = list(parser_warnings)
         successful_agents = 0
@@ -928,7 +945,7 @@ class PiParseOrchestrator:
             if not progress_callback:
                 return
             try:
-                progress_callback(agent_id, status, completed, 6)
+                progress_callback(agent_id, status, completed, total_agents)
             except Exception:
                 # Progress persistence must never turn a successful model call
                 # into a failed parsing node.
@@ -994,28 +1011,59 @@ class PiParseOrchestrator:
             sample_text = _requirement_agent_sample(rule_requirements)
             warnings: list[str] = []
             model_requirements: list[dict[str, Any]] = []
-            report_progress("RequirementExtractAgent", "running:1/1", 2)
+            requirement_agent_id = "RequirementExtractAgent"
+            report_progress(requirement_agent_id, "running:1/1", 2 if legacy_mode else 1)
             # The requirement node must still run for short documents where
             # deterministic extraction found no candidates. Long documents use
             # the focused rule-candidate sample to keep the Pi input bounded;
             # short documents are sent through unchanged so the node is
             # observable and can discover requirements on its own.
-            request_text = sample_text or document_text
+            evaluation_text = _evaluation_agent_sample(document_text)
+            if sample_text and evaluation_text != document_text:
+                request_text = f"【条款候选】\n{sample_text}\n\n【评分相关原文】\n{evaluation_text}"
+            else:
+                request_text = sample_text or document_text
             request_filename = (
                 f"{path.name}（规则候选样本）"
                 if sample_text
                 else f"{path.name}（短文档完整文本）"
             )
+            raw: dict[str, Any] = {}
             try:
-                raw = self.client.extract_requirements(
-                    document_text=request_text,
-                    document_structure=agent_document_structure,
-                    project_meta=project_meta,
-                    filename=request_filename,
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    timeout_seconds=90,
-                )
+                if legacy_mode:
+                    raw = self.client.extract_requirements(
+                        document_text=request_text,
+                        document_structure=agent_document_structure,
+                        project_meta=project_meta,
+                        filename=request_filename,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        timeout_seconds=90,
+                    )
+                else:
+                    merged_method = getattr(self.client, "extract_requirement_evaluations", None)
+                    if callable(merged_method):
+                        raw = merged_method(
+                            document_text=request_text,
+                            document_structure=agent_document_structure,
+                            project_meta=project_meta,
+                            filename=request_filename,
+                            workspace_id=workspace_id,
+                            project_id=project_id,
+                            timeout_seconds=90,
+                        )
+                    else:
+                        raw = self.client.run_json(
+                            requirement_evaluation_prompt(
+                                document_text=request_text,
+                                document_structure=agent_document_structure,
+                                project_meta=project_meta,
+                                filename=request_filename,
+                                workspace_id=workspace_id,
+                                project_id=project_id,
+                            ),
+                            timeout_seconds=90,
+                        )
                 model_requirements = _normalize_requirements(raw)
             except Exception as exc:
                 warnings.append(
@@ -1043,6 +1091,7 @@ class PiParseOrchestrator:
                 )
             return {
                 "requirements": merged,
+                **({} if legacy_mode else {"evaluationItems": _normalize_evaluations(raw, merged)}),
                 "warnings": list(dict.fromkeys(warnings)),
             }
 
@@ -1085,70 +1134,113 @@ class PiParseOrchestrator:
                 )
             return spec
 
-        structure_raw = run_agent(
-            "DocumentStructureAgent",
-            lambda: self.client.parse_document_structure(
-                document_text=structure_agent_text,
-                document_payload=structure_agent_payload,
-                filename=path.name,
-                parser_warnings=parser_warnings,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                project_context=project_context,
-            ),
-            ["artifact:sourceFile", "parse:documentBlocks"],
-            0,
-        )
-        document_structure = _merge_structures(
-            local_structure,
-            _normalize_structure(structure_raw, parsed),
-        )
-        agent_document_structure = _compact_structure_for_agent(document_structure)
-
-        project_meta_raw = run_agent(
-            "ProjectMetaAgent",
-            lambda: self.client.extract_project_meta(
-                document_text=document_text,
-                document_structure=agent_document_structure,
-                filename=path.name,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                project_context=project_context,
-            ),
-            ["parse:documentBlocks", "parse:documentStructure"],
-            1,
-        )
-        project_meta = _normalize_project_meta(project_meta_raw)
-
-        requirements_raw = run_agent(
-            "RequirementExtractAgent",
-            extract_requirements_in_batches,
-            ["parse:documentBlocks", "parse:documentStructure", "parse:projectMeta"],
-            2,
-        )
-        requirements = _normalize_requirements(requirements_raw)
-        agent_requirements = _compact_requirements_for_agent(requirements)
-
-        evaluation_raw = run_agent(
-            "EvaluationExtractAgent",
-            lambda: self.client.extract_evaluations(
-                document_text=document_text,
-                document_structure=agent_document_structure,
-                requirements=agent_requirements,
-                filename=path.name,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            ),
-            ["parse:documentBlocks", "parse:documentStructure", "parse:requirements"],
-            3,
-        )
-        evaluation_items = _normalize_evaluations(evaluation_raw, requirements)
+        if legacy_mode:
+            structure_raw = run_agent(
+                "DocumentStructureAgent",
+                lambda: self.client.parse_document_structure(
+                    document_text=structure_agent_text,
+                    document_payload=structure_agent_payload,
+                    filename=path.name,
+                    parser_warnings=parser_warnings,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    project_context=project_context,
+                ),
+                ["artifact:sourceFile", "parse:documentBlocks"],
+                0,
+            )
+            document_structure = _merge_structures(
+                local_structure,
+                _normalize_structure(structure_raw, parsed),
+            )
+            agent_document_structure = _compact_structure_for_agent(document_structure)
+            project_meta_raw = run_agent(
+                "ProjectMetaAgent",
+                lambda: self.client.extract_project_meta(
+                    document_text=document_text,
+                    document_structure=agent_document_structure,
+                    filename=path.name,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    project_context=project_context,
+                ),
+                ["parse:documentBlocks", "parse:documentStructure"],
+                1,
+            )
+            project_meta = _normalize_project_meta(project_meta_raw)
+            requirements_raw = run_agent(
+                "RequirementExtractAgent",
+                extract_requirements_in_batches,
+                ["parse:documentBlocks", "parse:documentStructure", "parse:projectMeta"],
+                2,
+            )
+            requirements = _normalize_requirements(requirements_raw)
+            agent_requirements = _compact_requirements_for_agent(requirements)
+            evaluation_raw = run_agent(
+                "EvaluationExtractAgent",
+                lambda: self.client.extract_evaluations(
+                    document_text=document_text,
+                    document_structure=agent_document_structure,
+                    requirements=agent_requirements,
+                    filename=path.name,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                ),
+                ["parse:documentBlocks", "parse:documentStructure", "parse:requirements"],
+                3,
+            )
+            evaluation_items = _normalize_evaluations(evaluation_raw, requirements)
+        else:
+            structure_meta_raw = run_agent(
+                "DocumentStructureAgent",
+                lambda: (
+                    getattr(self.client, "parse_document_structure_meta", None)(
+                        document_text=document_text,
+                        document_payload=structure_agent_payload,
+                        filename=path.name,
+                        parser_warnings=parser_warnings,
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        project_context=project_context,
+                    )
+                    if callable(getattr(self.client, "parse_document_structure_meta", None))
+                    else self.client.run_json(
+                        structure_meta_prompt(
+                            document_text=document_text,
+                            document_payload=structure_agent_payload,
+                            filename=path.name,
+                            parser_warnings=parser_warnings,
+                            workspace_id=workspace_id,
+                            project_id=project_id,
+                            project_context=project_context,
+                        )
+                    )
+                ),
+                ["artifact:sourceFile", "parse:documentBlocks"],
+                0,
+            )
+            structure_raw = _as_dict(structure_meta_raw.get("documentStructure"))
+            document_structure = _merge_structures(
+                local_structure,
+                _normalize_structure(structure_raw, parsed),
+            )
+            agent_document_structure = _compact_structure_for_agent(document_structure)
+            project_meta = _normalize_project_meta(structure_meta_raw)
+            requirements_raw = run_agent(
+                "RequirementExtractAgent",
+                extract_requirements_in_batches,
+                ["parse:documentBlocks", "parse:documentStructure", "parse:projectMeta"],
+                1,
+            )
+            requirements = _normalize_requirements(requirements_raw)
+            agent_requirements = _compact_requirements_for_agent(requirements)
+            evaluation_items = _normalize_evaluations(requirements_raw, requirements)
 
         template_raw = run_agent(
             "TemplateDetectAgent",
             detect_templates_from_relevant_text,
             ["parse:documentBlocks", "parse:documentStructure", "parse:submissionStructure"],
-            4,
+            4 if legacy_mode else 2,
         )
         bid_format_spec = _normalize_template(template_raw)
 
@@ -1172,7 +1264,7 @@ class PiParseOrchestrator:
                 "parse:evaluationItems",
                 "parse:bidFormatSpec",
             ],
-            5,
+            5 if legacy_mode else 3,
         )
         review = _normalize_review(review_raw, all_warnings, [])
         risk_items = [

@@ -229,6 +229,76 @@ TEMPLATE_SCHEMA = {
     "warnings": [],
 }
 
+STRUCTURE_META_SCHEMA = {
+    "documentStructure": DOCUMENT_STRUCTURE_SCHEMA,
+    "projectMeta": PROJECT_META_SCHEMA,
+    "warnings": [],
+}
+
+REQUIREMENT_EVALUATION_SCHEMA = {
+    "requirements": REQUIREMENT_SCHEMA["requirements"],
+    "evaluationItems": EVALUATION_SCHEMA["evaluationItems"],
+    "warnings": [],
+}
+
+
+def structure_meta_prompt(
+    *, document_text: str, document_payload: dict[str, Any], filename: str,
+    parser_warnings: list[str], workspace_id: str, project_id: str,
+    project_context: dict[str, Any],
+) -> str:
+    return f"""
+你是 DocumentStructureAgent，同时负责识别招标文件章节结构和项目基础信息。
+
+只依据输入的招标文件内容和本地解析块，不得使用外部知识，不得编造。
+必须只输出一个合法 JSON 对象，不要输出 Markdown、代码块、解释或前后缀。
+结构字段保持原文顺序；基础信息缺失使用空字符串，并尽量提供 sourceRefs。
+
+{_agent_context(filename=filename, workspace_id=workspace_id, project_id=project_id, project_context=project_context)}
+
+【本地解析器提示】
+{_dump(parser_warnings, 5000)}
+
+【本地解析结果】
+{_dump(document_payload, 16000)}
+
+【招标文件文本（唯一一次原文输入）】
+{_dump(document_text, 50000)}
+
+输出结构：
+{_dump(STRUCTURE_META_SCHEMA, 14000)}
+
+规则：章节识别遵循 DocumentStructureAgent 规则；项目基础信息只抽取项目名称、编号、招标人、代理机构、预算/限价、截止时间、期限和地点，不要把供应商资格条件写入 projectMeta。
+""".strip()
+
+
+def requirement_evaluation_prompt(
+    *, document_text: str, document_structure: dict[str, Any], project_meta: dict[str, Any],
+    filename: str, workspace_id: str, project_id: str,
+) -> str:
+    return f"""
+你是 RequirementExtractAgent，同时负责抽取投标方必须响应的原子条款和评标评分项。
+
+只依据招标文件，不得使用外部知识，不得编造。必须只输出一个合法 JSON 对象，不要输出 Markdown、代码块、解释或前后缀。
+每条要求必须有唯一 id（req-001...）；评分分值必须来自原文，无法确认时使用 null；sourceLocator 尽量标记章节、页码或表格。
+
+{_agent_context(filename=filename, workspace_id=workspace_id, project_id=project_id, project_context=project_meta)}
+
+【项目基础信息】
+{_dump(project_meta, 10000)}
+
+【文档结构】
+{_dump(document_structure, 30000)}
+
+【招标文件文本（唯一一次原文输入）】
+{_dump(document_text, 70000)}
+
+输出结构：
+{_dump(REQUIREMENT_EVALUATION_SCHEMA, 18000)}
+
+规则：requirements 按原子、可执行要求抽取，保留 mandatory/isRejection/sourceLocator/sourceSection/sourceText；evaluationItems 保留 criterion/criteria/writingFocus/score/relatedRequirementIds/sourceLocator；最多返回 25 条要求和 100 个评分项，合并重复评分档次。
+""".strip()
+
 
 
 def document_structure_prompt(
