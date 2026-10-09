@@ -656,6 +656,10 @@ VOLUME_PLAN_INLINE_SCHEMA: dict[str, Any] = {
 
 #: artifact → 给模型看的示例 schema（出处见 specs.ARTIFACT_SCHEMA_SOURCES）
 EXAMPLE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "clauseExtractionV2": prompt_module.CLAUSE_EXTRACTION_V2_SCHEMA,
+    "evaluationExtractionV2": prompt_module.EVALUATION_EXTRACTION_V2_SCHEMA,
+    "tableBindingV2": prompt_module.TABLE_BINDING_V2_SCHEMA,
+    "semanticReviewV2": prompt_module.SEMANTIC_REVIEW_V2_SCHEMA,
     "documentStructure": prompt_module.DOCUMENT_STRUCTURE_SCHEMA,
     "projectMeta": prompt_module.PROJECT_META_SCHEMA,
     "requirements": prompt_module.REQUIREMENT_SCHEMA,

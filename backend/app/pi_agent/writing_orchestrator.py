@@ -1297,6 +1297,7 @@ class PiWritingOrchestrator:
         agent_results: list[dict[str, Any]] = []
         warnings: list[str] = []
         successful_agents = 0
+        failed_agents = 0
         result_lock = Lock()
 
         def run_agent(
@@ -1304,7 +1305,7 @@ class PiWritingOrchestrator:
             fn: Callable[[], dict[str, Any]],
             input_refs: list[str],
         ) -> dict[str, Any]:
-            nonlocal successful_agents
+            nonlocal successful_agents, failed_agents
             started = now_iso()
             try:
                 raw = fn()
@@ -1351,6 +1352,7 @@ class PiWritingOrchestrator:
                     finished_at=now_iso(),
                 )
                 with result_lock:
+                    failed_agents += 1
                     warnings.append(message)
                     agent_results.append(result)
                 return {}
@@ -1501,6 +1503,11 @@ class PiWritingOrchestrator:
             warnings.append("RequirementMapAgent 未返回有效条款覆盖关系，请人工复核正文。")
         if successful_agents == 0 and requirement_items:
             raise PiWritingOrchestrationError("Pi 条款映射没有任何子智能体成功")
+        if failed_agents:
+            warnings.append(
+                f"条款映射有 {failed_agents}/{len(requirement_batches)} 个批次失败，"
+                "已保留成功批次结果；失败批次需重新映射。"
+            )
 
         return {
             "coverage": coverage["coverage"],
@@ -1510,7 +1517,7 @@ class PiWritingOrchestrator:
             "agentResults": agent_results,
             "provider": self.provider,
             "phase": "requirement_mapping",
-            "requirementMappingStatus": "completed",
+            "requirementMappingStatus": "failed" if failed_agents else "completed",
             "requirementMapBatchCount": len(requirement_batches),
         }
 

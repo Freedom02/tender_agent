@@ -55,6 +55,16 @@ from .plan import (  # noqa: F401
     requirement_map_prompt,
     volume_plan_prompt,
 )
+from .parse_v2 import (
+    CLAUSE_EXTRACTION_V2_SCHEMA,
+    EVALUATION_EXTRACTION_V2_SCHEMA,
+    TABLE_BINDING_V2_SCHEMA,
+    SEMANTIC_REVIEW_V2_SCHEMA,
+    tender_clause_prompt,
+    tender_evaluation_prompt,
+    tender_table_binding_prompt,
+    tender_semantic_review_prompt,
+)
 from .draft import (  # noqa: F401
     MATERIAL_MATCH_SCHEMA,
     SECTION_DRAFT_SCHEMA,

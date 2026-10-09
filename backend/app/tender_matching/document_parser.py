@@ -307,7 +307,7 @@ def parse_docx(content: bytes) -> dict[str, Any]:
     table_index = 0
     order = 0
     if body is not None:
-        for child in body:
+        for body_child_index, child in enumerate(body):
             local_name = child.tag.rsplit("}", 1)[-1]
             if local_name == "p":
                 xml_paragraph_index += 1
@@ -320,6 +320,7 @@ def parse_docx(content: bytes) -> dict[str, Any]:
                 )
                 order += 1
                 if record:
+                    record["bodyChildIndex"] = body_child_index
                     paragraph_index += 1
                     segments.append(record)
                     units.append(record)
@@ -327,6 +328,7 @@ def parse_docx(content: bytes) -> dict[str, Any]:
                 table_index += 1
                 table_id = f"TABLE-{table_index:03d}"
                 table, table_units = _table_record(child, table_id=table_id, order=order)
+                table["bodyChildIndex"] = body_child_index
                 tables.append(table)
                 for row in table["rows"]:
                     row_record = {
@@ -336,6 +338,7 @@ def parse_docx(content: bytes) -> dict[str, Any]:
                         "contentType": "table_row",
                         "order": order,
                         "tableId": table_id,
+                        "bodyChildIndex": body_child_index,
                         "rowIndex": row["rowIndex"],
                         "cells": row["cells"],
                         "style": {},

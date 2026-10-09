@@ -330,6 +330,10 @@ def _validate_text_shape(
 
 #: 各智能体产物的期望形态（Wave 1 的调用点直接用）
 ARTIFACT_SHAPES: dict[str, ArtifactShape] = {
+    "clauseExtractionV2": ArtifactShape(list_keys=("requirements",), item_fields=("requirementId", "text")),
+    "evaluationExtractionV2": ArtifactShape(list_keys=("evaluationRules",), item_fields=("evaluationRuleId", "ruleType")),
+    "tableBindingV2": ArtifactShape(list_keys=("responseTableSchemas",), item_fields=("responseTableId", "sourceTableId")),
+    "semanticReviewV2": ArtifactShape(list_keys=("findings",), item_fields=("code", "severity", "message"), text_keys=("status",), text_required=True),
     "outlinePlan": ArtifactShape(
         list_keys=("plan", "outline", "sections"),
         item_fields=("title",),

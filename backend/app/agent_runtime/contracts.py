@@ -215,6 +215,7 @@ def build_parse_bundle(
     bundle_id = str(
         parse_bundle_id
         or run_value.get("parseBundleId")
+        or result_value.get("parseBundleId")
         or (f"parse-{resolved_run_id}" if resolved_run_id else new_id("parse"))
     )
     created = str(run_value.get("createdAt") or now_iso())
@@ -299,7 +300,7 @@ def build_parse_bundle(
         workspaceId=resolved_workspace_id,
         createdAt=created,
         updatedAt=updated,
-        sourceFile=_source_file(run_value, root=root, source_file=source_file),
+        sourceFile=_source_file(run_value, root=root, source_file=source_file or _as_dict(result_value.get("sourceFile"))),
         documentBlocks=resolved_document_blocks,
         documentStructure=resolved_document_structure,
         projectMeta=_as_dict(result_value.get("projectMeta")),
@@ -343,7 +344,13 @@ def build_parse_bundle(
         agentResults=resolved_agent_results,
         rawProviderResult=_as_dict(raw_provider_result) or result_value,
     )
-    return bundle.model_dump(mode="json")
+    payload = bundle.model_dump(mode="json")
+    if "resolvedTenderV2" in result_value:
+        from .parse_artifact import finalize_native_parse_bundle
+
+        payload["resolvedTenderV2"] = result_value["resolvedTenderV2"]
+        payload = finalize_native_parse_bundle(payload)
+    return payload
 
 
 def validate_parse_bundle(value: Any) -> dict[str, Any]:

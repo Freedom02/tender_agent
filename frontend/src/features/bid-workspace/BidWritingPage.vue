@@ -307,6 +307,10 @@ const AGENT_NAMES: Record<string, string> = {
   EvaluationExtractAgent: "评分办法提取",
   TemplateDetectAgent: "投标模板识别",
   ParseReviewAgent: "解析结果复核",
+  TenderClauseAgent: "条款与证据抽取",
+  TenderEvaluationAgent: "评审办法识别",
+  TenderTableBindingAgent: "原响应表绑定",
+  TenderSemanticReviewAgent: "独立语义复核",
   ParseBundleAssembler: "解析产物整理"
 };
 
@@ -315,8 +319,10 @@ function currentAgentName(agentId?: string): string {
 }
 
 function currentAgentStatus(status?: string): string {
-  if (status?.startsWith("running:")) {
-    return `执行中 · 分片 ${status.slice("running:".length)}`;
+  if (status?.includes(":")) {
+    const [state, label] = status.split(":", 2);
+    const names: Record<string, string> = { running: "执行中", retrying: "校验修正中", success: "已完成", failed: "执行失败", skipped: "无需执行" };
+    return `${names[state] || state} · 分片 ${label}`;
   }
   return (
     {
@@ -2126,6 +2132,12 @@ async function previewExport() {
           </div>
         </template>
         <el-progress :percentage="cloudRun.progress" :status="cloudRun.status === 'failed' ? 'exception' : undefined" />
+        <p v-if="cloudRun.totalNodes" class="form-hint">
+          已完成 {{ cloudRun.completedNodes || 0 }}/{{ cloudRun.totalNodes }} 个节点
+          · 已用时 {{ Math.floor((cloudRun.elapsedSeconds || 0) / 60) }} 分 {{ Math.floor((cloudRun.elapsedSeconds || 0) % 60) }} 秒
+          · {{ cloudRun.activeNodes?.length || 0 }} 个节点执行中
+          <span v-if="cloudRun.failedNodes"> · {{ cloudRun.failedNodes }} 个节点失败，结果需复核</span>
+        </p>
         <div v-if="cloudRun.currentAgent" class="cloud-agent-progress">
           <span>当前节点</span>
           <strong>{{ currentAgentName(cloudRun.currentAgent) }}</strong>
@@ -2138,6 +2150,13 @@ async function previewExport() {
           </el-tag>
         </div>
         <p v-if="cloudRun.error" class="cloud-error">{{ cloudRun.error }}</p>
+        <el-alert
+          v-if="cloudRun.result?.parseReviewReport?.status === 'review_required'"
+          title="解析已结束，结果仍有待复核项，请检查原文覆盖、条款和来源后再撰写。"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
 
         <template v-if="cloudRun.result">
           <div class="cloud-meta-grid">

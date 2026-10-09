@@ -139,11 +139,11 @@ def _check_missed_responses(
             continue
         requirement = _text(row.get("requirement") or row.get("rawText"))
         add(
-            "漏响应",
             "高",
             "漏响应",
             f"[{rid}] {requirement or '（无要求文本）'}：未出现在技术/商务偏离表，"
             f"存在漏响应风险，请补齐响应或确认是否豁免。",
+            count_key="漏响应",
         )
 
 
@@ -161,10 +161,10 @@ def _check_rejection(fine_review: dict[str, Any], add) -> None:
             detail = _text(entry.get("detail")) or _text(entry.get("title"))
             prefix = f"[{rid}] " if rid else ""
             add(
-                "废标风险",
                 "高",
                 f"废标风险（{label}）",
                 f"{prefix}{detail or '（无说明）'}",
+                count_key="废标风险",
             )
 
 
@@ -201,24 +201,24 @@ def _check_key_fields(
 
     if _is_placeholder(project_name):
         add(
-            "关键信息",
             "高",
             "关键信息缺失",
             "项目名称（projectName）缺失或含占位符，请补充招标项目名称。",
+            count_key="关键信息",
         )
     if _is_placeholder(project_code):
         add(
-            "关键信息",
             "高",
             "关键信息缺失",
             "项目编号（projectCode）缺失或含占位符，请补充招标项目编号。",
+            count_key="关键信息",
         )
     if _is_placeholder(company_name):
         add(
-            "关键信息",
             "高",
             "关键信息缺失",
             "企业名称（company.company）缺失或含占位符，请补充投标主体名称。",
+            count_key="关键信息",
         )
 
     # 项目名一致性：projectName 非空时，检查正文是否出现该名称（简单子串检查）。
@@ -226,11 +226,11 @@ def _check_key_fields(
         combined = "\n".join(_text(section.get("content")) for section in _sections(bid_document))
         if project_name not in combined:
             add(
-                "关键信息",
                 "中",
                 "项目名不一致",
                 f"正文各章节未检索到招标项目名「{project_name}」（简单子串检查），"
                 f"请核对是否使用了与招标文件不一致的项目名称。",
+                count_key="关键信息",
             )
 
 
@@ -247,11 +247,11 @@ def _check_sensitive_words(bid_document: dict[str, Any], add) -> None:
                 hits[term].append(section_name)
     for term, section_names in hits.items():
         add(
-            "敏感词",
             "低",
             "敏感词",
             f"正文命中敏感/禁用表述「{term}」（章节：{'、'.join(section_names)}），"
             f"请斟酌表述，避免绝对化或夸大承诺。",
+            count_key="敏感词",
         )
 
 
@@ -293,7 +293,10 @@ def proofread(
     counts: dict[str, int] = {"漏响应": 0, "废标风险": 0, "负偏离": 0, "敏感词": 0, "关键信息": 0, "证据溯源": 0}
 
     def add(level: str, title: str, detail: str, count_key: str | None = None) -> None:
-        """追加一条风险项并累加对应计数。"""
+        """追加一条风险项并累加对应计数。
+
+        参数顺序固定为 (level, title, detail, count_key)，调用方不得传分类名占位。
+        """
         if level not in RISK_LEVELS:
             level = "中"
         risk_items.append({"level": level, "title": title, "detail": detail})

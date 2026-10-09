@@ -970,6 +970,12 @@ export interface CloudBidRun {
   progress: number;
   currentAgent?: string;
   currentAgentStatus?: string;
+  elapsedSeconds?: number;
+  completedNodes?: number;
+  totalNodes?: number;
+  failedNodes?: number;
+  activeNodes?: { agentId: string; label: string; timestamp: string; attempt: number }[];
+  nodeArtifact?: string;
   createdAt: string;
   updatedAt: string;
   difyTaskId?: string;

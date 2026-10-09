@@ -1,0 +1,60 @@
+{
+  "fixtureMeta": {
+    "kind": "manually_annotated_regression_subset",
+    "description": "真实数字孪生采购文件的选定原文摘录，保留原段落及表格锚点；不是全量文档，不代表 PI 解析结果。",
+    "sourceProjectId": "local-9f795e75a6",
+    "sourceWorkspaceId": "workspace-faa83fcbd1",
+    "sourceParseBundleId": "parse-legacy-workspace-faa83fcbd1",
+    "documentSha256": "fad7b3956cbd6a548f4ec4a282ea2dcc53b71385fec6421e337c9ecf20f2f3a4"
+  },
+  "sourceFile": {
+    "fileId": "tender-file-ec18d1fd1f",
+    "filename": "【招标文件】数字孪生应用实训平台采购招标文件（[350181]FJUS[GK]202600120260113001）.docx",
+    "sha256": "fad7b3956cbd6a548f4ec4a282ea2dcc53b71385fec6421e337c9ecf20f2f3a4"
+  },
+  "units": [
+    {
+      "id": "SEG-000368", "sourceLocator": "第336段", "paragraphIndex": 336, "bodyChildIndex": 348,
+      "text": "1、开标结束后，由 福建优尚项目管理有限公司 负责资格审查小组的组建及资格审查工作的组织。"
+    },
+    {
+      "id": "SEG-000370", "sourceLocator": "第338段", "paragraphIndex": 338, "bodyChildIndex": 350,
+      "text": "资格审查小组由3人组成，并负责具体审查事务，其中由采购人派出的采购人代表至少1人，由福建优尚项目管理有限公司派出的工作人员至少1人，其余1人可为采购人代表或福建优尚项目管理有限公司的工作人员。"
+    },
+    {
+      "id": "SEG-000379", "sourceLocator": "TABLE-008第3行", "tableId": "TABLE-008", "rowIndex": 3, "bodyChildIndex": 357,
+      "text": "①投标人为企业的，提供有效的营业执照复印件；投标人为事业单位的，提供有效的事业单位法人证书复印件；"
+    },
+    {
+      "id": "SEG-000510", "sourceLocator": "第447段", "paragraphIndex": 447, "bodyChildIndex": 466,
+      "text": "采购包1：最低评标价法"
+    },
+    {
+      "id": "SEG-000515", "sourceLocator": "TABLE-015第2行", "tableId": "TABLE-015", "rowIndex": 2, "bodyChildIndex": 470,
+      "text": "评审委员会应当启动异常低价投标（响应）审查程序：\n评审委员会启动异常低价投标（响应）审查后，应当要求相关供应商在评审现场合理的时间内提供书面说明及必要的证明材料，对投标（响应）价格作出解释。\n提供项目具体成本测算等与报价合理性相关的书面说明及必要的证明材料，包括但不限于原材料成本、人工成本、制造费用等，给予相关供应商的合理时间为30分钟。"
+    },
+    {
+      "id": "SEG-000524", "sourceLocator": "TABLE-016第2行", "tableId": "TABLE-016", "rowIndex": 2, "bodyChildIndex": 478,
+      "text": "本项目将对符合本办法规定的小微企业报价给予15%的扣除，用扣除后的价格参加评审。\n在货物采购项目中，货物由中小企业制造，即货物由中小企业生产且使用该中小企业商号或者注册商标；\n参加政府采购活动的小型、微型企业应当按要求提供符合小型、微型企业的《中小企业声明函》，无须提供其他相关证明材料。"
+    },
+    {
+      "id": "SEG-000547", "sourceLocator": "TABLE-018第2行", "tableId": "TABLE-018", "rowIndex": 2, "bodyChildIndex": 500,
+      "text": "12.支持通过截取一个个场景的视点，组成一组动画；同时支持编辑解说文本，也支持上传语音。支持只播一次、单个动画循环，也支持列表循环播放。（投标人须在投标文件中提供截取视点、编辑解说文本、上传声音、播放模式切换等不少于4张截图。截图需同时满足:（1）截取视点:必须清晰展示，在三维场景中，通过点击按钮添加视点，编辑动画窗口能够显示截取的场景图片，支持编辑视点名称、停顿时长等内容；（2）编辑解说文本：必须支持针对视点编辑解说文本，保存后支持在播放视点时以字幕形式展示解说文本；（3）上传声音：支持上传声音，支持mp3,m4a,wav等格式；（4）播放模式切换：必须支持根据用户需求，切换动画播放模式，至少需支持只播一次、单个循环、列表循环等模式；（5）截图必须为真实系统截图，且须加盖投标人公章）\n14.平台引擎需支持同屏渲染不少于10万个设备级数字孪生体，且有实际交互能力、数据信息能力，且同屏渲染帧率不低于60fps。\n课程内容包含建筑结构基础搭建课程、零代码基础课程和零代码实施技巧课。不少于16个视频，可支撑48个教学时，提供配套PPT及实训任务指导书，课程大刚如下："
+    },
+    {
+      "id": "SEG-000553", "sourceLocator": "TABLE-019第2行", "tableId": "TABLE-019", "rowIndex": 2, "bodyChildIndex": 503,
+      "text": "1 | ★ | 交货时间 | 自合同签订之日起20日内完成项目全部设备供货并送到指定地点同时完成调试培训。"
+    }
+  ],
+  "responseTables": [
+    {
+      "id": "TABLE-026", "bodyChildIndex": 1283, "templateId": "tpl-technical-02", "title": "技术和服务要求响应表", "domain": "technical",
+      "labels": ["采购包", "品目号", "技术和服务要求", "投标响应", "是否偏离及说明"],
+      "gridWidths": ["1661", "1661", "1661", "1661", "1661"]
+    },
+    {
+      "id": "TABLE-027", "bodyChildIndex": 1295, "templateId": "tpl-technical-03", "title": "商务条件响应表", "domain": "commercial",
+      "labels": ["采购包", "品目号", "商务条件", "投标响应", "是否偏离及说明"]
+    }
+  ]
+}

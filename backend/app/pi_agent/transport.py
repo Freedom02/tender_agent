@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Pi 传输层：进程启动、RPC 事件流、超时与 JSON 解析。
 
-由原 `client.py` 机械拆分而来（Wave 0 · 0.3），代码一字未改。
+由原 `client.py` 拆分而来，解析请求支持线程隔离的总时限和子进程清理。
 本模块**不含任何 agent 级方法**；那些在 `agents.py`，二者由 `client.PiClient` 组合。
 
 Wave 1 · A 在 `run_json` 这一层接上了两件「只记录、不阻断」的事：
@@ -12,7 +12,7 @@ Wave 1 · A 在 `run_json` 这一层接上了两件「只记录、不阻断」�
      （`runState` 段），**不落盘**。
 
 硬约束（有测试守着）：
-  - 原实现整体保留在 `_run_json_raw` 里，argv、超时、异常类型一字未改；
+  - `_run_json_raw` 保持 RPC 与 JSON 行为，结束与超时均回收子进程并关闭流；
   - `_command()` 的签名与 argv 语义不受影响（校验接线不碰启动参数）；
   - 校验失败**不抛异常**，不新增任何默认阻断分支。
 """
@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 from ..agent_runtime.run_state import (
@@ -115,7 +116,7 @@ def _diagnostic_text(value: Any) -> str:
     return str(value or "")
 
 
-def _redact_diagnostic(value: Any, *, policy: bool = False) -> str:
+def _redact_diagnostic(value: Any, *, policy: bool = False, contract: bool = False) -> str:
     """Return a bounded diagnostic; never retain prompt/key material in errors."""
 
     raw = _diagnostic_text(value).strip()
@@ -132,6 +133,8 @@ def _redact_diagnostic(value: Any, *, policy: bool = False) -> str:
     redacted = re.sub(r"\s+", " ", redacted).strip()
     if not redacted:
         return ""
+    if contract:
+        return redacted[:1600]
     if len(redacted) > 160 or _SENSITIVE_WORDS.search(redacted) or "\n" in raw:
         digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:10]
         return f"provider diagnostic redacted (sha256:{digest})"
@@ -300,6 +303,46 @@ class PiTransport:
         #: plan_outline 链路的运行态（Wave 1 只挂在实例上、只进返回结构，不落盘）
         self._run_state: RunState | None = None
         self._run_state_lock = threading.Lock()
+        self._request_limits = threading.local()
+
+    @contextmanager
+    def request_deadline(self, deadline: float):
+        previous = getattr(self._request_limits, "deadline", None)
+        self._request_limits.deadline = deadline
+        try:
+            yield
+        finally:
+            self._request_limits.deadline = previous
+
+    @staticmethod
+    def _stop_process(process: Any) -> None:
+        if process.poll() is None:
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+    @contextmanager
+    def _process_scope(self, process: Any):
+        try:
+            yield
+        finally:
+            self._stop_process(process)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
     def _resolve_command(self) -> str:
@@ -534,7 +577,7 @@ class PiTransport:
         extensions: tuple[str, ...] = (),
         env_extra: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Wave 0 · 0.3 的原始实现（进程启动、RPC、超时、JSON 解析），一字未改。"""
+        """Launch an isolated RPC child and clean it up on every exit path."""
 
         runtime_env = {
             **os.environ,
@@ -547,6 +590,9 @@ class PiTransport:
             # $COMPANY_LLM_API_KEY. Keep the secret out of the prompt and
             # provide it only to the child process.
             runtime_env["COMPANY_LLM_API_KEY"] = self.config.api_key
+        overall_deadline = getattr(self._request_limits, "deadline", None)
+        if overall_deadline is not None and time.monotonic() >= overall_deadline:
+            raise PiError("解析达到总时限，未启动新的 Pi 请求")
         try:
             process = subprocess.Popen(
                 self._command(tools=tools, extensions=extensions),
@@ -563,12 +609,18 @@ class PiTransport:
         except OSError as exc:
             raise PiError(f"启动 Pi 失败：{exc}") from exc
 
+        with self._process_scope(process):
+            return self._read_json_response(process, prompt, timeout_seconds=timeout_seconds)
+
+    def _read_json_response(self, process: Any, prompt: str, *, timeout_seconds: float | None) -> dict[str, Any]:
         events: queue.Queue[tuple[str, str]] = queue.Queue()
 
         def read_stream(stream: Any, kind: str) -> None:
             try:
                 for line in stream:
                     events.put((kind, line.rstrip("\r\n")))
+            except (OSError, ValueError):
+                pass
             finally:
                 events.put((f"{kind}_eof", ""))
 
@@ -587,19 +639,7 @@ class PiTransport:
 
         def finish_after_failure() -> tuple[int | None, list[str]]:
             """Stop a failed child and collect the diagnostic it already emitted."""
-            if process.poll() is None:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                process.wait(timeout=3)
+            self._stop_process(process)
             stderr_thread.join(timeout=1)
             stdout_thread.join(timeout=1)
             diagnostics: list[str] = []
@@ -654,6 +694,9 @@ class PiTransport:
             except (TypeError, ValueError):
                 effective_timeout = self.config.timeout_seconds
         deadline = time.monotonic() + effective_timeout
+        overall_deadline = getattr(self._request_limits, "deadline", None)
+        if overall_deadline is not None:
+            deadline = min(deadline, overall_deadline)
         while time.monotonic() < deadline:
             try:
                 kind, line = events.get(timeout=0.2)
@@ -717,18 +760,14 @@ class PiTransport:
                 break
 
         if not settled and time.monotonic() >= deadline:
-            process.kill()
             raise PiError(
                 f"Pi 智能体执行超时（provider={self.config.provider or 'default'}，"
                 f"model={self.config.model or 'default'}）"
             )
 
-        if process.poll() is None:
-            process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        self._stop_process(process)
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
         if not text_parts and message_text_parts:
             text_parts = message_text_parts
         text = "".join(text_parts).strip()

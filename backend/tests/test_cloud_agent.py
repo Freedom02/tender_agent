@@ -815,6 +815,49 @@ class CloudAgentTests(unittest.TestCase):
         self.assertEqual(len(result["coverage"]), len(requirements))
         self.assertGreaterEqual(client.max_active, 2)
 
+    def test_failed_requirement_batch_does_not_report_completed(self) -> None:
+        class PartialMappingClient(FakeWritingOrchestrationClient):
+            def map_requirements(self, **kwargs: object) -> dict[str, object]:
+                bundle = kwargs["parse_bundle"]
+                assert isinstance(bundle, dict)
+                batch = bundle["requirements"]
+                assert isinstance(batch, list)
+                self.calls.append("RequirementMapAgent")
+                if batch[0]["id"] == "req-080":
+                    raise PiError("Pi 请求被输入策略拦截（policy_blocked）")
+                return {
+                    "coverage": [
+                        {"requirementId": item["id"], "sectionId": "t-01"}
+                        for item in batch
+                    ],
+                    "uncoveredRequirements": [],
+                    "duplicatedRequirements": [],
+                }
+
+        client = PartialMappingClient()
+        result = PiWritingOrchestrator(client).map_requirement_coverage(
+            parse_bundle={
+                "requirements": [{"id": f"req-{index:03d}"} for index in range(81)],
+                "evaluationItems": [],
+            },
+            outline_plan=[{"sectionId": "t-01", "title": "技术响应"}],
+            workspace_id="workspace-1",
+            project_id="project-1",
+        )
+
+        self.assertEqual(result["requirementMappingStatus"], "failed")
+        self.assertEqual(result["requirementMapBatchCount"], 2)
+        self.assertEqual(len(result["coverage"]), 80)
+        self.assertEqual(
+            [item["requirementId"] for item in result["uncoveredRequirements"]],
+            ["req-080"],
+        )
+        self.assertEqual(
+            sorted(item["status"] for item in result["agentResults"]),
+            ["failed", "success"],
+        )
+        self.assertTrue(any("1/2 个批次失败" in item for item in result["warnings"]))
+
     def test_pi_writing_orchestrator_filters_unknown_outline_ids(self) -> None:
         client = FakeWritingOrchestrationClient()
 

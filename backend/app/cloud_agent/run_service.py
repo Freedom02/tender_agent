@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,7 @@ from .run_repository import RunRepository, create_run_repository
 from ..agent_runtime.contracts import build_parse_bundle
 from ..bid_writing.template_fragments import attach_template_fragments_to_bundle
 from ..pi_agent.client import PiClient
+from ..runtime_lock import runtime_file_lock
 
 
 def now_iso() -> str:
@@ -45,6 +49,8 @@ class CloudRunService:
             agent_provider.strip().lower() if isinstance(agent_provider, str) and agent_provider.strip() else None
         )
         self.agent_provider = self._current_provider()
+        self._processing: set[str] = set()
+        self._processing_lock = threading.Lock()
 
     def _current_provider(self) -> str:
         """Read the provider at run time so a long-lived API process cannot
@@ -66,6 +72,31 @@ class CloudRunService:
         filename: str,
         content: bytes,
         mime_type: str = "",
+    ) -> dict[str, Any]:
+        provider = self._current_provider()
+        request_key = hashlib.sha256(json.dumps(
+            [workspace_id, project_id, filename, provider, hashlib.sha256(content).hexdigest()],
+            ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+        request_dir = self.runtime_root / "parse-requests"
+        request_dir.mkdir(parents=True, exist_ok=True)
+        request_path = request_dir / f"{request_key}.json"
+        with runtime_file_lock(request_dir / f"{request_key}.lock"):
+            try:
+                previous_id = json.loads(request_path.read_text(encoding="utf-8")).get("runId", "")
+            except (OSError, ValueError, AttributeError):
+                previous_id = ""
+            previous = self.repository.get(previous_id) if previous_id else None
+            if (previous and previous.get("backendPid") == os.getpid()
+                    and previous.get("status") in {"created", "uploading", "uploaded", "parsing"}):
+                return previous
+            run = self._create_run(workspace_id=workspace_id, project_id=project_id, filename=filename,
+                                   content=content, mime_type=mime_type)
+            request_path.write_text(json.dumps({"runId": run["runId"]}), encoding="utf-8")
+            return run
+
+    def _create_run(
+        self, *, workspace_id: str, project_id: str, filename: str, content: bytes, mime_type: str,
     ) -> dict[str, Any]:
         run_id = f"bid-run-{uuid4().hex[:12]}"
         created = now_iso()
@@ -104,11 +135,30 @@ class CloudRunService:
         return self.repository.create(run)
 
     def process_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._processing_lock:
+            if run_id in self._processing:
+                return self.repository.get(run_id)
+            current = self.repository.get(run_id)
+            if not current or current.get("status") not in {"created", "uploading", "uploaded", "parsing"}:
+                return current
+            self._processing.add(run_id)
+        try:
+            return self._process_run(run_id)
+        finally:
+            with self._processing_lock:
+                self._processing.discard(run_id)
+
+    def _process_run(self, run_id: str) -> dict[str, Any] | None:
         run = self.repository.get(run_id)
         if not run:
             return None
         project_id = str(run.get("projectId") or "")
         input_path = self.root / str(run.get("inputArtifact") or "")
+        started = time.monotonic()
+        checkpoint_path = input_path.parent / "parse-nodes.jsonl"
+        checkpoint_lock = threading.RLock()
+        active_nodes: dict[str, dict[str, Any]] = {}
+        failed_nodes = 0
         try:
             provider = self._current_provider()
             self.repository.update(
@@ -117,6 +167,7 @@ class CloudRunService:
                 providerSource="explicit_override" if self._agent_provider_override else "AGENT_PROVIDER",
                 backendPid=os.getpid(),
                 status="uploading",
+                startedAt=now_iso(),
                 progress=10,
                 currentAgent="",
                 currentAgentStatus="",
@@ -131,28 +182,52 @@ class CloudRunService:
                 "project_context": {
                     "title": str(run.get("originalFilename") or ""),
                     "source": "local_upload",
+                    "sourceFileId": str(run.get("sourceFileId") or ""),
                 },
             }
             if provider == "pi":
-                progress_points = [35, 45, 55, 68, 78, 88, 96]
-
                 def update_pi_progress(
                     agent_id: str,
                     status: str,
                     completed: int,
                     total: int,
                 ) -> None:
-                    safe_completed = min(max(completed, 0), min(total, 6))
+                    safe_completed = min(max(completed, 0), max(total, 1))
                     self.repository.update(
                         run_id,
                         status="parsing",
-                        progress=progress_points[safe_completed],
+                        progress=35 + int(61 * safe_completed / max(total, 1)),
                         currentAgent=agent_id,
                         currentAgentStatus=status,
+                        elapsedSeconds=round(time.monotonic() - started, 1),
+                        completedNodes=safe_completed,
+                        totalNodes=total,
                         updatedAt=now_iso(),
                     )
 
+                def save_pi_node(event: dict[str, Any]) -> None:
+                    nonlocal failed_nodes
+                    node_key = f"{event['agentId']}:{event['label']}"
+                    with checkpoint_lock:
+                        with checkpoint_path.open("a", encoding="utf-8") as stream:
+                            stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+                        if event["status"] == "running":
+                            active_nodes[node_key] = {key: event[key] for key in ("agentId", "label", "timestamp", "attempt")}
+                        elif event["status"] in {"success", "failed", "skipped"}:
+                            active_nodes.pop(node_key, None)
+                        elif event["status"] == "attempt_failed" and node_key in active_nodes:
+                            active_nodes[node_key]["attempt"] = event["attempt"] + 1
+                        if event["status"] == "failed":
+                            failed_nodes += 1
+                        self.repository.update(
+                            run_id, nodeArtifact=str(checkpoint_path.relative_to(self.root)).replace("\\", "/"),
+                            activeNodes=list(active_nodes.values()), failedNodes=failed_nodes,
+                            lastNodeError=event.get("error") or "", elapsedSeconds=event["elapsedSeconds"],
+                            updatedAt=now_iso(),
+                        )
+
                 parse_kwargs["progress_callback"] = update_pi_progress
+                parse_kwargs["node_callback"] = save_pi_node
                 response = self.pi_client.parse_tender(input_path, **parse_kwargs)
             else:
                 response = self.client.parse_tender(input_path, **parse_kwargs)
@@ -181,6 +256,12 @@ class CloudRunService:
                 root=self.root,
                 source_path=input_path,
             )
+            if "resolvedTenderV2" in parse_bundle_payload:
+                from ..agent_runtime.parse_artifact import finalize_native_parse_bundle
+
+                parse_bundle_payload = finalize_native_parse_bundle(parse_bundle_payload)
+                result_payload["resolvedTenderV2"] = parse_bundle_payload["resolvedTenderV2"]
+                result_payload["parseReviewReport"] = parse_bundle_payload["parseReviewReport"]
             result_payload = {
                 **result_payload,
                 "templateFragments": parse_bundle_payload.get("templateFragments") or [],
@@ -232,6 +313,8 @@ class CloudRunService:
                 parseBundleArtifact=parse_bundle_artifact,
                 result=result_payload,
                 error=None,
+                elapsedSeconds=round(time.monotonic() - started, 1),
+                activeNodes=[],
             )
         except Exception as exc:
             self.repository.update(
@@ -241,8 +324,17 @@ class CloudRunService:
                 currentAgentStatus="failed",
                 updatedAt=now_iso(),
                 error=str(exc)[:2000],
+                elapsedSeconds=round(time.monotonic() - started, 1),
+                activeNodes=[],
             )
         return self.repository.get(run_id)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        return self.repository.get(run_id)
+        run = self.repository.get(run_id)
+        if run and run.get("status") in {"uploading", "uploaded", "parsing"}:
+            try:
+                started = datetime.fromisoformat(run.get("startedAt") or run["createdAt"])
+                run["elapsedSeconds"] = max(0, round((datetime.now().astimezone() - started).total_seconds(), 1))
+            except (ValueError, TypeError, KeyError):
+                pass
+        return run

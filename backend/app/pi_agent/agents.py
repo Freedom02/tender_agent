@@ -68,16 +68,43 @@ class PiAgentMethods:
         project_id: str,
         project_context: dict[str, Any] | None = None,
         progress_callback: Callable[[str, str, int, int], None] | None = None,
+        node_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        from .orchestrator import PiParseOrchestrator
+        from .resolved_parse import PiResolvedParseOrchestrator
 
-        return PiParseOrchestrator(self).parse_tender(
+        return PiResolvedParseOrchestrator(self).parse_tender(
             path,
             workspace_id=workspace_id,
             project_id=project_id,
             project_context=project_context or {"source": "local_upload"},
             progress_callback=progress_callback,
+            node_callback=node_callback,
         )
+
+    def extract_tender_clauses(self, *, inputs: dict[str, Any], correction: str = "") -> dict[str, Any]:
+        from .prompts.parse_v2 import tender_clause_prompt
+
+        return self.run_json(tender_clause_prompt(inputs=inputs, correction=correction), timeout_seconds=180, validate=False)
+
+    def repair_tender_clauses(self, *, inputs: dict[str, Any], correction: str = "") -> dict[str, Any]:
+        from .prompts.parse_v2 import tender_clause_repair_prompt
+
+        return self.run_json(tender_clause_repair_prompt(inputs=inputs, correction=correction), timeout_seconds=180, validate=False)
+
+    def extract_tender_evaluation(self, *, inputs: dict[str, Any], correction: str = "") -> dict[str, Any]:
+        from .prompts.parse_v2 import tender_evaluation_prompt
+
+        return self.run_json(tender_evaluation_prompt(inputs=inputs, correction=correction), timeout_seconds=180, validate=False)
+
+    def bind_tender_response_tables(self, *, inputs: dict[str, Any], correction: str = "") -> dict[str, Any]:
+        from .prompts.parse_v2 import tender_table_binding_prompt
+
+        return self.run_json(tender_table_binding_prompt(inputs=inputs, correction=correction), timeout_seconds=180, validate=False)
+
+    def review_tender_semantics(self, *, inputs: dict[str, Any], correction: str = "") -> dict[str, Any]:
+        from .prompts.parse_v2 import tender_semantic_review_prompt
+
+        return self.run_json(tender_semantic_review_prompt(inputs=inputs, correction=correction), timeout_seconds=180, validate=False)
 
 
     def parse_document_structure(
@@ -181,6 +208,7 @@ class PiAgentMethods:
         workspace_id: str,
         project_id: str,
         timeout_seconds: float | None = None,
+        correction: str = "",
     ) -> dict[str, Any]:
         return self.run_json(
             template_detect_prompt(
@@ -189,7 +217,7 @@ class PiAgentMethods:
                 filename=filename,
                 workspace_id=workspace_id,
                 project_id=project_id,
-            ),
+            ) + (f"\n上次校验反馈：{correction}" if correction else ""),
             timeout_seconds=timeout_seconds,
         )
 

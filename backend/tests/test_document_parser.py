@@ -116,6 +116,7 @@ class DocumentParserTests(unittest.TestCase):
     def test_docx_keeps_paragraph_table_row_and_cell_structure_in_order(self) -> None:
         body = """
         <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第三章 资格审查</w:t></w:r></w:p>
+        <w:p/>
         <w:tbl>
           <w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="6200"/></w:tblGrid>
           <w:tr>
@@ -149,9 +150,14 @@ class DocumentParserTests(unittest.TestCase):
         self.assertEqual(parsed["metadata"]["footers"], ["第 PAGE 页"])
         self.assertEqual(parsed["metadata"]["layout"]["pageWidthTwips"], "11906")
         self.assertEqual(parsed["segments"][0]["order"], 0)
-        self.assertEqual(parsed["segments"][1]["order"], 1)
-        self.assertEqual(parsed["segments"][2]["order"], 2)
-        self.assertEqual(parsed["segments"][3]["order"], 3)
+        self.assertEqual(parsed["segments"][1]["order"], 2)
+        self.assertEqual(parsed["segments"][2]["order"], 3)
+        self.assertEqual(parsed["segments"][3]["order"], 4)
+        self.assertEqual(
+            [item["bodyChildIndex"] for item in parsed["segments"]],
+            [0, 2, 2, 3],
+        )
+        self.assertEqual(parsed["tables"][0]["bodyChildIndex"], 2)
 
     def test_legacy_doc_is_not_decoded_as_plain_utf8(self) -> None:
         try:

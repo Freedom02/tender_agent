@@ -765,6 +765,22 @@ class Store:
             from .tender_matching.document_models import strip_derivable_segments
 
             payload["documentBlocks"] = strip_derivable_segments(payload["documentBlocks"])
+        if "resolvedTenderV2" in payload:
+            from .agent_runtime.parse_artifact import finalize_native_parse_bundle
+
+            payload = finalize_native_parse_bundle(payload)
+            native_target = target.with_name("resolved-tender-v2.json")
+            report_target = target.with_name("resolved-tender-v2-review.json")
+            write_json(native_target, payload["resolvedTenderV2"], compact=True)
+            write_json(report_target, payload["parseReviewReport"], compact=True)
+            payload["resolvedTenderV2Artifact"] = str(native_target.relative_to(self.root)).replace("\\", "/")
+            payload["resolvedTenderV2ReviewArtifact"] = str(report_target.relative_to(self.root)).replace("\\", "/")
+            for artifact_type, artifact_target in (("resolved_tender_v2", native_target), ("resolved_tender_v2_review", report_target)):
+                payload["artifacts"] = [item for item in payload["artifacts"] if item.get("type") != artifact_type]
+                payload["artifacts"].append({
+                    "artifactId": f"{bundle.parseBundleId}:{artifact_type}", "type": artifact_type,
+                    "name": artifact_target.name, "storagePath": str(artifact_target.relative_to(self.root)).replace("\\", "/"),
+                })
         write_json(target, payload, compact=True)
         return payload
 
@@ -2050,6 +2066,7 @@ class Store:
     # ------------------------------------------------------------------
     def resolve_tender(
         self, workspace_id: str, parse_bundle: dict[str, Any] | None = None,
+        *, schema_version: str | None = None,
     ) -> dict[str, Any] | None:
         """解析产物聚合入口（ResolvedTender）——撰写各工序的统一输入契约。
 
@@ -2078,6 +2095,7 @@ class Store:
             organization=self.organization or {},
             knowledge=self.company_knowledge or {},
             ai=ai,
+            schema_version=schema_version,
         )
 
     def plan_bid_document(self, workspace_id: str) -> dict[str, Any] | None:

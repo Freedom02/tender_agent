@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..agent_runtime.resolved_tender import RESOLVED_TENDER_V2, ResolvedTenderV2
+from .resolved_migration import migrate_resolved_tender
 from .eval_parser import parse_eval_items
 from .outline import extract_response_outline
 
@@ -40,6 +42,7 @@ def resolve_tender(
     organization: dict[str, Any] | None = None,
     knowledge: dict[str, Any] | None = None,
     ai: dict[str, Any] | None = None,
+    schema_version: str | None = None,
 ) -> dict[str, Any]:
     """把上游各散落产物归一成一个 ResolvedTender dict。
 
@@ -57,7 +60,24 @@ def resolve_tender(
                        由 planning 的目录回退分支单独消费，此处不混入
       - risk:          fineReview 的风险信号 + parse_bundle.riskItems
     每个字段的最终来源记录在 sources 里，便于定位口径漂移。
+
+    默认返回旧结构；schema_version="resolved-tender/2.0" 显式生成 v2 快照。
+    历史迁移不推断责任主体或分值，不改写项目数据，也不启用生产阻断。
     """
+    if schema_version not in (None, "1.0", RESOLVED_TENDER_V2):
+        raise ValueError(f"unsupported tender schema version: {schema_version}")
+    if schema_version == RESOLVED_TENDER_V2 and isinstance(parse_bundle, dict) and "resolvedTenderV2" in parse_bundle:
+        parse_bundle = ResolvedTenderV2.model_validate(parse_bundle["resolvedTenderV2"]).model_dump(mode="json")
+    if (
+        schema_version == RESOLVED_TENDER_V2
+        and isinstance(parse_bundle, dict)
+        and parse_bundle.get("schemaVersion") == RESOLVED_TENDER_V2
+    ):
+        native = ResolvedTenderV2.model_validate(parse_bundle).model_dump(mode="json")
+        for key, value in (("company", company), ("organization", organization), ("knowledge", knowledge)):
+            if isinstance(value, dict):
+                native[key] = value
+        return ResolvedTenderV2.model_validate(native).model_dump(mode="json")
     fine_review = fine_review if isinstance(fine_review, dict) else {}
     project = project if isinstance(project, dict) else {}
     bundle = parse_bundle if isinstance(parse_bundle, dict) else {}
@@ -154,7 +174,7 @@ def resolve_tender(
     }
     sources["risk"] = "fineReview+bundle"
 
-    return {
+    resolved = {
         "composition": composition,
         "requirements": requirements,
         "eval": eval_result,
@@ -167,6 +187,7 @@ def resolve_tender(
         "bundle": bundle,
         "sources": sources,
     }
+    return migrate_resolved_tender(resolved) if schema_version == RESOLVED_TENDER_V2 else resolved
 
 
 def _sum_scores(items: list[Any]) -> float | None:
